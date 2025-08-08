@@ -62,7 +62,8 @@ def get_service(
 def update_service(
         service_id: int,
         service_update: ServiceUpdate,
-        db: Session = Depends(get_db)
+        db: Session = Depends(get_db),
+        current_user = Depends(get_current_user)
 ):
     """서비스 편집"""
     service = service_crud.update_service(db=db, service_id=service_id, service_update=service_update)
