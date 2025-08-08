@@ -20,7 +20,6 @@ class Service(Base):
     # 관계 설정
     creator = relationship("Member", back_populates="created_services")
 
-
 class Member(Base):
     __tablename__ = "members"
 
