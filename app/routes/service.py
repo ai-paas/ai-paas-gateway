@@ -6,6 +6,12 @@ from app.crud import service_crud
 from app.schemas import (
     ServiceCreate, ServiceUpdate, ServiceResponse, ServiceListResponse
 )
+from app.auth import (
+    get_current_user,
+    get_current_admin_user,
+    check_member_access,
+    verify_member_access
+)
 
 router = APIRouter(prefix="/services", tags=["services"])
 
@@ -13,7 +19,8 @@ router = APIRouter(prefix="/services", tags=["services"])
 @router.post("/", response_model=ServiceResponse)
 def create_service(
         service: ServiceCreate,
-        db: Session = Depends(get_db)
+        db: Session = Depends(get_db),
+        _: None = Depends(get_current_admin_user)
 ):
     """서비스 생성"""
     return service_crud.create_service(db=db, service=service)
