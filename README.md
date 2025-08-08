@@ -6,7 +6,6 @@
 - 서비스 생성, 조회, 수정, 삭제 (CRUD)
 - 서비스별 워크플로우, 데이터셋, 모델, 프롬프트, 모니터링 관리
 - 서비스 검색 및 페이지네이션
-- 서비스 상세 정보 조회 (관련 모든 리소스 포함)
 
 ### API 엔드포인트
 | 기능 | HTTP 메서드 | 엔드포인트 | 설명 |
@@ -17,11 +16,7 @@
 | 서비스 상세 정보 | GET | `/api/v1/services/{id}/detail` | 서비스 + 관련 리소스 조회 |
 | 서비스 수정 | PUT | `/api/v1/services/{id}` | 서비스 정보 수정 |
 | 서비스 삭제 | DELETE | `/api/v1/services/{id}` | 서비스 소프트 삭제 |
-| 워크플로우 조회 | GET | `/api/v1/services/{id}/workflows` | 서비스 워크플로우 목록 |
-| 데이터셋 조회 | GET | `/api/v1/services/{id}/datasets` | 서비스 데이터셋 목록 |
-| 모델 조회 | GET | `/api/v1/services/{id}/models` | 서비스 모델 목록 |
-| 프롬프트 조회 | GET | `/api/v1/services/{id}/prompts` | 서비스 프롬프트 목록 |
-| 모니터링 조회 | GET | `/api/v1/services/{id}/monitoring` | 서비스 모니터링 목록 |
+ - API 개발 후 계속해서 추가 예정
 
 ## 설치 및 실행
 
@@ -91,11 +86,7 @@ chmod +x run.sh
 ### 주요 테이블
 
 1. **services**: 서비스 기본 정보
-2. **service_workflows**: 서비스-워크플로우 매핑
-3. **service_datasets**: 서비스-데이터셋 매핑
-4. **service_models**: 서비스-모델 매핑
-5. **service_prompts**: 서비스-프롬프트 매핑
-6. **service_monitoring**: 서비스-모니터링 매핑
+2. **members**: 사용자 기본 정보
 
 ## 개발 가이드
 
