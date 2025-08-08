@@ -1,0 +1,100 @@
+# 환경변수 파일 (민감한 정보 포함)
+.env
+.env.local
+.env.production
+.env.development
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# 가상환경
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# 로그 파일
+*.log
+logs/
+
+# 데이터베이스
+*.db
+*.sqlite
+*.sqlite3
+
+# OS 생성 파일
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Alembic
+# alembic/versions/*.py 파일은 버전 관리에 포함해야 하므로 제외하지 않음
+
+# 임시 파일
+*.tmp
+*.temp
+.cache/
+
+# 설정 파일 백업
+*.bak
+*.backup
+
+# 프로덕션 설정
+docker-compose.override.yml
+.dockerignore
+
+# 테스트 커버리지
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+
+# FastAPI 관련
+.pytest_cache/
