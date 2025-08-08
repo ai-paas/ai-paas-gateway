@@ -31,7 +31,8 @@ def get_services(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
         search: Optional[str] = Query(None, description="검색어 (이름)"),
-        db: Session = Depends(get_db)
+        db: Session = Depends(get_db),
+        current_user = Depends(get_current_user)
 ):
     """서비스 목록 조회 (검색 포함)"""
     skip = (page - 1) * size
