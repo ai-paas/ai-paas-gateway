@@ -76,7 +76,7 @@ def update_service(
 def delete_service(
         service_id: int,
         db: Session = Depends(get_db),
-        current_user = Depends(get_current_user)
+        _: None = Depends(get_current_user)
 ):
     """서비스 삭제 (소프트 삭제)"""
     success = service_crud.delete_service(db=db, service_id=service_id)
