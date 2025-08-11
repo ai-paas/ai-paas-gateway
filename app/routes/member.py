@@ -6,8 +6,7 @@ from app.crud import member_crud, service_crud
 from app.auth import (
     get_current_user,
     get_current_admin_user,
-    check_member_access,
-    verify_member_access
+    check_member_access
 )
 from app.schemas import (
     MemberCreate, MemberUpdate, MemberResponse, MemberListResponse
