@@ -50,7 +50,7 @@ def get_services(
 def get_service(
         service_id: int,
         db: Session = Depends(get_db),
-        current_user = Depends(get_current_user)
+        _: None = Depends(get_current_user)
 ):
     """서비스 기본 메타데이터 조회"""
     service = service_crud.get_service(db=db, service_id=service_id)
