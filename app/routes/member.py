@@ -1,13 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from typing import Optional, List
+from typing import Optional
 from app.database import get_db
 from app.crud import member_crud, service_crud
 from app.auth import (
     get_current_user,
     get_current_admin_user,
-    check_member_access,
-    verify_member_access
+    check_member_access
 )
 from app.schemas import (
     MemberCreate, MemberUpdate, MemberResponse, MemberListResponse
