@@ -8,9 +8,7 @@ from app.schemas import (
 )
 from app.auth import (
     get_current_user,
-    get_current_admin_user,
-    check_member_access,
-    verify_member_access
+    get_current_admin_user
 )
 
 router = APIRouter(prefix="/services", tags=["services"])
