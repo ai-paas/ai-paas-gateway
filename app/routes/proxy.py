@@ -210,7 +210,7 @@ async def proxy_status():
 
 
 # 모든 /api/v1/* 경로를 프록시 (기존 라우터와 충돌하지 않도록 우선순위 고려)
-@router.get("/proxy/{path}")
+@router.get("/proxy/{path:path}")
 async def proxy_all_paths(
         path: str,
         request: Request,
