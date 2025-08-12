@@ -8,9 +8,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 class ServiceBase(BaseModel):
     name: str
     description: Optional[str] = None
+    tag: Optional[str] = None
     status: str = "active"
-    created_by: Optional[int] = None  # Integer로 변경
-
 
 class ServiceCreate(ServiceBase):
     pass
@@ -19,16 +18,19 @@ class ServiceCreate(ServiceBase):
 class ServiceUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
-    status: Optional[str] = None
+    tag: Optional[str] = None
 
+class CreatorInfo(BaseModel):
+    id: int
+    name: str
+    member_id: str
 
 class ServiceResponse(ServiceBase):
     model_config = ConfigDict(from_attributes=True)
-
     id: int
+    created_by: Optional[str] = None  # created_by 필드 추가
     created_at: datetime
     updated_at: datetime
-
 
 # Member 스키마
 class MemberBase(BaseModel):

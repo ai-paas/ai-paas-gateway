@@ -18,8 +18,8 @@ router = APIRouter(prefix="/members", tags=["members"])
 @router.post("/", response_model=MemberResponse)
 def create_member(
         member: MemberCreate,
-        db: Session = Depends(get_db),
-        _: None = Depends(get_current_admin_user)
+        db: Session = Depends(get_db)
+        # _: None = Depends(get_current_admin_user)
 ):
     """멤버 생성"""
     # 중복 체크 (member_id - 아이디)

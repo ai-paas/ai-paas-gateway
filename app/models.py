@@ -12,13 +12,14 @@ class Service(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False)
     description = Column(Text)
-    status = Column(String(50), default="active")  # active, inactive, deleted
+    tag = Column(String(255), nullable=True)
+    status = Column(String(50), default="active")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    created_by = Column(Integer, ForeignKey("members.id"))  # 외래키로 변경
+    created_by = Column(String(100), ForeignKey("members.member_id"))
 
     # 관계 설정
-    creator = relationship("Member", back_populates="created_services")
+    creator = relationship("Member", back_populates="created_services", foreign_keys=[created_by])
 
 class Member(Base):
     __tablename__ = "members"
