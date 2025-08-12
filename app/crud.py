@@ -1,4 +1,4 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_
 from typing import List, Optional
 from datetime import datetime
@@ -11,8 +11,12 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class ServiceCRUD:
-    def create_service(self, db: Session, service: ServiceCreate) -> Service:
-        db_service = Service(**service.dict())
+    def create_service(self, db: Session, service: ServiceCreate, created_by: str) -> Service:
+        # ServiceCreate 스키마의 데이터를 dict로 변환하고 created_by 추가
+        service_data = service.dict()
+        service_data['created_by'] = created_by
+
+        db_service = Service(**service_data)
         db.add(db_service)
         db.commit()
         db.refresh(db_service)
@@ -34,18 +38,25 @@ class ServiceCRUD:
             skip: int = 0,
             limit: int = 100,
             search: Optional[str] = None,
-            creator_id: Optional[int] = None
+            creator_name: Optional[str] = None,
+            tag: Optional[str] = None
     ) -> tuple[List[Service], int]:
         query = db.query(Service).filter(Service.status != "deleted")
 
         if search:
             search_filter = f"%{search}%"
             query = query.filter(
-                Service.name.ilike(search_filter)
+                or_(
+                    Service.name.ilike(search_filter),
+                    Service.description.ilike(search_filter)
+                )
             )
 
-        if creator_id:
-            query = query.filter(Service.created_by == creator_id)
+        if creator_name:
+            query = query.filter(Service.created_by.ilike(f"%{creator_name}%"))
+
+        if tag:
+            query = query.filter(Service.tag.ilike(f"%{tag}%"))
 
         total = query.count()
         services = query.offset(skip).limit(limit).all()

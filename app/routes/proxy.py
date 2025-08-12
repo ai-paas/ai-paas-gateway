@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request, Response, Depends, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
+import json
 import httpx
 from typing import Optional
 from app.config import settings
@@ -143,10 +144,6 @@ class ProxyService:
                         logger.warning(f"Header encoding issue for {name}: {e}")
                         response_headers[name] = value.encode('utf-8', errors='ignore').decode('ascii', errors='ignore')
 
-            # 가장 단순한 방법으로 응답 반환
-            from fastapi.responses import JSONResponse
-            import json
-
             try:
                 # JSON 응답인 경우 파싱해서 다시 반환
                 if 'application/json' in response.headers.get('content-type', ''):
@@ -196,7 +193,6 @@ class ProxyService:
 # 전역 ProxyService 인스턴스
 proxy_service = ProxyService()
 
-
 # 프록시 상태 확인
 @router.get("/proxy/status")
 async def proxy_status():
@@ -209,7 +205,7 @@ async def proxy_status():
     }
 
 
-# 모든 /api/v1/* 경로를 프록시 (기존 라우터와 충돌하지 않도록 우선순위 고려)
+# GET 요청 프록시
 @router.get("/proxy/{path:path}")
 async def proxy_all_paths(
         path: str,
@@ -217,6 +213,49 @@ async def proxy_all_paths(
         current_user=Depends(get_current_user)
 ):
     """모든 경로 프록시"""
+    return await proxy_service.forward_request(request, path, current_user)
+
+# POST 요청 프록시
+@router.post("/proxy/{path:path}")
+async def proxy_post(
+        path: str,
+        request: Request,
+        current_user=Depends(get_current_user)
+):
+    """POST 요청 프록시"""
+    return await proxy_service.forward_request(request, path, current_user)
+
+
+# PUT 요청 프록시
+@router.put("/proxy/{path:path}")
+async def proxy_put(
+        path: str,
+        request: Request,
+        current_user=Depends(get_current_user)
+):
+    """PUT 요청 프록시"""
+    return await proxy_service.forward_request(request, path, current_user)
+
+
+# PATCH 요청 프록시
+@router.patch("/proxy/{path:path}")
+async def proxy_patch(
+        path: str,
+        request: Request,
+        current_user=Depends(get_current_user)
+):
+    """PATCH 요청 프록시"""
+    return await proxy_service.forward_request(request, path, current_user)
+
+
+# DELETE 요청 프록시
+@router.delete("/proxy/{path:path}")
+async def proxy_delete(
+        path: str,
+        request: Request,
+        current_user=Depends(get_current_user)
+):
+    """DELETE 요청 프록시"""
     return await proxy_service.forward_request(request, path, current_user)
 
 
