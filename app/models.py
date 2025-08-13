@@ -13,7 +13,6 @@ class Service(Base):
     name = Column(String(255), nullable=False)
     description = Column(Text)
     tag = Column(String(255), nullable=True)
-    status = Column(String(50), default="active")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     created_by = Column(String(100), ForeignKey("members.member_id"))

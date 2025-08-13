@@ -24,12 +24,12 @@ class ServiceCRUD:
 
     def get_service(self, db: Session, service_id: int) -> Optional[Service]:
         return db.query(Service).filter(
-            and_(Service.id == service_id, Service.status != "deleted")
+            and_(Service.id == service_id)
         ).first()
 
     def get_service_with_details(self, db: Session, service_id: int) -> Optional[Service]:
         return db.query(Service).filter(
-            and_(Service.id == service_id, Service.status != "deleted")
+            and_(Service.id == service_id)
         ).first()
 
     def get_services(
@@ -41,7 +41,7 @@ class ServiceCRUD:
             creator_name: Optional[str] = None,
             tag: Optional[str] = None
     ) -> tuple[List[Service], int]:
-        query = db.query(Service).filter(Service.status != "deleted")
+        query = db.query(Service)
 
         if search:
             search_filter = f"%{search}%"
@@ -75,7 +75,6 @@ class ServiceCRUD:
     def delete_service(self, db: Session, service_id: int) -> bool:
         db_service = self.get_service(db, service_id)
         if db_service:
-            db_service.status = "deleted"
             db.commit()
             return True
         return False
