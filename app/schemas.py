@@ -9,11 +9,9 @@ class ServiceBase(BaseModel):
     name: str
     description: Optional[str] = None
     tag: Optional[str] = None
-    status: str = "active"
 
 class ServiceCreate(ServiceBase):
     pass
-
 
 class ServiceUpdate(BaseModel):
     name: Optional[str] = None
