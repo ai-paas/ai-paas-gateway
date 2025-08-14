@@ -1,6 +1,10 @@
 from pydantic import BaseModel, ConfigDict, EmailStr
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, TYPE_CHECKING
 from datetime import datetime
+
+# 타입 체킹할 때만 import (순환 참조 방지)
+if TYPE_CHECKING:
+    from .service import ServiceResponse
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -47,18 +51,11 @@ class MemberResponse(BaseModel):
 
 
 class MemberDetailResponse(MemberResponse):
-    created_services: List['ServiceResponse'] = []
+    created_services: List['ServiceResponse'] = []  # 문자열로 forward reference 사용
 
 
 class MemberListResponse(BaseModel):
     members: List[MemberResponse]
-    total: int
-    page: int
-    size: int
-
-# 리스트 응답
-class ServiceListResponse(BaseModel):
-    services: List[ServiceResponse]
     total: int
     page: int
     size: int
