@@ -3,12 +3,12 @@ from sqlalchemy.orm import Session
 from typing import Optional
 from app.database import get_db
 from app.crud import service_crud
-from app.schemas import (
-    ServiceCreate, ServiceUpdate, ServiceResponse, ServiceListResponse
-)
 from app.auth import (
     get_current_user,
     get_current_admin_user
+)
+from app.schemas.service import (
+    ServiceCreate, ServiceUpdate, ServiceResponse, ServiceListResponse
 )
 
 router = APIRouter(prefix="/services", tags=["services"])
