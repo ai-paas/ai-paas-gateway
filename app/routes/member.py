@@ -8,7 +8,7 @@ from app.auth import (
     get_current_admin_user,
     check_member_access
 )
-from app.schemas import (
+from app.schemas.member import (
     MemberCreate, MemberUpdate, MemberResponse, MemberListResponse
 )
 

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.schemas import (
+from app.schemas.member import (
     LoginRequest, TokenResponse, RefreshTokenRequest,
     ChangePasswordRequest, MemberResponse
 )
