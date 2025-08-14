@@ -4,6 +4,12 @@ from datetime import datetime
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
+# 공통 스키마 직접 정의 (중복이지만 안전함)
+class CreatorInfo(BaseModel):
+    id: int
+    name: str
+    member_id: str
+
 ## Surro API 관련 schemas
 # Workflow 스키마
 class WorkflowBase(BaseModel):
