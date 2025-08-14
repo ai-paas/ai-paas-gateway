@@ -1,34 +1,8 @@
 from pydantic import BaseModel, ConfigDict, EmailStr
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
+
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
-
-
-# Service 스키마
-class ServiceBase(BaseModel):
-    name: str
-    description: Optional[str] = None
-    status: str = "active"
-    created_by: Optional[int] = None  # Integer로 변경
-
-
-class ServiceCreate(ServiceBase):
-    pass
-
-
-class ServiceUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    status: Optional[str] = None
-
-
-class ServiceResponse(ServiceBase):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    created_at: datetime
-    updated_at: datetime
-
 
 # Member 스키마
 class MemberBase(BaseModel):
@@ -82,13 +56,13 @@ class MemberListResponse(BaseModel):
     page: int
     size: int
 
-
 # 리스트 응답
 class ServiceListResponse(BaseModel):
     services: List[ServiceResponse]
     total: int
     page: int
     size: int
+
 
 # 인증 관련 스키마
 class LoginRequest(BaseModel):
