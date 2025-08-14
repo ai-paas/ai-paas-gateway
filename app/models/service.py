@@ -1,7 +1,7 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, backref
 from datetime import datetime
-from . import Base  # __init__.py에서 Base import
+from app.models.base import Base
 
 class Service(Base):
     __tablename__ = "services"
@@ -12,7 +12,7 @@ class Service(Base):
     tag = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    created_by = Column(String(100), ForeignKey("members.member_id"))
+    created_by = Column(String(100), ForeignKey("members.member_id"), nullable=False)
 
-    # 관계 설정
-    creator = relationship("Member", back_populates="created_services", foreign_keys=[created_by])
+    # backref로 Member에 created_services 속성 자동 생성
+    creator = relationship("Member", backref="created_services")
