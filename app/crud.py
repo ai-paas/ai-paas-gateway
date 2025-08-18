@@ -181,7 +181,7 @@ class MemberCRUD:
             return True
         return False
 
-## Surro API 관련 crud
+## Surro API 관련 cruds
 class WorkflowCRUD:
     def create_workflow(self, db: Session, workflow: WorkflowCreate, created_by: str,
                         workflow_id: str) -> Workflow:
