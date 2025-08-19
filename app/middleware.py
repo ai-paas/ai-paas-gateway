@@ -5,7 +5,7 @@ from starlette.responses import Response
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.auth import AuthService
-from app.crud import member_crud
+from app.cruds import member_crud
 import re
 
 
