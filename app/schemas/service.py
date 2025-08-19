@@ -34,6 +34,7 @@ class ServiceResponse(ServiceBase):
     created_at: datetime
     updated_at: datetime
 
+
 # 리스트 응답
 class ServiceListResponse(BaseModel):
     data: List[ServiceResponse]
