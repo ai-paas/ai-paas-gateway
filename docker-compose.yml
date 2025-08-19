@@ -1,0 +1,26 @@
+services:
+  # AI PaaS Gateway Application  
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    network_mode: host
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DEBUG=${DEBUG:-true}
+      # External API Configuration (workflow)
+      - EXTERNAL_WORKFLOW_API_URL=${EXTERNAL_WORKFLOW_API_URL:-}
+      - EXTERNAL_WORKFLOW_API_KEY=${EXTERNAL_WORKFLOW_API_KEY:-}
+      - EXTERNAL_API_ENABLED=${EXTERNAL_API_ENABLED:-false}
+      # External API Configuration (proxy)
+      - EXTERNAL_API_USERNAME=${EXTERNAL_API_USERNAME:-}
+      - EXTERNAL_API_PASSWORD=${EXTERNAL_API_PASSWORD:-}
+      - PROXY_TARGET_BASE_URL=${PROXY_TARGET_BASE_URL:-}
+      - PROXY_TARGET_PATH_PREFIX=${PROXY_TARGET_PATH_PREFIX:-/api/v1}
+      # Proxy Configuration
+      - PROXY_ENABLED=${PROXY_ENABLED:-false}
+    volumes:
+      - .:/app  # Mount source code for development
+    restart: unless-stopped
