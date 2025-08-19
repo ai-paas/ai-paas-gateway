@@ -1,16 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from typing import Optional, List
+from typing import Optional
 from app.database import get_db
-from app.crud import service_crud
-from app.schemas import (
-    ServiceCreate, ServiceUpdate, ServiceResponse, ServiceListResponse
-)
+from app.cruds import service_crud
 from app.auth import (
     get_current_user,
-    get_current_admin_user,
-    check_member_access,
-    verify_member_access
+    get_current_admin_user
+)
+from app.schemas.service import (
+    ServiceCreate, ServiceUpdate, ServiceResponse, ServiceListResponse
 )
 
 router = APIRouter(prefix="/services", tags=["services"])
@@ -20,10 +18,10 @@ router = APIRouter(prefix="/services", tags=["services"])
 def create_service(
         service: ServiceCreate,
         db: Session = Depends(get_db),
-        _: None = Depends(get_current_admin_user)
+        current_user = Depends(get_current_admin_user)
 ):
     """서비스 생성"""
-    return service_crud.create_service(db=db, service=service)
+    return service_crud.create_service(db=db, service=service, created_by=current_user.member_id)
 
 
 @router.get("/", response_model=ServiceListResponse)
@@ -31,14 +29,15 @@ def get_services(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
         search: Optional[str] = Query(None, description="검색어 (이름)"),
-        db: Session = Depends(get_db)
+        db: Session = Depends(get_db),
+        _: None = Depends(get_current_user)
 ):
     """서비스 목록 조회 (검색 포함)"""
     skip = (page - 1) * size
     services, total = service_crud.get_services(db=db, skip=skip, limit=size, search=search)
 
     return ServiceListResponse(
-        services=services,
+        data=services,
         total=total,
         page=page,
         size=size
@@ -48,7 +47,8 @@ def get_services(
 @router.get("/{service_id}", response_model=ServiceResponse)
 def get_service(
         service_id: int,
-        db: Session = Depends(get_db)
+        db: Session = Depends(get_db),
+        _: None = Depends(get_current_user)
 ):
     """서비스 기본 메타데이터 조회"""
     service = service_crud.get_service(db=db, service_id=service_id)
@@ -56,13 +56,24 @@ def get_service(
         raise HTTPException(status_code=404, detail="Service not found")
     return service
 
+
 @router.put("/{service_id}", response_model=ServiceResponse)
 def update_service(
         service_id: int,
         service_update: ServiceUpdate,
-        db: Session = Depends(get_db)
+        db: Session = Depends(get_db),
+        current_user=Depends(get_current_user)  # 현재 사용자 정보 추가
 ):
     """서비스 편집"""
+    # 기존 서비스 조회하여 권한 확인 (선택사항)
+    existing_service = service_crud.get_service(db=db, service_id=service_id)
+    if not existing_service:
+        raise HTTPException(status_code=404, detail="Service not found")
+
+    # 관리자가 아닌 경우 본인이 만든 서비스만 수정 가능하도록 제한 (선택사항)
+    if current_user.role != "admin" and existing_service.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
     service = service_crud.update_service(db=db, service_id=service_id, service_update=service_update)
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
@@ -72,9 +83,19 @@ def update_service(
 @router.delete("/{service_id}")
 def delete_service(
         service_id: int,
-        db: Session = Depends(get_db)
+        db: Session = Depends(get_db),
+        current_user=Depends(get_current_user)  # 현재 사용자 정보 추가
 ):
     """서비스 삭제 (소프트 삭제)"""
+    # 기존 서비스 조회하여 권한 확인 (선택사항)
+    existing_service = service_crud.get_service(db=db, service_id=service_id)
+    if not existing_service:
+        raise HTTPException(status_code=404, detail="Service not found")
+
+    # 관리자가 아닌 경우 본인이 만든 서비스만 삭제 가능하도록 제한 (선택사항)
+    if current_user.role != "admin" and existing_service.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
     success = service_crud.delete_service(db=db, service_id=service_id)
     if not success:
         raise HTTPException(status_code=404, detail="Service not found")
