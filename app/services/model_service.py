@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class ModelService:
-    """모델 관련 외부 API 서비스 (인증 포함)"""
+    """모델 관련 외부 API 서비스 (인증 포함) - 사용자별 필터링 지원"""
 
     def __init__(self):
         self.client = httpx.AsyncClient(
@@ -174,7 +174,7 @@ class ModelService:
             search: Optional[str] = None,
             user_info: Optional[Dict[str, str]] = None
     ) -> List[ModelResponse]:
-        """모델 목록 조회"""
+        """모든 모델 목록 조회 (필터링용)"""
         try:
             url = f"{self.base_url}/models"
             params = {
@@ -239,6 +239,43 @@ class ModelService:
             raise
         except Exception as e:
             logger.error(f"Error getting models: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
+    async def get_models_by_ids(
+            self,
+            model_ids: List[int],
+            user_info: Optional[Dict[str, str]] = None
+    ) -> List[ModelResponse]:
+        """특정 ID 목록으로 모델들 조회 (배치 조회 최적화)"""
+        try:
+            if not model_ids:
+                return []
+
+            # 개별 모델을 병렬로 조회
+            tasks = []
+            for model_id in model_ids:
+                task = self.get_model(model_id, user_info)
+                tasks.append(task)
+
+            # 병렬 실행
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # 성공한 결과만 필터링
+            models = []
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.warning(f"Failed to get model {model_ids[i]}: {result}")
+                    continue
+                if result is not None:
+                    models.append(result)
+
+            return models
+
+        except Exception as e:
+            logger.error(f"Error getting models by IDs {model_ids}: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal error: {str(e)}"
@@ -442,7 +479,6 @@ class ModelService:
                 detail=f"Internal error: {str(e)}"
             )
 
-    # 나머지 메서드들도 동일한 방식으로 수정...
     async def test_model(
             self,
             model_id: int,
@@ -487,6 +523,150 @@ class ModelService:
             raise
         except Exception as e:
             logger.error(f"Error testing model {model_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
+    async def get_model_types(
+            self,
+            user_info: Optional[Dict[str, str]] = None,
+            type_name: Optional[str] = None
+    ):
+        """모델 목록에서 타입 정보 추출"""
+        try:
+            models = await self.get_models(user_info=user_info)
+
+            type_list = []
+            seen_ids = set()
+
+            for model in models:
+                # model은 ModelResponse 객체일 가능성이 높음
+                type_info = getattr(model, "type_info", None)
+                if not type_info:
+                    continue
+
+                # dict 변환 (pydantic model일 경우)
+                if hasattr(type_info, "model_dump"):
+                    type_dict = type_info.model_dump()
+                else:
+                    type_dict = dict(type_info)
+
+                # 중복 제거
+                if type_dict["id"] not in seen_ids:
+                    type_list.append(type_dict)
+                    seen_ids.add(type_dict["id"])
+
+            # type_name으로 필터링
+            if type_name:
+                matched = next((t for t in type_list if t.get("name") == type_name), None)
+                if not matched:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Model type '{type_name}' not found"
+                    )
+                return matched  # 단일 객체 반환
+
+            return type_list
+
+        except Exception as e:
+            logger.error(f"Error extracting model types: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
+    async def get_model_providers(
+            self,
+            user_info: Optional[Dict[str, str]] = None,
+            provider_name: Optional[str] = None
+    ):
+        """모델 목록에서 프로바이더 정보 추출"""
+        try:
+            models = await self.get_models(user_info=user_info)
+
+            provider_list = []
+            seen_ids = set()
+
+            for model in models:
+                # model은 ModelResponse 객체일 가능성이 높음
+                provider_info = getattr(model, "provider_info", None)
+                if not provider_info:
+                    continue
+
+                # dict 변환 (pydantic model일 경우)
+                if hasattr(provider_info, "model_dump"):
+                    provider_dict = provider_info.model_dump()
+                else:
+                    provider_dict = dict(provider_info)
+
+                # 중복 제거
+                if provider_dict["id"] not in seen_ids:
+                    provider_list.append(provider_dict)
+                    seen_ids.add(provider_dict["id"])
+
+            # provider_name 필터링
+            if provider_name:
+                matched = next((t for t in provider_list if t.get("name") == provider_name), None)
+                if not matched:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Model provider '{provider_name}' not found"
+                    )
+                return matched  # 단일 객체 반환
+
+            return provider_list
+
+        except Exception as e:
+            logger.error(f"Error extracting model providers: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
+    async def get_model_formats(
+            self,
+            user_info: Optional[Dict[str, str]] = None,
+            format_name: Optional[str] = None
+    ):
+        """모델 목록에서 포맷 정보 추출"""
+        try:
+            models = await self.get_models(user_info=user_info)
+
+            format_list = []
+            seen_ids = set()
+
+            for model in models:
+                # model은 ModelResponse 객체일 가능성이 높음
+                format_info = getattr(model, "format_info", None)
+                if not format_info:
+                    continue
+
+                # dict 변환 (pydantic model일 경우)
+                if hasattr(format_info, "model_dump"):
+                    format_dict = format_info.model_dump()
+                else:
+                    format_dict = dict(format_info)
+
+                # 중복 제거
+                if format_dict["id"] not in seen_ids:
+                    format_list.append(format_dict)
+                    seen_ids.add(format_dict["id"])
+
+            # format_name 필터링
+            if format_name:
+                matched = next((t for t in format_list if t.get("name") == format_name), None)
+                if not matched:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Model format '{format_name}' not found"
+                    )
+                return matched  # 단일 객체 반환
+
+            return format_list
+
+        except Exception as e:
+            logger.error(f"Error extracting model formats: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal error: {str(e)}"

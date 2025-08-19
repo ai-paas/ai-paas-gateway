@@ -8,7 +8,7 @@ from app.schemas.model import ModelCreate, ModelUpdate
 
 
 class ModelCRUD:
-    """모델 CRUD 작업 클래스"""
+    """모델 CRUD 작업 클래스 - Inno DB에서 사용자별 모델 ID만 관리"""
 
     def get_model(self, db: Session, model_id: int) -> Optional[Model]:
         """ID로 모델 조회"""
@@ -86,8 +86,74 @@ class ModelCRUD:
 
         return query.count()
 
+    def get_models_by_member_id(
+            self,
+            db: Session,
+            member_id: str,
+            skip: int = 0,
+            limit: int = 100
+    ) -> List[int]:
+        """특정 사용자가 만든 모델의 ID 목록 조회 (Surro API ID)"""
+        models = db.query(Model).filter(
+            and_(
+                Model.created_by == member_id,
+                Model.deleted_at.is_(None)
+            )
+        ).offset(skip).limit(limit).all()
+
+        # Surro API의 모델 ID만 반환
+        return [model.surro_model_id for model in models if model.surro_model_id]
+
+    def get_model_by_surro_id(self, db: Session, surro_model_id: int, member_id: str) -> Optional[Model]:
+        """Surro 모델 ID와 멤버 ID로 모델 조회"""
+        return db.query(Model).filter(
+            and_(
+                Model.surro_model_id == surro_model_id,
+                Model.created_by == member_id,
+                Model.deleted_at.is_(None)
+            )
+        ).first()
+
+    def create_model_mapping(
+            self,
+            db: Session,
+            surro_model_id: int,
+            member_id: str,
+            model_name: str = None
+    ) -> Model:
+        """Surro 모델과 Inno 사용자 매핑 생성 (간소화된 버전)"""
+        db_model = Model(
+            surro_model_id=surro_model_id,  # Surro API의 모델 ID
+            name=model_name or f"Model_{surro_model_id}",
+            created_by=member_id,
+            updated_by=member_id
+        )
+        db.add(db_model)
+        db.commit()
+        db.refresh(db_model)
+        return db_model
+
+    def delete_model_mapping(self, db: Session, surro_model_id: int, member_id: str) -> bool:
+        """모델 매핑 소프트 삭제"""
+        db_model = self.get_model_by_surro_id(db, surro_model_id, member_id)
+        if not db_model:
+            return False
+
+        db_model.deleted_at = datetime.utcnow()
+        db_model.deleted_by = member_id
+        db_model.is_active = False
+
+        db.commit()
+        return True
+
+    def check_model_ownership(self, db: Session, surro_model_id: int, member_id: str) -> bool:
+        """사용자가 해당 모델의 소유자인지 확인"""
+        model = self.get_model_by_surro_id(db, surro_model_id, member_id)
+        return model is not None
+
+    # 기존 메서드들은 호환성을 위해 유지하되, 새로운 구조에 맞게 수정할 수 있음
     def get_model_by_name(self, db: Session, name: str, provider_id: int) -> Optional[Model]:
-        """이름과 프로바이더로 모델 조회"""
+        """이름과 프로바이더로 모델 조회 (기존 호환성 유지)"""
         return db.query(Model).filter(
             and_(
                 Model.name == name,
@@ -97,7 +163,7 @@ class ModelCRUD:
         ).first()
 
     def create_model(self, db: Session, model: ModelCreate, created_by: str) -> Model:
-        """모델 생성"""
+        """모델 생성 (기존 호환성 유지)"""
         db_model = Model(
             name=model.name,
             description=model.description,
