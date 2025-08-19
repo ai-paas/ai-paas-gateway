@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.config import settings
-from app.routes import service, member, auth, workflow, external_api_test
+from app.routes import service, member, auth, workflow, external_api_test, model
 import uvicorn
 import logging
 
@@ -59,6 +59,7 @@ app.include_router(service.router, prefix=settings.API_V1_STR)
 app.include_router(member.router, prefix=settings.API_V1_STR)
 app.include_router(workflow.router, prefix=settings.API_V1_STR)
 app.include_router(external_api_test.router, prefix=settings.API_V1_STR)
+app.include_router(model.router, prefix=settings.API_V1_STR)
 
 # 프록시 라우터는 가장 마지막에 등록 (모든 경로를 캐치하므로)
 if settings.PROXY_ENABLED:
