@@ -94,7 +94,7 @@ class MemberCRUD:
     def create_member(self, db: Session, member: MemberCreate) -> Member:
         # 비밀번호 해싱
         hashed_password = self.get_password_hash(member.password)
-        member_dict = member.dict(exclude={'password'})
+        member_dict = member.dict(exclude={'password', 'password_confirm'})
         member_dict['password_hash'] = hashed_password
 
         db_member = Member(**member_dict)

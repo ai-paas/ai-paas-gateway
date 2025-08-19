@@ -11,7 +11,7 @@ from app.schemas.model import (
     ModelCreate, ModelUpdate, ModelResponse,
     ModelListResponse, ModelCreateRequest,
     ModelTestRequest, ModelTestResponse,
-    ExternalModelResponse
+    ExternalModelResponse, InnoUserInfo, EnhancedModelResponse
 )
 from app.services.model_service import model_service
 from app.models import Member
@@ -21,7 +21,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/models", tags=["Models"])
 
 
-@router.get("", response_model=List[ModelResponse])
+def _create_inno_user_info(user: Member) -> InnoUserInfo:
+    """Member 객체에서 InnoUserInfo 생성"""
+    return InnoUserInfo(
+        member_id=user.member_id,
+        role=user.role,
+        name=user.name
+    )
+
+
+@router.get("", response_model=List[EnhancedModelResponse])
 async def get_models(
         skip: int = Query(0, ge=0, description="건너뛸 항목 수"),
         limit: int = Query(100, ge=1, le=1000, description="반환할 최대 항목 수"),
@@ -33,16 +42,28 @@ async def get_models(
         current_user: Member = Depends(get_current_user)
 ):
     """
-    모델 목록 조회
+    사용자별 모델 목록 조회
 
-    - 외부 API를 통해 모델 목록을 가져옵니다.
-    - 필터링 및 검색 기능을 제공합니다.
+    - 현재 로그인한 사용자가 만든 모델만 반환합니다.
+    - Inno DB에서 사용자의 모델 ID 목록을 가져온 후, Surro API로 상세 정보를 조회합니다.
     """
     try:
-        # 외부 API 호출
-        models = await model_service.get_models(
+        # 1. Inno DB에서 현재 사용자가 만든 모델의 Surro ID 목록 조회
+        user_model_ids = model_crud.get_models_by_member_id(
+            db,
+            current_user.member_id,
             skip=skip,
-            limit=limit,
+            limit=limit
+        )
+
+        if not user_model_ids:
+            # 사용자가 만든 모델이 없는 경우 빈 리스트 반환
+            return []
+
+        # 2. Surro API에서 전체 모델 목록 조회
+        all_surro_models = await model_service.get_models(
+            skip=0,  # 전체 조회 후 필터링
+            limit=1000,  # 충분히 큰 값으로 설정
             provider_id=provider_id,
             type_id=type_id,
             format_id=format_id,
@@ -53,27 +74,137 @@ async def get_models(
                 'name': current_user.name
             }
         )
-        return models
+
+        # 3. 사용자가 소유한 모델만 필터링
+        user_surro_models = []
+        for surro_model in all_surro_models:
+            if surro_model.id in user_model_ids:
+                user_surro_models.append(surro_model)
+
+        # 4. Inno 사용자 정보 생성
+        inno_user_info = _create_inno_user_info(current_user)
+
+        # 5. 통합 응답 생성
+        enhanced_models = []
+        for surro_model in user_surro_models:
+            enhanced_model = EnhancedModelResponse(
+                surro_data=surro_model,
+                inno_data=inno_user_info
+            )
+            enhanced_models.append(enhanced_model)
+
+        logger.info(f"Retrieved {len(enhanced_models)} models for user {current_user.member_id}")
+        return enhanced_models
+
     except Exception as e:
-        logger.error(f"Error getting models: {str(e)}")
+        logger.error(f"Error getting user models for {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get models: {str(e)}"
         )
 
 
+@router.get("/providers")
+async def get_providers(
+        db: Session = Depends(get_db),
+        provider_name: str = Query(None),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    사용 가능한 프로바이더 목록 조회
+    """
+    try:
+        providers = await model_service.get_model_providers(
+            user_info={
+                'member_id': current_user.member_id,
+                'role': current_user.role,
+                'name': current_user.name
+            },
+            provider_name=provider_name
+        )
+        return providers
+    except Exception as e:
+        logger.error(f"Error getting providers: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get providers: {str(e)}"
+        )
+
+
+@router.get("/types")
+async def get_model_types(
+        db: Session = Depends(get_db),
+        type_name: str = Query(None),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    사용 가능한 모델 타입 목록 조회
+    """
+    try:
+        types = await model_service.get_model_types(
+            user_info={
+                'member_id': current_user.member_id,
+                'role': current_user.role,
+                'name': current_user.name
+            },
+            type_name=type_name
+        )
+        return types
+    except Exception as e:
+        logger.error(f"Error getting model types: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get model types: {str(e)}"
+        )
+
+
+@router.get("/formats")
+async def get_model_formats(
+        db: Session = Depends(get_db),
+        format_name: str = Query(None),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    사용 가능한 모델 포맷 목록 조회
+    """
+    try:
+        formats = await model_service.get_model_formats(
+            user_info={
+                'member_id': current_user.member_id,
+                'role': current_user.role,
+                'name': current_user.name
+            },
+            format_name=format_name
+        )
+        return formats
+    except Exception as e:
+        logger.error(f"Error getting model formats: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get model formats: {str(e)}"
+        )
+
+
 @router.get("/{model_id}", response_model=ModelResponse)
 async def get_model(
-        model_id: int = Path(..., description="모델 ID"),
+        model_id: int = Path(..., description="모델 ID (Surro API 모델 ID)"),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
     """
     특정 모델 상세 정보 조회
 
-    - 모델 ID로 특정 모델의 상세 정보를 조회합니다.
+    - 현재 사용자가 소유한 모델인지 확인 후 상세 정보를 반환합니다.
     """
     try:
+        # 1. 사용자가 해당 모델을 소유하고 있는지 확인
+        if not model_crud.check_model_ownership(db, model_id, current_user.member_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Model {model_id} not found or access denied"
+            )
+
+        # 2. Surro API에서 모델 상세 정보 조회
         model = await model_service.get_model(
             model_id=model_id,
             user_info={
@@ -82,16 +213,19 @@ async def get_model(
                 'name': current_user.name
             }
         )
+
         if not model:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Model {model_id} not found"
             )
+
         return model
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting model {model_id}: {str(e)}")
+        logger.error(f"Error getting model {model_id} for user {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get model: {str(e)}"
@@ -114,8 +248,7 @@ async def create_model(
     """
     새 모델 생성
 
-    - 모델 메타데이터와 선택적으로 파일을 업로드합니다.
-    - multipart/form-data 형식으로 전송해야 합니다.
+    - Surro API에 모델을 생성한 후, Inno DB에 사용자-모델 매핑을 저장합니다.
     """
     try:
         # 파일 처리
@@ -136,7 +269,7 @@ async def create_model(
             registry_schema=registry_schema
         )
 
-        # 외부 API를 통해 모델 생성
+        # 1. Surro API를 통해 모델 생성
         created_model = await model_service.create_model(
             model_data=model_data,
             file_data=file_data,
@@ -148,70 +281,51 @@ async def create_model(
             }
         )
 
+        # 2. Inno DB에 사용자-모델 매핑 저장
+        try:
+            model_crud.create_model_mapping(
+                db=db,
+                surro_model_id=created_model.id,
+                member_id=current_user.member_id,
+                model_name=created_model.name
+            )
+            logger.info(f"Created model mapping: surro_id={created_model.id}, member_id={current_user.member_id}")
+        except Exception as mapping_error:
+            logger.error(f"Failed to create model mapping: {str(mapping_error)}")
+            # 매핑 저장에 실패해도 Surro API에는 이미 생성되었으므로, 경고만 로그
+            logger.warning(f"Model {created_model.id} created in Surro API but mapping failed")
+
         return created_model
 
     except Exception as e:
-        logger.error(f"Error creating model: {str(e)}")
+        logger.error(f"Error creating model for user {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create model: {str(e)}"
         )
 
 
-@router.put("/{model_id}", response_model=ModelResponse)
-async def update_model(
-        model_id: int = Path(..., description="모델 ID"),
-        model_update: ModelUpdate = ...,
+@router.delete("/{model_id}")
+async def delete_model(
+        model_id: int = Path(..., description="모델 ID (Surro API 모델 ID)"),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    모델 정보 수정
-
-    - 기존 모델의 메타데이터를 수정합니다.
-    """
-    try:
-        updated_model = await model_service.update_model(
-            model_id=model_id,
-            model_data=model_update,
-            user_info={
-                'member_id': current_user.member_id,
-                'role': current_user.role,
-                'name': current_user.name
-            }
-        )
-
-        if not updated_model:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Model {model_id} not found"
-            )
-
-        return updated_model
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error updating model {model_id}: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update model: {str(e)}"
-        )
-
-
-@router.delete("/{model_id}")
-async def delete_model(
-        model_id: int = Path(..., description="모델 ID"),
-        db: Session = Depends(get_db),
-        current_user: Member = Depends(get_current_admin_user)  # 관리자만 삭제 가능
-):
-    """
     모델 삭제
 
-    - 관리자 권한이 필요합니다.
-    - 소프트 삭제를 수행합니다.
+    - 현재 사용자가 소유한 모델만 삭제할 수 있습니다.
+    - Surro API에서 모델을 삭제한 후, Inno DB의 매핑도 삭제합니다.
     """
     try:
+        # 1. 사용자가 해당 모델을 소유하고 있는지 확인
+        if not model_crud.check_model_ownership(db, model_id, current_user.member_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Model {model_id} not found or access denied"
+            )
+
+        # 2. Surro API에서 모델 삭제
         success = await model_service.delete_model(
             model_id=model_id,
             user_info={
@@ -224,15 +338,19 @@ async def delete_model(
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Model {model_id} not found"
+                detail=f"Model {model_id} not found in Surro API"
             )
 
+        # 3. Inno DB에서 매핑 삭제
+        model_crud.delete_model_mapping(db, model_id, current_user.member_id)
+
+        logger.info(f"Deleted model {model_id} and mapping for user {current_user.member_id}")
         return {"message": f"Model {model_id} deleted successfully"}
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error deleting model {model_id}: {str(e)}")
+        logger.error(f"Error deleting model {model_id} for user {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete model: {str(e)}"
@@ -241,7 +359,7 @@ async def delete_model(
 
 @router.post("/{model_id}/test", response_model=ModelTestResponse)
 async def test_model(
-        model_id: int = Path(..., description="모델 ID"),
+        model_id: int = Path(..., description="모델 ID (Surro API 모델 ID)"),
         test_request: ModelTestRequest = ...,
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
@@ -249,11 +367,18 @@ async def test_model(
     """
     모델 테스트 실행
 
-    - 특정 모델을 테스트 데이터로 실행합니다.
-    - 결과와 실행 시간을 반환합니다.
+    - 현재 사용자가 소유한 모델만 테스트할 수 있습니다.
     """
     try:
-        result = await model_service.test_model(
+        # 1. 사용자가 해당 모델을 소유하고 있는지 확인
+        if not model_crud.check_model_ownership(db, model_id, current_user.member_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Model {model_id} not found or access denied"
+            )
+
+        # 2. Surro API를 통해 모델 테스트
+        test_result = await model_service.test_model(
             model_id=model_id,
             input_data=test_request.input_data,
             parameters=test_request.parameters,
@@ -264,131 +389,13 @@ async def test_model(
             }
         )
 
-        return ModelTestResponse(
-            model_id=model_id,
-            status=result.get('status', 'completed'),
-            output=result.get('output'),
-            error=result.get('error'),
-            execution_time=result.get('execution_time')
-        )
-
-    except Exception as e:
-        logger.error(f"Error testing model {model_id}: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to test model: {str(e)}"
-        )
-
-
-@router.get("/{model_id}/registry")
-async def get_model_registry(
-        model_id: int = Path(..., description="모델 ID"),
-        db: Session = Depends(get_db),
-        current_user: Member = Depends(get_current_user)
-):
-    """
-    모델 레지스트리 정보 조회
-
-    - 모델의 MLflow 레지스트리 정보를 조회합니다.
-    """
-    try:
-        registry = await model_service.get_model_registry(
-            model_id=model_id,
-            user_info={
-                'member_id': current_user.member_id,
-                'role': current_user.role,
-                'name': current_user.name
-            }
-        )
-
-        if not registry:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Registry for model {model_id} not found"
-            )
-
-        return registry
+        return ModelTestResponse(**test_result)
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting registry for model {model_id}: {str(e)}")
+        logger.error(f"Error testing model {model_id} for user {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get model registry: {str(e)}"
-        )
-
-
-@router.get("/providers/list")
-async def get_providers(
-        db: Session = Depends(get_db),
-        current_user: Member = Depends(get_current_user)
-):
-    """
-    사용 가능한 프로바이더 목록 조회
-    """
-    try:
-        providers = await model_service.get_providers(
-            user_info={
-                'member_id': current_user.member_id,
-                'role': current_user.role,
-                'name': current_user.name
-            }
-        )
-        return providers
-    except Exception as e:
-        logger.error(f"Error getting providers: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get providers: {str(e)}"
-        )
-
-
-@router.get("/types/list")
-async def get_model_types(
-        db: Session = Depends(get_db),
-        current_user: Member = Depends(get_current_user)
-):
-    """
-    사용 가능한 모델 타입 목록 조회
-    """
-    try:
-        types = await model_service.get_model_types(
-            user_info={
-                'member_id': current_user.member_id,
-                'role': current_user.role,
-                'name': current_user.name
-            }
-        )
-        return types
-    except Exception as e:
-        logger.error(f"Error getting model types: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get model types: {str(e)}"
-        )
-
-
-@router.get("/formats/list")
-async def get_model_formats(
-        db: Session = Depends(get_db),
-        current_user: Member = Depends(get_current_user)
-):
-    """
-    사용 가능한 모델 포맷 목록 조회
-    """
-    try:
-        formats = await model_service.get_model_formats(
-            user_info={
-                'member_id': current_user.member_id,
-                'role': current_user.role,
-                'name': current_user.name
-            }
-        )
-        return formats
-    except Exception as e:
-        logger.error(f"Error getting model formats: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get model formats: {str(e)}"
+            detail=f"Failed to test model: {str(e)}"
         )

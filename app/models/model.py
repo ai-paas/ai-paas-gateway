@@ -1,61 +1,91 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean
-from sqlalchemy.orm import relationship
-from datetime import datetime
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Index
+from sqlalchemy.sql import func
 from . import Base
 
 
 class Model(Base):
-    """모델 정보 테이블"""
+    """
+    간소화된 모델 매핑 테이블
+    - Surro API의 모델 ID와 Inno 사용자 매핑만 저장
+    - 나머지 상세 정보는 Surro API에서 실시간 조회
+    """
     __tablename__ = "models"
 
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(255), nullable=False, index=True, comment="모델 이름")
-    description = Column(Text, nullable=False, comment="모델 설명")
+    # 기본 키
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True, comment="Inno DB 내부 ID")
 
-    # 외부 참조 ID들 (실제 Foreign Key는 외부 서비스에 있음)
-    provider_id = Column(Integer, nullable=False, comment="프로바이더 ID")
-    type_id = Column(Integer, nullable=False, comment="모델 타입 ID")
-    format_id = Column(Integer, nullable=False, comment="모델 포맷 ID")
-    parent_model_id = Column(Integer, nullable=True, comment="부모 모델 ID")
+    # 핵심 매핑 정보
+    surro_model_id = Column(Integer, nullable=False, index=True, comment="Surro API 모델 ID")
+    created_by = Column(String(50), nullable=False, index=True, comment="생성자 member_id")
 
-    # 모델 레지스트리 관련
-    registry_schema = Column(Text, nullable=True, comment="모델 레지스트리 스키마")
-    artifact_path = Column(String(500), nullable=True, comment="모델 아티팩트 경로")
-    uri = Column(String(500), nullable=True, comment="모델 URI")
-
-    # 상태 관리
-    is_active = Column(Boolean, default=True, nullable=False, comment="활성 상태")
+    # 선택적 캐시 정보 (성능 최적화용)
+    name = Column(String(255), nullable=True, comment="모델 이름 (캐시용)")
+    description = Column(Text, nullable=True, comment="모델 설명 (캐시용)")
 
     # 메타데이터
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, comment="생성일시")
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False, comment="수정일시")
-    deleted_at = Column(DateTime, nullable=True, comment="삭제일시")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, comment="생성 시간")
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False,
+                        comment="수정 시간")
+    updated_by = Column(String(50), nullable=True, comment="수정자 member_id")
 
-    created_by = Column(String(100), nullable=True, comment="생성자")
-    updated_by = Column(String(100), nullable=True, comment="수정자")
-    deleted_by = Column(String(100), nullable=True, comment="삭제자")
+    # 소프트 삭제
+    deleted_at = Column(DateTime(timezone=True), nullable=True, comment="삭제 시간")
+    deleted_by = Column(String(50), nullable=True, comment="삭제자 member_id")
+    is_active = Column(Boolean, default=True, nullable=False, comment="활성화 상태")
+
+    # 추가 메타데이터 (JSON 형태로 확장 가능한 필드)
+    metadatas = Column(Text, nullable=True, comment="추가 메타데이터 (JSON)")
+
+    # 인덱스 정의
+    __table_args__ = (
+        # 복합 인덱스: 사용자별 모델 조회 최적화
+        Index('idx_models_member_active', 'created_by', 'is_active', 'deleted_at'),
+
+        # 복합 인덱스: Surro 모델 ID + 사용자 ID (소유권 확인용)
+        Index('idx_models_surro_member', 'surro_model_id', 'created_by'),
+
+        # 복합 인덱스: 생성 시간 기반 조회
+        Index('idx_models_created_member', 'created_by', 'created_at'),
+
+        # 유니크 제약: 동일한 Surro 모델을 같은 사용자가 중복 매핑하는 것 방지
+        Index('idx_models_unique_mapping', 'surro_model_id', 'created_by', unique=True,
+              postgresql_where=Column('deleted_at').is_(None)),
+
+        {'comment': '사용자별 Surro 모델 매핑 테이블'}
+    )
 
     def __repr__(self):
-        return f"<Model(id={self.id}, name='{self.name}', provider_id={self.provider_id})>"
+        return f"<Model(id={self.id}, surro_id={self.surro_model_id}, member={self.created_by})>"
 
     def to_dict(self):
-        """모델 객체를 딕셔너리로 변환"""
+        """딕셔너리 형태로 변환"""
         return {
-            "id": self.id,
-            "name": self.name,
-            "description": self.description,
-            "provider_id": self.provider_id,
-            "type_id": self.type_id,
-            "format_id": self.format_id,
-            "parent_model_id": self.parent_model_id,
-            "registry_schema": self.model_registry_schema,
-            "artifact_path": self.artifact_path,
-            "uri": self.uri,
-            "is_active": self.is_active,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-            "deleted_at": self.deleted_at.isoformat() if self.deleted_at else None,
-            "created_by": self.created_by,
-            "updated_by": self.updated_by,
-            "deleted_by": self.deleted_by
+            'id': self.id,
+            'surro_model_id': self.surro_model_id,
+            'created_by': self.created_by,
+            'name': self.name,
+            'description': self.description,
+            'created_at': self.created_at,
+            'updated_at': self.updated_at,
+            'updated_by': self.updated_by,
+            'deleted_at': self.deleted_at,
+            'deleted_by': self.deleted_by,
+            'is_active': self.is_active,
+            'metadatas': self.metadatas
         }
+
+    @property
+    def is_deleted(self):
+        """삭제 여부 확인"""
+        return self.deleted_at is not None
+
+    @classmethod
+    def create_mapping(cls, surro_model_id: int, member_id: str, model_name: str = None, description: str = None):
+        """새 매핑 생성을 위한 헬퍼 메서드"""
+        return cls(
+            surro_model_id=surro_model_id,
+            created_by=member_id,
+            updated_by=member_id,
+            name=model_name,
+            description=description
+        )
