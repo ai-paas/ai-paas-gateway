@@ -36,7 +36,7 @@ class ServiceResponse(ServiceBase):
 
 # 리스트 응답
 class ServiceListResponse(BaseModel):
-    services: List[ServiceResponse]
+    data: List[ServiceResponse]
     total: int
     page: int
     size: int
