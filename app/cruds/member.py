@@ -3,71 +3,11 @@ from sqlalchemy import and_, or_
 from typing import List, Optional
 from datetime import datetime
 from passlib.context import CryptContext
-from app.models import Service, Member
-from app.schemas import ServiceCreate, ServiceUpdate, MemberCreate, MemberUpdate
+from app.models import Member
+from app.schemas.member import MemberCreate, MemberUpdate
 
 # 비밀번호 해싱을 위한 설정
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
-class ServiceCRUD:
-    def create_service(self, db: Session, service: ServiceCreate) -> Service:
-        db_service = Service(**service.dict())
-        db.add(db_service)
-        db.commit()
-        db.refresh(db_service)
-        return db_service
-
-    def get_service(self, db: Session, service_id: int) -> Optional[Service]:
-        return db.query(Service).filter(
-            and_(Service.id == service_id, Service.status != "deleted")
-        ).first()
-
-    def get_service_with_details(self, db: Session, service_id: int) -> Optional[Service]:
-        return db.query(Service).filter(
-            and_(Service.id == service_id, Service.status != "deleted")
-        ).first()
-
-    def get_services(
-            self,
-            db: Session,
-            skip: int = 0,
-            limit: int = 100,
-            search: Optional[str] = None,
-            creator_id: Optional[int] = None
-    ) -> tuple[List[Service], int]:
-        query = db.query(Service).filter(Service.status != "deleted")
-
-        if search:
-            search_filter = f"%{search}%"
-            query = query.filter(
-                Service.name.ilike(search_filter)
-            )
-
-        if creator_id:
-            query = query.filter(Service.created_by == creator_id)
-
-        total = query.count()
-        services = query.offset(skip).limit(limit).all()
-        return services, total
-
-    def update_service(self, db: Session, service_id: int, service_update: ServiceUpdate) -> Optional[Service]:
-        db_service = self.get_service(db, service_id)
-        if db_service:
-            update_data = service_update.dict(exclude_unset=True)
-            for key, value in update_data.items():
-                setattr(db_service, key, value)
-            db.commit()
-            db.refresh(db_service)
-        return db_service
-
-    def delete_service(self, db: Session, service_id: int) -> bool:
-        db_service = self.get_service(db, service_id)
-        if db_service:
-            db_service.status = "deleted"
-            db.commit()
-            return True
-        return False
 
 
 class MemberCRUD:
@@ -82,7 +22,7 @@ class MemberCRUD:
     def create_member(self, db: Session, member: MemberCreate) -> Member:
         # 비밀번호 해싱
         hashed_password = self.get_password_hash(member.password)
-        member_dict = member.dict(exclude={'password'})
+        member_dict = member.dict(exclude={'password', 'password_confirm'})
         member_dict['password_hash'] = hashed_password
 
         db_member = Member(**member_dict)
@@ -171,5 +111,4 @@ class MemberCRUD:
 
 
 # 전역 CRUD 인스턴스
-service_crud = ServiceCRUD()
 member_crud = MemberCRUD()

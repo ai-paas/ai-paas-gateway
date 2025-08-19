@@ -98,3 +98,8 @@ coverage.xml
 
 # FastAPI 관련
 .pytest_cache/
+
+/CLAUDE.md
+/GEMINI.md
+/.kiro/
+/.claude/
