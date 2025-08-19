@@ -1,24 +1,7 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean
-from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
-
-Base = declarative_base()
-
-
-class Service(Base):
-    __tablename__ = "services"
-
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(255), nullable=False)
-    description = Column(Text)
-    status = Column(String(50), default="active")  # active, inactive, deleted
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    created_by = Column(Integer, ForeignKey("members.id"))  # 외래키로 변경
-
-    # 관계 설정
-    creator = relationship("Member", back_populates="created_services")
+from . import Base  # __init__.py에서 Base import
 
 class Member(Base):
     __tablename__ = "members"
@@ -49,3 +32,4 @@ class Member(Base):
 
     # 관계 설정 - Member가 생성한 서비스들
     created_services = relationship("Service", back_populates="creator")
+    created_workflows = relationship("Workflow", back_populates="creator")
