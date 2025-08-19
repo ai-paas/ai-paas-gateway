@@ -7,7 +7,7 @@ from fastapi import Depends, HTTPException, status, Path
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.crud import member_crud
+from app.cruds import member_crud
 from app.config import settings
 
 # 비밀번호 해싱 설정
