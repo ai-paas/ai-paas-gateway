@@ -37,7 +37,7 @@ def get_services(
     services, total = service_crud.get_services(db=db, skip=skip, limit=size, search=search)
 
     return ServiceListResponse(
-        services=services,
+        data=services,
         total=total,
         page=page,
         size=size
