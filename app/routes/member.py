@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import Optional
 from app.database import get_db
-from app.crud import member_crud, service_crud
+from app.cruds import member_crud
 from app.auth import (
     get_current_user,
     get_current_admin_user,
