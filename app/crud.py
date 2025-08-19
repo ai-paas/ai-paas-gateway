@@ -1,18 +1,24 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_
 from typing import List, Optional
 from datetime import datetime
 from passlib.context import CryptContext
-from app.models import Service, Member
-from app.schemas import ServiceCreate, ServiceUpdate, MemberCreate, MemberUpdate
+from app.models import Service, Member, Workflow
+from app.schemas.service import ServiceCreate, ServiceUpdate
+from app.schemas.member import MemberCreate, MemberUpdate
+from app.schemas.workflow import WorkflowCreate, WorkflowUpdate
 
 # 비밀번호 해싱을 위한 설정
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class ServiceCRUD:
-    def create_service(self, db: Session, service: ServiceCreate) -> Service:
-        db_service = Service(**service.dict())
+    def create_service(self, db: Session, service: ServiceCreate, created_by: str) -> Service:
+        # ServiceCreate 스키마의 데이터를 dict로 변환하고 created_by 추가
+        service_data = service.dict()
+        service_data['created_by'] = created_by
+
+        db_service = Service(**service_data)
         db.add(db_service)
         db.commit()
         db.refresh(db_service)
@@ -20,12 +26,12 @@ class ServiceCRUD:
 
     def get_service(self, db: Session, service_id: int) -> Optional[Service]:
         return db.query(Service).filter(
-            and_(Service.id == service_id, Service.status != "deleted")
+            and_(Service.id == service_id)
         ).first()
 
     def get_service_with_details(self, db: Session, service_id: int) -> Optional[Service]:
         return db.query(Service).filter(
-            and_(Service.id == service_id, Service.status != "deleted")
+            and_(Service.id == service_id)
         ).first()
 
     def get_services(
@@ -34,18 +40,25 @@ class ServiceCRUD:
             skip: int = 0,
             limit: int = 100,
             search: Optional[str] = None,
-            creator_id: Optional[int] = None
+            creator_name: Optional[str] = None,
+            tag: Optional[str] = None
     ) -> tuple[List[Service], int]:
-        query = db.query(Service).filter(Service.status != "deleted")
+        query = db.query(Service)
 
         if search:
             search_filter = f"%{search}%"
             query = query.filter(
-                Service.name.ilike(search_filter)
+                or_(
+                    Service.name.ilike(search_filter),
+                    Service.description.ilike(search_filter)
+                )
             )
 
-        if creator_id:
-            query = query.filter(Service.created_by == creator_id)
+        if creator_name:
+            query = query.filter(Service.created_by.ilike(f"%{creator_name}%"))
+
+        if tag:
+            query = query.filter(Service.tag.ilike(f"%{tag}%"))
 
         total = query.count()
         services = query.offset(skip).limit(limit).all()
@@ -64,7 +77,6 @@ class ServiceCRUD:
     def delete_service(self, db: Session, service_id: int) -> bool:
         db_service = self.get_service(db, service_id)
         if db_service:
-            db_service.status = "deleted"
             db.commit()
             return True
         return False
@@ -82,7 +94,7 @@ class MemberCRUD:
     def create_member(self, db: Session, member: MemberCreate) -> Member:
         # 비밀번호 해싱
         hashed_password = self.get_password_hash(member.password)
-        member_dict = member.dict(exclude={'password'})
+        member_dict = member.dict(exclude={'password', 'password_confirm'})
         member_dict['password_hash'] = hashed_password
 
         db_member = Member(**member_dict)
@@ -169,7 +181,96 @@ class MemberCRUD:
             return True
         return False
 
+## Surro API 관련 cruds
+class WorkflowCRUD:
+    def create_workflow(self, db: Session, workflow: WorkflowCreate, created_by: str,
+                        workflow_id: str) -> Workflow:
+        """워크플로우 생성 (external_workflow_id는 써로 API 호출 후 받은 값)"""
+        workflow_data = workflow.dict()
+        workflow_data['created_by'] = created_by
+        workflow_data['workflow_id'] = workflow_id
+
+        db_workflow = Workflow(**workflow_data)
+        db.add(db_workflow)
+        db.commit()
+        db.refresh(db_workflow)
+        return db_workflow
+
+    def get_workflow(self, db: Session, workflow_id: int) -> Optional[Workflow]:
+        return db.query(Workflow).filter(
+            and_(Workflow.id == workflow_id)
+        ).first()
+
+    def get_workflow_with_creator(self, db: Session, workflow_id: int) -> Optional[Workflow]:
+        return db.query(Workflow).options(joinedload(Workflow.creator)).filter(
+            and_(Workflow.id == workflow_id)
+        ).first()
+
+    def get_workflows(
+            self,
+            db: Session,
+            skip: int = 0,
+            limit: int = 100,
+            search: Optional[str] = None,
+            creator_id: Optional[str] = None,
+    ) -> tuple[List[Workflow], int]:
+        query = db.query(Workflow)
+
+        if search:
+            search_filter = f"%{search}%"
+            query = query.filter(
+                or_(
+                    Workflow.name.ilike(search_filter),
+                    Workflow.description.ilike(search_filter)
+                )
+            )
+
+        if creator_id:
+            query = query.filter(Workflow.created_by == creator_id)
+
+        total = query.count()
+        workflows = query.offset(skip).limit(limit).all()
+        return workflows, total
+
+    def get_workflows_by_member(self, db: Session, member_id: str, skip: int = 0, limit: int = 100) -> tuple[
+        List[Workflow], int]:
+        """특정 멤버가 생성한 워크플로우 조회"""
+        query = db.query(Workflow).filter(
+            and_(Workflow.created_by == member_id)
+        )
+        total = query.count()
+        workflows = query.offset(skip).limit(limit).all()
+        return workflows, total
+
+    def update_workflow(self, db: Session, workflow_id: int, workflow_update: WorkflowUpdate) -> Optional[Workflow]:
+        db_workflow = self.get_workflow(db, workflow_id)
+        if db_workflow:
+            update_data = workflow_update.dict(exclude_unset=True)
+            for key, value in update_data.items():
+                setattr(db_workflow, key, value)
+
+            db_workflow.updated_at = datetime.utcnow()
+            db.commit()
+            db.refresh(db_workflow)
+        return db_workflow
+
+    def delete_workflow(self, db: Session, workflow_id: int) -> bool:
+        """워크플로우 소프트 삭제 (status를 deleted로 변경)"""
+        db_workflow = self.get_workflow(db, workflow_id)
+        if db_workflow:
+            db_workflow.updated_at = datetime.utcnow()
+            db.commit()
+            return True
+        return False
+
+    def get_workflow_by_external_id(self, db: Session, external_workflow_id: str) -> Optional[Workflow]:
+        """외부 워크플로우 ID로 조회"""
+        return db.query(Workflow).filter(
+            and_(Workflow.external_workflow_id == external_workflow_id)
+        ).first()
+
 
 # 전역 CRUD 인스턴스
 service_crud = ServiceCRUD()
 member_crud = MemberCRUD()
+workflow_crud = WorkflowCRUD()

@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.config import settings
-from app.routes import service, member, auth
+from app.routes import service, member, auth, workflow, external_api_test
 import uvicorn
 import logging
 
@@ -57,6 +57,8 @@ app.add_middleware(
 app.include_router(auth.router, prefix=settings.API_V1_STR)
 app.include_router(service.router, prefix=settings.API_V1_STR)
 app.include_router(member.router, prefix=settings.API_V1_STR)
+app.include_router(workflow.router, prefix=settings.API_V1_STR)
+app.include_router(external_api_test.router, prefix=settings.API_V1_STR)
 
 # 프록시 라우터는 가장 마지막에 등록 (모든 경로를 캐치하므로)
 if settings.PROXY_ENABLED:
@@ -72,8 +74,6 @@ def read_root():
         "version": "1.0.0",
         "docs_url": "/docs",
         "api_prefix": settings.API_V1_STR,
-        "proxy_enabled": settings.PROXY_ENABLED,
-        "proxy_target": settings.PROXY_TARGET_BASE_URL if settings.PROXY_ENABLED else None
     }
 
 
@@ -82,7 +82,6 @@ def read_root():
 def health_check():
     return {
         "status": "healthy",
-        "proxy_enabled": settings.PROXY_ENABLED,
         "database_configured": bool(settings.DATABASE_URL)
     }
 

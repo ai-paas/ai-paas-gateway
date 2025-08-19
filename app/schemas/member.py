@@ -1,34 +1,13 @@
-from pydantic import BaseModel, ConfigDict, EmailStr
-from typing import List, Optional
+from pydantic import BaseModel, ConfigDict, EmailStr, validator
+from typing import List, Optional, Dict, Any, TYPE_CHECKING
 from datetime import datetime
+import re
+
+# 타입 체킹할 때만 import (순환 참조 방지)
+if TYPE_CHECKING:
+    from .service import ServiceResponse
+
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
-
-
-# Service 스키마
-class ServiceBase(BaseModel):
-    name: str
-    description: Optional[str] = None
-    status: str = "active"
-    created_by: Optional[int] = None  # Integer로 변경
-
-
-class ServiceCreate(ServiceBase):
-    pass
-
-
-class ServiceUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    status: Optional[str] = None
-
-
-class ServiceResponse(ServiceBase):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    created_at: datetime
-    updated_at: datetime
-
 
 # Member 스키마
 class MemberBase(BaseModel):
@@ -43,6 +22,33 @@ class MemberBase(BaseModel):
 
 class MemberCreate(MemberBase):
     password: str  # 비밀번호 (생성시에만 필요)
+    password_confirm: str  # 비밀번호 확인 추가
+
+    @validator("member_id")
+    def validate_member_id(cls, v):
+        # 알파벳 소문자 + 숫자 + '-' 조합, 5~45자
+        if not re.match(r"^[a-z0-9-]{5,45}$", v):
+            raise ValueError("아이디는 알파벳 소문자, 숫자, '-' 조합으로 5~45자여야 합니다.")
+        return v
+
+    @validator("password")
+    def validate_password(cls, v):
+        # 8~16자, 영문 대소문자 + 숫자 + 특수문자 조합
+        if not re.match(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{8,16}$", v):
+            raise ValueError("비밀번호는 8~16자 영문 대소문자, 숫자, 특수문자를 포함해야 합니다.")
+        return v
+
+    @validator("password_confirm")
+    def passwords_match(cls, v, values):
+        if "password" in values and v != values["password"]:
+            raise ValueError("비밀번호와 비밀번호 확인이 일치하지 않습니다.")
+        return v
+
+    @validator("phone")
+    def validate_phone(cls, v):
+        if v and not re.match(r"^\d+$", v):
+            raise ValueError("연락처는 숫자만 입력해야 합니다.")
+        return v
 
 
 class MemberUpdate(BaseModel):
@@ -73,22 +79,15 @@ class MemberResponse(BaseModel):
 
 
 class MemberDetailResponse(MemberResponse):
-    created_services: List['ServiceResponse'] = []
+    created_services: List['ServiceResponse'] = []  # 문자열로 forward reference 사용
 
 
 class MemberListResponse(BaseModel):
-    members: List[MemberResponse]
+    data: List[MemberResponse]
     total: int
     page: int
     size: int
 
-
-# 리스트 응답
-class ServiceListResponse(BaseModel):
-    services: List[ServiceResponse]
-    total: int
-    page: int
-    size: int
 
 # 인증 관련 스키마
 class LoginRequest(BaseModel):

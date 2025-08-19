@@ -8,7 +8,7 @@ from app.auth import (
     get_current_admin_user,
     check_member_access
 )
-from app.schemas import (
+from app.schemas.member import (
     MemberCreate, MemberUpdate, MemberResponse, MemberListResponse
 )
 
@@ -18,8 +18,8 @@ router = APIRouter(prefix="/members", tags=["members"])
 @router.post("/", response_model=MemberResponse)
 def create_member(
         member: MemberCreate,
-        db: Session = Depends(get_db),
-        _: None = Depends(get_current_admin_user)
+        db: Session = Depends(get_db)
+        # _: None = Depends(get_current_admin_user)
 ):
     """멤버 생성"""
     # 중복 체크 (member_id - 아이디)
@@ -55,7 +55,7 @@ def get_members(
     )
 
     return MemberListResponse(
-        members=members,
+        data=members,
         total=total,
         page=page,
         size=size
@@ -103,7 +103,7 @@ def update_member(
         if email_exists:
             raise HTTPException(status_code=400, detail="Email already exists")
 
-    member = member_crud.update_member(db=db, member_id=existing_member.id, member_update=member_update)
+    member = member_crud.update_member(db=db, member_id=existing_member.member_id, member_update=member_update)
     return member
 
 @router.delete("/{member_id}")
@@ -125,34 +125,34 @@ def delete_member(
     return {"message": "Member deleted successfully"}
 
 
-@router.get("/{member_id}/services")
-def get_member_services(
-        member_id: str,
-        skip: int = Query(0, ge=0, description="건너뛸 항목 수"),
-        limit: int = Query(100, ge=1, le=1000, description="조회할 항목 수"),
-        db: Session = Depends(get_db),
-        current_user = Depends(get_current_user)
-):
-    """특정 멤버가 생성한 서비스 목록 조회"""
-    # 권한 검증
-    check_member_access(current_user, member_id)
-    # 멤버 존재 여부 확인
-    member = member_crud.get_member(db=db, member_id=member_id)
-    if not member:
-        raise HTTPException(status_code=404, detail="Member not found")
-
-    # 해당 멤버가 생성한 서비스 조회
-    services, total = service_crud.get_services(
-        db=db,
-        skip=skip,
-        limit=limit,
-        creator_id=member_id
-    )
-
-    return {
-        "services": services,
-        "total": total,
-        "page": (skip // limit) + 1,
-        "size": limit,
-        "member": member
-    }
+# @router.get("/{member_id}/services")
+# def get_member_services(
+#         member_id: str,
+#         skip: int = Query(0, ge=0, description="건너뛸 항목 수"),
+#         limit: int = Query(100, ge=1, le=1000, description="조회할 항목 수"),
+#         db: Session = Depends(get_db),
+#         current_user = Depends(get_current_user)
+# ):
+#     """특정 멤버가 생성한 서비스 목록 조회"""
+#     # 권한 검증
+#     check_member_access(current_user, member_id)
+#     # 멤버 존재 여부 확인
+#     member = member_crud.get_member(db=db, member_id=member_id)
+#     if not member:
+#         raise HTTPException(status_code=404, detail="Member not found")
+#
+#     # 해당 멤버가 생성한 서비스 조회
+#     services, total = service_crud.get_services(
+#         db=db,
+#         skip=skip,
+#         limit=limit,
+#         creator_id=member_id
+#     )
+#
+#     return {
+#         "services": services,
+#         "total": total,
+#         "page": (skip // limit) + 1,
+#         "size": limit,
+#         "member": member
+#     }
