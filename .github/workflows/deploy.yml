@@ -1,0 +1,53 @@
+name: Deploy AI PaaS Gateway Docker
+
+on:
+  push:
+    branches: [ develop ]
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Cache Docker layers
+      uses: actions/cache@v3
+      with:
+        path: /tmp/.buildx-cache
+        key: ${{ runner.os }}-buildx-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-buildx-
+
+    - name: Build Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        push: false
+        load: true
+        tags: ai-paas-gateway:latest
+        cache-from: type=local,src=/tmp/.buildx-cache
+        cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+    - name: Move cache
+      run: |
+        rm -rf /tmp/.buildx-cache
+        mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+    - name: Create .env file
+      run: |
+        echo "${{ secrets.ENV_FILE }}" > .env
+
+    - name: Run Docker container
+      run: |
+        docker stop ai-paas-gateway-api || true
+        docker rm ai-paas-gateway-api || true
+        docker run --env-file .env -d --name ai-paas-gateway-api -p 8106:8000 ai-paas-gateway:latest
+
+    - name: Clean up
+      run: |
+        rm -f .env
+        docker image prune -f
