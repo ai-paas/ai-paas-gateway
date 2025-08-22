@@ -8,13 +8,12 @@ from app.database import get_db
 from app.auth import get_current_user, get_current_admin_user
 from app.cruds import model_crud
 from app.schemas.model import (
-    ModelCreate, ModelUpdate, ModelResponse,
-    ModelListResponse, ModelCreateRequest,
+    ModelResponse, ModelCreateRequest,
     ModelTestRequest, ModelTestResponse,
-    ExternalModelResponse, InnoUserInfo, EnhancedModelResponse
+    InnoUserInfo, ModelWithMemberInfo, ModelListWrapper
 )
 from app.services.model_service import model_service
-from app.models import Member
+from app.models import Member, Model
 
 logger = logging.getLogger(__name__)
 
@@ -30,44 +29,38 @@ def _create_inno_user_info(user: Member) -> InnoUserInfo:
     )
 
 
-@router.get("", response_model=List[EnhancedModelResponse])
+@router.get("", response_model=ModelListWrapper)
 async def get_models(
-        skip: int = Query(0, ge=0, description="건너뛸 항목 수"),
-        limit: int = Query(100, ge=1, le=1000, description="반환할 최대 항목 수"),
-        provider_id: Optional[int] = Query(None, description="프로바이더 ID로 필터링"),
-        type_id: Optional[int] = Query(None, description="타입 ID로 필터링"),
-        format_id: Optional[int] = Query(None, description="포맷 ID로 필터링"),
-        search: Optional[str] = Query(None, description="이름 또는 설명 검색"),
+        skip: int = Query(0, ge=0),
+        limit: int = Query(100, ge=1, le=1000),
+        provider_id: Optional[int] = Query(None),
+        type_id: Optional[int] = Query(None),
+        format_id: Optional[int] = Query(None),
+        search: Optional[str] = Query(None),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    사용자별 모델 목록 조회
-
-    - 현재 로그인한 사용자가 만든 모델만 반환합니다.
-    - Inno DB에서 사용자의 모델 ID 목록을 가져온 후, Surro API로 상세 정보를 조회합니다.
+    모델 목록 조회 (모델 카탈로그 + 사용자 커스텀 모델)
     """
     try:
-        # 1. Inno DB에서 현재 사용자가 만든 모델의 Surro ID 목록 조회
+        # 1. 사용자 커스텀 모델 ID
         user_model_ids = model_crud.get_models_by_member_id(
-            db,
-            current_user.member_id,
-            skip=skip,
-            limit=limit
+            db, current_user.member_id, skip=skip, limit=limit
         )
 
-        if not user_model_ids:
-            # 사용자가 만든 모델이 없는 경우 빈 리스트 반환
-            return []
+        # 2. 카탈로그 모델 ID
+        catalog_models = db.query(Model).filter(
+            Model.is_catalog == True,
+            Model.deleted_at.is_(None)
+        ).all()
+        catalog_ids = [m.surro_model_id for m in catalog_models]
 
-        # 2. Surro API에서 전체 모델 목록 조회
+        # 3. Surro API 모델 전체 조회
         all_surro_models = await model_service.get_models(
-            skip=0,  # 전체 조회 후 필터링
-            limit=1000,  # 충분히 큰 값으로 설정
-            provider_id=provider_id,
-            type_id=type_id,
-            format_id=format_id,
-            search=search,
+            skip=0, limit=1000,
+            provider_id=provider_id, type_id=type_id,
+            format_id=format_id, search=search,
             user_info={
                 'member_id': current_user.member_id,
                 'role': current_user.role,
@@ -75,29 +68,30 @@ async def get_models(
             }
         )
 
-        # 3. 사용자가 소유한 모델만 필터링
-        user_surro_models = []
-        for surro_model in all_surro_models:
-            if surro_model.id in user_model_ids:
-                user_surro_models.append(surro_model)
+        # 4. 사용자 커스텀 + 카탈로그 모델 ID 합치기
+        valid_model_ids = set(user_model_ids + catalog_ids)
 
-        # 4. Inno 사용자 정보 생성
-        inno_user_info = _create_inno_user_info(current_user)
+        # 5. Surro 모델 필터링
+        filtered_models = [m for m in all_surro_models if m.id in valid_model_ids]
 
-        # 5. 통합 응답 생성
-        enhanced_models = []
-        for surro_model in user_surro_models:
-            enhanced_model = EnhancedModelResponse(
-                surro_data=surro_model,
-                inno_data=inno_user_info
-            )
-            enhanced_models.append(enhanced_model)
+        # 6. 사용자 정보 생성
+        member_info = InnoUserInfo(
+            member_id=current_user.member_id,
+            role=current_user.role,
+            name=current_user.name
+        )
 
-        logger.info(f"Retrieved {len(enhanced_models)} models for user {current_user.member_id}")
-        return enhanced_models
+        # 7. surro_data + member_info 합치기
+        wrapped_models = []
+        for surro_model in filtered_models:
+            model_dict = surro_model.model_dump()
+            model_dict["member_info"] = member_info.model_dump()
+            wrapped_models.append(ModelWithMemberInfo(**model_dict))
+
+        return ModelListWrapper(data=wrapped_models)
 
     except Exception as e:
-        logger.error(f"Error getting user models for {current_user.member_id}: {str(e)}")
+        logger.error(f"Error getting models for {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get models: {str(e)}"
