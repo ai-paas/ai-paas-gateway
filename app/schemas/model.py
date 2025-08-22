@@ -107,6 +107,20 @@ class ModelResponse(BaseModel):
     updated_by: Optional[str] = None
     deleted_by: Optional[str] = None
 
+class InnoUserInfo(BaseModel):
+    """사용자 정보"""
+    member_id: str
+    role: str
+    name: str
+
+
+class ModelWithMemberInfo(ModelResponse):
+    member_info: InnoUserInfo
+
+
+class ModelListWrapper(BaseModel):
+    data: List[ModelWithMemberInfo]
+
 
 class ModelDetailResponse(ModelResponse):
     """상세 모델 응답 (추후 확장용)"""
