@@ -3,24 +3,24 @@ from sqlalchemy.sql import func
 from . import Base
 
 
-class Model(Base):
+class Dataset(Base):
     """
-    간소화된 모델 매핑 테이블
-    - Surro API의 모델 ID와 Inno 사용자 매핑만 저장
+    간소화된 데이터셋 매핑 테이블
+    - Surro API의 데이터셋 ID와 Inno 사용자 매핑만 저장
     - 나머지 상세 정보는 Surro API에서 실시간 조회
     """
-    __tablename__ = "models"
+    __tablename__ = "datasets"
 
     # 기본 키
     id = Column(Integer, primary_key=True, index=True, autoincrement=True, comment="Inno DB 내부 ID")
 
     # 핵심 매핑 정보
-    surro_model_id = Column(Integer, nullable=False, index=True, comment="Surro API 모델 ID")
+    surro_dataset_id = Column(Integer, nullable=False, index=True, comment="Surro API 데이터셋 ID")
     created_by = Column(String(50), nullable=False, index=True, comment="생성자 member_id")
 
     # 선택적 캐시 정보 (성능 최적화용)
-    name = Column(String(255), nullable=True, comment="모델 이름 (캐시용)")
-    description = Column(Text, nullable=True, comment="모델 설명 (캐시용)")
+    name = Column(String(255), nullable=True, comment="데이터셋 이름 (캐시용)")
+    description = Column(Text, nullable=False, comment="데이터셋 설명 (캐시용)")
 
     # 메타데이터
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, comment="생성 시간")
@@ -33,37 +33,35 @@ class Model(Base):
     deleted_by = Column(String(50), nullable=True, comment="삭제자 member_id")
     is_active = Column(Boolean, default=True, nullable=False, comment="활성화 상태")
 
-    is_catalog = Column(Boolean, default=True, nullable=False, comment="모델 카탈로그 여부")
-
     # 추가 메타데이터 (JSON 형태로 확장 가능한 필드)
     metadatas = Column(Text, nullable=True, comment="추가 메타데이터 (JSON)")
 
     # 인덱스 정의
     __table_args__ = (
-        # 복합 인덱스: 사용자별 모델 조회 최적화
-        Index('idx_models_member_active', 'created_by', 'is_active', 'deleted_at'),
+        # 복합 인덱스: 사용자별 데이터셋 조회 최적화
+        Index('idx_datasets_member_active', 'created_by', 'is_active', 'deleted_at'),
 
-        # 복합 인덱스: Surro 모델 ID + 사용자 ID (소유권 확인용)
-        Index('idx_models_surro_member', 'surro_model_id', 'created_by'),
+        # 복합 인덱스: Surro 데이터셋 ID + 사용자 ID (소유권 확인용)
+        Index('idx_datasets_surro_member', 'surro_dataset_id', 'created_by'),
 
         # 복합 인덱스: 생성 시간 기반 조회
-        Index('idx_models_created_member', 'created_by', 'created_at'),
+        Index('idx_datasets_created_member', 'created_by', 'created_at'),
 
-        # 유니크 제약: 동일한 Surro 모델을 같은 사용자가 중복 매핑하는 것 방지
-        Index('idx_models_unique_mapping', 'surro_model_id', 'created_by', unique=True,
+        # 유니크 제약: 동일한 Surro 데이터셋을 같은 사용자가 중복 매핑하는 것 방지
+        Index('idx_datasets_unique_mapping', 'surro_dataset_id', 'created_by', unique=True,
               postgresql_where=Column('deleted_at').is_(None)),
 
-        {'comment': '사용자별 Surro 모델 매핑 테이블'}
+        {'comment': '사용자별 Surro 데이터넷 매핑 테이블'}
     )
 
     def __repr__(self):
-        return f"<Model(id={self.id}, surro_id={self.surro_model_id}, member={self.created_by})>"
+        return f"<Dataset(id={self.id}, surro_id={self.surro_dataset_id}, member={self.created_by})>"
 
     def to_dict(self):
         """딕셔너리 형태로 변환"""
         return {
             'id': self.id,
-            'surro_model_id': self.surro_model_id,
+            'surro_dataset_id': self.surro_dataset_id,
             'created_by': self.created_by,
             'name': self.name,
             'description': self.description,
@@ -82,12 +80,12 @@ class Model(Base):
         return self.deleted_at is not None
 
     @classmethod
-    def create_mapping(cls, surro_model_id: int, member_id: str, model_name: str = None, description: str = None):
+    def create_mapping(cls, surro_dataset_id: int, member_id: str, dataset_name: str = None, description: str = None):
         """새 매핑 생성을 위한 헬퍼 메서드"""
         return cls(
-            surro_model_id=surro_model_id,
+            surro_dataset_id=surro_dataset_id,
             created_by=member_id,
             updated_by=member_id,
-            name=model_name,
+            name=dataset_name,
             description=description
         )
