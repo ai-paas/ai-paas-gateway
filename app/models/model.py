@@ -33,6 +33,8 @@ class Model(Base):
     deleted_by = Column(String(50), nullable=True, comment="삭제자 member_id")
     is_active = Column(Boolean, default=True, nullable=False, comment="활성화 상태")
 
+    is_catalog = Column(Boolean, default=True, nullable=False, comment="모델 카탈로그 여부")
+
     # 추가 메타데이터 (JSON 형태로 확장 가능한 필드)
     metadatas = Column(Text, nullable=True, comment="추가 메타데이터 (JSON)")
 
