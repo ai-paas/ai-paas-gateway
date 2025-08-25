@@ -143,8 +143,7 @@ async def download_hub_model_file(
 @router.get("/models/{model_id:path}", response_model=ExtendedHubModelResponse)
 async def get_hub_model_detail(
         model_id: Union[str, int] = Path(..., description="모델 ID"),
-        market: Optional[str] = Query(..., description="모델 마켓"),
-        current_user: Member = Depends(get_current_user)
+        market: Optional[str] = Query(..., description="모델 마켓")
 ):
     """
     허브 모델 상세 정보 조회
