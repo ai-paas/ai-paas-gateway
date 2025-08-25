@@ -30,10 +30,19 @@ class Settings:
     PROXY_CONNECT_TIMEOUT: float = float(os.getenv("PROXY_CONNECT_TIMEOUT", "5.0"))
     PROXY_MAX_CONNECTIONS: int = int(os.getenv("PROXY_MAX_CONNECTIONS", "100"))
     PROXY_MAX_KEEPALIVE_CONNECTIONS: int = int(os.getenv("PROXY_MAX_KEEPALIVE_CONNECTIONS", "20"))
-
-    # 외부 API 인증 설정
     EXTERNAL_API_USERNAME: str = os.getenv("EXTERNAL_API_USERNAME", "")
     EXTERNAL_API_PASSWORD: str = os.getenv("EXTERNAL_API_PASSWORD", "")
+
+    # Hub Connect API 인증 설정
+    HUB_CONNECT_ENABLED: bool = os.getenv("HUB_CONNECT_ENABLED", "false").lower() == "true"
+    HUB_CONNECT_TARGET_BASE_URL: str = os.getenv("HUB_CONNECT_TARGET_BASE_URL", "")
+    HUB_CONNECT_TARGET_PATH_PREFIX: str = os.getenv("HUB_CONNECT_TARGET_PATH_PREFIX", "/api/v1")
+    HUB_CONNECT_TIMEOUT: float = float(os.getenv("HUB_CONNECT_TIMEOUT", "30.0"))
+    HUB_CONNECT_CONNECT_TIMEOUT: float = float(os.getenv("HUB_CONNECT_CONNECT_TIMEOUT", "5.0"))
+    HUB_CONNECT_MAX_CONNECTIONS: int = int(os.getenv("HUB_CONNECT_MAX_CONNECTIONS", "100"))
+    HUB_CONNECT_MAX_KEEPALIVE_CONNECTIONS: int = int(os.getenv("HUB_CONNECT_MAX_KEEPALIVE_CONNECTIONS", "20"))
+    HUB_CONNECT_API_USERNAME: str = os.getenv("HUB_CONNECT_API_USERNAME", "")
+    HUB_CONNECT_API_PASSWORD: str = os.getenv("HUB_CONNECT_API_PASSWORD", "")
 
     def __init__(self):
         # 필수 환경변수 체크
@@ -44,7 +53,7 @@ class Settings:
         if not self.JWT_SECRET_KEY:
             raise ValueError("JWT_SECRET_KEY environment variable is required")
 
-        # 프록시 설정 검증
+        # 외부 API 설정 검증
         if self.PROXY_ENABLED and not self.PROXY_TARGET_BASE_URL:
             raise ValueError("PROXY_TARGET_BASE_URL is required when PROXY_ENABLED is true")
 
@@ -54,5 +63,16 @@ class Settings:
                 raise ValueError("EXTERNAL_API_USERNAME is required when PROXY_ENABLED is true")
             if not self.EXTERNAL_API_PASSWORD:
                 raise ValueError("EXTERNAL_API_PASSWORD is required when PROXY_ENABLED is true")
+
+        # HUB Connect API 설정 검증
+        if self.HUB_CONNECT_ENABLED and not self.HUB_CONNECT_TARGET_BASE_URL:
+            raise ValueError("HUB_CONNECT_TARGET_BASE_URL is required when HUB_CONNECT_ENABLED is true")
+
+        # 외부 API 인증 설정 검증 (프록시가 활성화된 경우)
+        if self.HUB_CONNECT_ENABLED:
+            if not self.HUB_CONNECT_API_USERNAME:
+                raise ValueError("HUB_CONNECT_API_USERNAME is required when HUB_CONNECT_ENABLED is true")
+            if not self.HUB_CONNECT_API_PASSWORD:
+                raise ValueError("HUB_CONNECT_API_PASSWORD is required when HUB_CONNECT_ENABLED is true")
 
 settings = Settings()

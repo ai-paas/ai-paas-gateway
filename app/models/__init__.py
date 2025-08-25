@@ -9,3 +9,4 @@ from .member import Member
 from .service import Service
 from .workflow import Workflow
 from .model import Model
+from .hub_connect import HubConnection
