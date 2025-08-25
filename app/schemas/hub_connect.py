@@ -99,9 +99,15 @@ class ExtendedHubModelResponse(BaseModel):
     pipeline_tag: Optional[str] = Field(None, description="파이프라인 태그")
     tags: Optional[List[str]] = Field(default_factory=list, description="모델 태그")
     base_model: Optional[str] = Field(None, description="베이스 모델")
-    language: Optional[List[str]] = Field(default_factory=list, description="지원 언어")
+    language: Optional[Union[str, List[str]]] = Field(default_factory=list, description="지원 언어")
     datasets: Optional[List[str]] = Field(default_factory=list, description="학습/사용 데이터셋 목록")
     library_name: Optional[str] = Field(None, description="라이브러리 이름")
     license: Optional[str] = Field(None, description="라이선스")
     license_link: Optional[str] = Field(None, description="라이선스 링크")
     card_html: Optional[str] = Field(None, description="모델 카드 HTML 내용")
+
+    def dict(self, *args, **kwargs):
+        data = super().dict(*args, **kwargs)
+        if isinstance(data.get("language"), str):
+            data["language"] = [data["language"]]
+        return data
