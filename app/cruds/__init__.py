@@ -11,7 +11,6 @@ __all__ = [
     "MemberCRUD", "member_crud",
     "ServiceCRUD", "service_crud",
     "WorkflowCRUD", "workflow_crud",
-    "DatasetCRUD", "dataset_crud"
-    "WorkflowCRUD", "workflow_crud",
+    "DatasetCRUD", "dataset_crud",
     "HubConnectCRUD", "hub_connect_crud"
 ]
