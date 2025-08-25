@@ -29,8 +29,8 @@ def _create_inno_user_info(user: Member) -> InnoUserInfo:
     )
 
 
-@router.get("", response_model=ModelListWrapper)
-async def get_models(
+@router.get("/custom-models", response_model=ModelListWrapper)
+async def get_user_models(
         skip: int = Query(0, ge=0),
         limit: int = Query(100, ge=1, le=1000),
         provider_id: Optional[int] = Query(None),
@@ -41,22 +41,15 @@ async def get_models(
         current_user: Member = Depends(get_current_user)
 ):
     """
-    모델 목록 조회 (모델 카탈로그 + 사용자 커스텀 모델)
+    현재 로그인한 사용자가 생성한 모델만 조회
     """
     try:
-        # 1. 사용자 커스텀 모델 ID
+        # 1. 사용자 커스텀 모델 ID 조회
         user_model_ids = model_crud.get_models_by_member_id(
             db, current_user.member_id, skip=skip, limit=limit
         )
 
-        # 2. 카탈로그 모델 ID
-        catalog_models = db.query(Model).filter(
-            Model.is_catalog == True,
-            Model.deleted_at.is_(None)
-        ).all()
-        catalog_ids = [m.surro_model_id for m in catalog_models]
-
-        # 3. Surro API 모델 전체 조회
+        # 2. Surro API 모델 전체 조회
         all_surro_models = await model_service.get_models(
             skip=0, limit=1000,
             provider_id=provider_id, type_id=type_id,
@@ -68,20 +61,17 @@ async def get_models(
             }
         )
 
-        # 4. 사용자 커스텀 + 카탈로그 모델 ID 합치기
-        valid_model_ids = set(user_model_ids + catalog_ids)
+        # 3. 사용자 커스텀 모델만 필터링
+        filtered_models = [m for m in all_surro_models if m.id in user_model_ids]
 
-        # 5. Surro 모델 필터링
-        filtered_models = [m for m in all_surro_models if m.id in valid_model_ids]
-
-        # 6. 사용자 정보 생성
+        # 4. 사용자 정보 생성
         member_info = InnoUserInfo(
             member_id=current_user.member_id,
             role=current_user.role,
             name=current_user.name
         )
 
-        # 7. surro_data + member_info 합치기
+        # 5. surro_data + member_info 합치기
         wrapped_models = []
         for surro_model in filtered_models:
             model_dict = surro_model.model_dump()
@@ -91,12 +81,72 @@ async def get_models(
         return ModelListWrapper(data=wrapped_models)
 
     except Exception as e:
-        logger.error(f"Error getting models for {current_user.member_id}: {str(e)}")
+        logger.error(f"Error getting user models for {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get models: {str(e)}"
+            detail=f"Failed to get user models: {str(e)}"
         )
 
+
+@router.get("/model-catalog", response_model=ModelListWrapper)
+async def get_catalog_models(
+        skip: int = Query(0, ge=0),
+        limit: int = Query(100, ge=1, le=1000),
+        provider_id: Optional[int] = Query(None),
+        type_id: Optional[int] = Query(None),
+        format_id: Optional[int] = Query(None),
+        search: Optional[str] = Query(None),
+        db: Session = Depends(get_db),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    모델 카탈로그 조회 (is_catalog가 true인 모델만)
+    """
+    try:
+        # 1. 카탈로그 모델 ID 조회
+        catalog_models = db.query(Model).filter(
+            Model.is_catalog == True,
+            Model.deleted_at.is_(None)
+        ).all()
+        catalog_ids = [m.surro_model_id for m in catalog_models]
+
+        # 2. Surro API 모델 전체 조회
+        all_surro_models = await model_service.get_models(
+            skip=0, limit=1000,
+            provider_id=provider_id, type_id=type_id,
+            format_id=format_id, search=search,
+            user_info={
+                'member_id': current_user.member_id,
+                'role': current_user.role,
+                'name': current_user.name
+            }
+        )
+
+        # 3. 카탈로그 모델만 필터링
+        filtered_models = [m for m in all_surro_models if m.id in catalog_ids]
+
+        # 4. 사용자 정보 생성
+        member_info = InnoUserInfo(
+            member_id=current_user.member_id,
+            role=current_user.role,
+            name=current_user.name
+        )
+
+        # 5. surro_data + member_info 합치기
+        wrapped_models = []
+        for surro_model in filtered_models:
+            model_dict = surro_model.model_dump()
+            model_dict["member_info"] = member_info.model_dump()
+            wrapped_models.append(ModelWithMemberInfo(**model_dict))
+
+        return ModelListWrapper(data=wrapped_models)
+
+    except Exception as e:
+        logger.error(f"Error getting catalog models: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get catalog models: {str(e)}"
+        )
 
 @router.get("/providers")
 async def get_providers(
