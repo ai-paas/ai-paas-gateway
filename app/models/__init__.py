@@ -10,3 +10,4 @@ from .service import Service
 from .workflow import Workflow
 from .model import Model
 from .dataset import Dataset
+from .hub_connect import HubConnection
