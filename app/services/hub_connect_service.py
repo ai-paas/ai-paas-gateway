@@ -7,7 +7,7 @@ from fastapi import HTTPException, status
 from app.config import settings
 from app.schemas.hub_connect import (
     HubModelResponse, ModelListParams, ModelListResponse,
-    ModelFileInfo, ModelFilesResponse, ModelDownloadResponse, ExtendedHubModelResponse,
+    ModelFileInfo, ModelFilesResponse, ExtendedHubModelResponse,
     TagListParams, TagListResponse, TagGroupResponse, TagItem
 )
 
@@ -357,55 +357,6 @@ class HubConnectService:
                 detail=f"Internal error: {str(e)}"
             )
 
-    async def download_model_file(
-            self,
-            model_id: str,
-            filename: str,
-            market: str = "huggingface",
-            user_info: Optional[Dict[str, str]] = None
-    ) -> ModelDownloadResponse:
-        """모델 파일 다운로드"""
-        try:
-            url = f"{self.base_url}/models/{model_id}/download"
-            params = {"filename": filename, "market": market}
-
-            logger.info(f"Getting download URL from: {url}")
-
-            response = await self._make_authenticated_request(
-                "GET", url, user_info=user_info, params=params
-            )
-
-            if response.status_code == 200:
-                download_data = response.json()
-
-                return ModelDownloadResponse(
-                    download_url=download_data.get("download_url", ""),
-                    filename=filename,
-                    model_id=model_id,
-                    file_size=download_data.get("file_size")
-                )
-
-            else:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Failed to get download URL: {response.text}"
-                )
-
-        except httpx.TimeoutException as e:
-            logger.error(f"Timeout downloading model file {model_id}/{filename}: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail="Hub service timeout"
-            )
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Error downloading model file {model_id}/{filename}: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Internal error: {str(e)}"
-            )
-
     async def get_all_tags(self, market: str) -> TagListResponse:
         """전체 태그 목록 조회"""
         try:
@@ -421,12 +372,10 @@ class HubConnectService:
 
             if response.status_code == 200:
                 tags_data = response.json()
-                logger.info(f"tags_data response: {tags_data}")
 
                 # TagListParams로 검증 및 변환
                 tag_params = TagListParams(**tags_data)
                 all_categories = tag_params.get_all_categories()
-                logger.info(f"all_categories response: {all_categories}")
 
                 # data 배열로 래핑 (단일 딕셔너리를 배열의 첫 번째 요소로)
                 return TagListResponse(
