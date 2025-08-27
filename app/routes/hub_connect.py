@@ -5,7 +5,8 @@ import logging
 from app.auth import get_current_user
 from app.schemas.hub_connect import (
     ModelListParams, HubModelListWrapper, HubUserInfo,
-    ExtendedHubModelResponse, HubModelFilesWrapper, HubModelDownloadWrapper
+    ExtendedHubModelResponse, HubModelFilesWrapper, HubModelDownloadWrapper,
+    TagListResponse, TagGroupResponse
 )
 from app.services.hub_connect_service import hub_connect_service
 from app.models import Member
@@ -167,4 +168,50 @@ async def get_hub_model_detail(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get hub model detail: {str(e)}"
+        )
+
+
+@router.get("/tags", response_model=TagListResponse)
+async def get_all_tags(
+        market: str = Query("", description="모델 마켓 (예: huggingface)")
+):
+    try:
+        logger.info(f"Getting all tags for market: {market}")
+
+        # 외부 허브 API에서 태그 목록 조회
+        tags_response = await hub_connect_service.get_all_tags(market)
+
+        logger.info(f"Successfully retrieved tags for market: {market}")
+
+        return tags_response
+
+    except Exception as e:
+        logger.error(f"Error getting all tags for market '{market}': {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get tags: {str(e)}"
+        )
+
+
+@router.get("/tags/{group}", response_model=TagGroupResponse)
+async def get_tags_by_group(
+        group: str = Path(..., description="태그 그룹명 (예: region, library, framework)"),
+        market: str = Query("", description="모델 마켓 (예: huggingface)")
+):
+    try:
+        logger.info(f"Getting tags for group: {group}, market: {market}")
+
+        # 외부 허브 API에서 특정 그룹의 태그 목록 조회
+        group_response = await hub_connect_service.get_tags_by_group(group, market)
+
+        logger.info(f"Successfully retrieved {len(group_response.data)} tags "
+                    f"for group '{group}' in market '{market}' (remaining: {group_response.remaining_count})")
+
+        return group_response
+
+    except Exception as e:
+        logger.error(f"Error getting tags for group '{group}' in market '{market}': {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get tags for group '{group}': {str(e)}"
         )
