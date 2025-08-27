@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 
@@ -111,3 +111,62 @@ class ExtendedHubModelResponse(BaseModel):
         if isinstance(data.get("language"), str):
             data["language"] = [data["language"]]
         return data
+
+
+class TagItem(BaseModel):
+    """태그 아이템"""
+    id: str = Field(..., description="태그 ID")
+    label: str = Field(..., description="태그 라벨")
+    type: str = Field(..., description="태그 타입")
+
+
+class TagListParams(BaseModel):
+    """동적 태그 리스트 파라미터"""
+    model_config = ConfigDict(extra="allow")  # 추가 필드 허용
+
+    @model_validator(mode="before")
+    def validate_all_fields(cls, values):
+        """모든 필드가 TagItem 리스트 형태인지 검증"""
+        if isinstance(values, dict):
+            validated_values = {}
+            for key, value in values.items():
+                if isinstance(value, list):
+                    validated_items = []
+                    for item in value:
+                        if isinstance(item, dict):
+                            validated_items.append(TagItem(**item))
+                        elif isinstance(item, TagItem):
+                            validated_items.append(item)
+                        else:
+                            raise ValueError(
+                                f"Invalid item type in {key}: {type(item)}"
+                            )
+                    validated_values[key] = validated_items
+                else:
+                    raise ValueError(f"Field {key} must be a list")
+            return validated_values
+        return values
+
+    def get_category(self, category_name: str) -> List[TagItem]:
+        """특정 카테고리의 태그들을 가져오기"""
+        if hasattr(self, "__pydantic_extra__") and self.__pydantic_extra__:
+            if category_name in self.__pydantic_extra__:
+                return self.__pydantic_extra__[category_name]
+        return getattr(self, category_name, [])
+
+    def get_all_categories(self) -> Dict[str, List[TagItem]]:
+        """모든 카테고리와 태그들을 딕셔너리로 반환"""
+        return self.model_dump()
+
+
+class TagListResponse(BaseModel):
+    data: List[Dict[str, List[TagItem]]] = Field(...)
+
+class TagGroupResponse(BaseModel):
+    """특정 그룹의 태그 리스트 응답"""
+    data: List[TagItem] = Field(..., description="태그 목록")
+    remaining_count: int = Field(0, description="남은 태그 개수")
+
+class TagsParams(BaseModel):
+    """태그 조회 파라미터"""
+    market: Optional[str] = Field("huggingface", description="모델 마켓")
