@@ -5,8 +5,7 @@ import logging
 from app.auth import get_current_user
 from app.schemas.hub_connect import (
     ModelListParams, HubModelListWrapper, HubUserInfo,
-    ExtendedHubModelResponse, HubModelFilesWrapper, HubModelDownloadWrapper,
-    TagListResponse, TagGroupResponse
+    ExtendedHubModelResponse, HubModelFilesWrapper, TagListResponse, TagGroupResponse
 )
 from app.services.hub_connect_service import hub_connect_service
 from app.models import Member
@@ -27,8 +26,8 @@ def _create_hub_user_info(user: Member) -> HubUserInfo:
 
 @router.get("/models", response_model=HubModelListWrapper)
 async def get_hub_models(
-        market: Optional[str] = Query(..., description="Market name (e.g., huggingface, aihub)"),
-        sort: Optional[str] = Query("downloads", description=""),
+        market: str = Query(..., description="Market name (e.g., huggingface, aihub)"),
+        sort: str = Query("downloads", description=""),
         page: int = Query(1, ge=1, description="페이지 번호"),
         limit: int = Query(30, ge=1, le=100, description="페이지 당 항목 수"),
         current_user: Member = Depends(get_current_user)
@@ -76,8 +75,8 @@ async def get_hub_models(
 
 @router.get("/models/{model_id:path}/files", response_model=HubModelFilesWrapper)
 async def get_hub_model_files(
-        model_id: Union[str, int] = Path(..., description="모델 ID"),
-        market: Optional[str] = Query(..., description="모델 마켓")
+        model_id: str = Path(..., description="모델 ID"),
+        market: str = Query(..., description="모델 마켓")
 ):
     """
     허브 모델 파일 목록 조회
@@ -98,53 +97,10 @@ async def get_hub_model_files(
             detail=f"Failed to get hub model files: {str(e)}"
         )
 
-
-@router.get("/models/{model_id:path}/download", response_model=HubModelDownloadWrapper)
-async def download_hub_model_file(
-        model_id: Union[str, int] = Path(..., description="모델 ID"),
-        filename: str = Query(..., description="다운로드할 파일명"),
-        market: Optional[str] = Query(..., description="모델 마켓"),
-        current_user: Member = Depends(get_current_user)
-):
-    """
-    허브 모델 파일 다운로드
-    """
-    try:
-        # 사용자 정보 구성
-        user_info = {
-            'member_id': current_user.member_id,
-            'role': current_user.role,
-            'name': current_user.name
-        }
-
-        # 허브 API에서 다운로드 URL 조회
-        download_response = await hub_connect_service.download_model_file(
-            str(model_id), filename, market, user_info
-        )
-
-        # 사용자 정보 생성
-        hub_user_info = _create_hub_user_info(current_user)
-
-        return HubModelDownloadWrapper(
-            download_url=download_response.download_url,
-            filename=download_response.filename,
-            model_id=download_response.model_id,
-            file_size=download_response.file_size,
-            user_info=hub_user_info
-        )
-
-    except Exception as e:
-        logger.error(f"Error downloading hub model file {model_id}/{filename}: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to download hub model file: {str(e)}"
-        )
-
-
 @router.get("/models/{model_id:path}", response_model=ExtendedHubModelResponse)
 async def get_hub_model_detail(
-        model_id: Union[str, int] = Path(..., description="모델 ID"),
-        market: Optional[str] = Query(..., description="모델 마켓")
+        model_id: str = Path(..., description="모델 ID"),
+        market: str = Query(..., description="모델 마켓")
 ):
     """
     허브 모델 상세 정보 조회
@@ -173,7 +129,7 @@ async def get_hub_model_detail(
 
 @router.get("/tags", response_model=TagListResponse)
 async def get_all_tags(
-        market: str = Query("", description="모델 마켓 (예: huggingface)")
+        market: str = Query(..., description="모델 마켓 (예: huggingface)")
 ):
     try:
         logger.info(f"Getting all tags for market: {market}")
@@ -196,7 +152,7 @@ async def get_all_tags(
 @router.get("/tags/{group}", response_model=TagGroupResponse)
 async def get_tags_by_group(
         group: str = Path(..., description="태그 그룹명 (예: region, library, framework)"),
-        market: str = Query("", description="모델 마켓 (예: huggingface)")
+        market: str = Query(..., description="모델 마켓 (예: huggingface)")
 ):
     try:
         logger.info(f"Getting tags for group: {group}, market: {market}")
