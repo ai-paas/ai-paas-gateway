@@ -256,7 +256,8 @@ class HubConnectService:
     async def get_model_detail(
             self,
             model_id: str,
-            market: str
+            market: str,
+            user_info: Optional[Dict[str, str]] = None
     ) -> Optional[HubModelResponse]:
         """특정 모델 상세 정보 조회"""
         try:
@@ -266,7 +267,7 @@ class HubConnectService:
             logger.info(f"Getting hub model detail from: {url}")
 
             response = await self._make_authenticated_request(
-                "GET", url, params=params
+                "GET", url, user_info=user_info, params=params
             )
 
             if response.status_code == 200:
@@ -357,12 +358,11 @@ class HubConnectService:
                 detail=f"Internal error: {str(e)}"
             )
 
-    async def get_all_tags(self, market: str) -> TagListResponse:
+    async def get_all_tags(self, market: str, user_info: Optional[Dict[str, str]] = None) -> TagListResponse:
         """전체 태그 목록 조회"""
         try:
             url = f"{self.base_url}/tags/"
             params = {"market": market}
-            user_info: Optional[Dict[str, str]] = None
 
             logger.info(f"Getting all tags from: {url} with market: {market}")
 
@@ -409,13 +409,11 @@ class HubConnectService:
                 detail=f"Internal error: {str(e)}"
             )
 
-    async def get_tags_by_group(self, group: str, market: str) -> TagGroupResponse:
+    async def get_tags_by_group(self, group: str, market: str, user_info: Optional[Dict[str, str]] = None) -> TagGroupResponse:
         """특정 그룹의 태그 목록 조회"""
         try:
             url = f"{self.base_url}/tags/{group}"
             params = {"market": market}
-            user_info: Optional[Dict[str, str]] = None
-
 
             logger.info(f"Getting tags for group '{group}' from: {url} with market: {market}")
 
