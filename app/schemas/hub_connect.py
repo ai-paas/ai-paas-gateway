@@ -2,7 +2,6 @@ from pydantic import BaseModel, Field, ConfigDict, model_validator
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 
-
 class ModelListParams(BaseModel):
     """모델 목록 조회 파라미터"""
     market: Optional[str] = Field("huggingface", description="모델 마켓")
@@ -56,15 +55,6 @@ class ModelFilesResponse(BaseModel):
     """모델 파일 목록 응답"""
     data: List[ModelFileInfo] = Field(..., description="파일 목록")
 
-
-class ModelDownloadResponse(BaseModel):
-    """모델 다운로드 응답"""
-    download_url: str = Field(..., description="다운로드 URL")
-    filename: str = Field(..., description="파일명")
-    model_id: str = Field(..., description="모델 ID")
-    file_size: Optional[int] = Field(None, description="파일 크기")
-
-
 class HubUserInfo(BaseModel):
     """허브 연결 사용자 정보"""
     member_id: str = Field(..., description="사용자 ID")
@@ -80,15 +70,6 @@ class HubModelListWrapper(BaseModel):
 class HubModelFilesWrapper(BaseModel):
     """허브 모델 파일 목록 래퍼"""
     data: List[ModelFileInfo] = Field(..., description="파일 목록")
-
-
-class HubModelDownloadWrapper(BaseModel):
-    """허브 모델 다운로드 래퍼"""
-    download_url: str = Field(..., description="다운로드 URL")
-    filename: str = Field(..., description="파일명")
-    model_id: str = Field(..., description="모델 ID")
-    file_size: Optional[int] = Field(None, description="파일 크기")
-    user_info: HubUserInfo = Field(..., description="사용자 정보")
 
 class ExtendedHubModelResponse(BaseModel):
     # 외부 API 필드들
