@@ -28,31 +28,50 @@ def _create_inno_user_info(user: Member) -> InnoUserInfo:
         name=user.name
     )
 
+def _create_pagination_response(data: List[Any], total: int, page: int, size: int) -> Dict[str, Any]:
+    return {
+        "data": data,
+        "total": total,
+        "page": page,
+        "size": size
+    }
 
-@router.get("", response_model=DatasetListWrapper)
+@router.get("")
 async def get_datasets(
-        skip: int = Query(0, ge=0, description="건너뛸 항목 수"),
-        limit: int = Query(100, ge=1, le=1000, description="반환할 최대 항목 수"),
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
         search: Optional[str] = Query(None, description="이름 또는 설명 검색"),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    사용자별 데이터셋 목록 조회
+    사용자별 데이터셋 목록 조회 (페이지네이션 포함)
     """
     try:
-        # 1. 사용자 데이터셋 ID 조회
+        skip = (page - 1) * size
+
+        # 1. 사용자 데이터셋 ID 전체 개수 조회
+        total_datasets = dataset_crud.get_datasets_count(
+            db=db,
+            search=search,
+            is_active=True
+        )
+
+        if total_datasets == 0:
+            return _create_pagination_response([], 0, page, size)
+
+        # 2. 사용자 데이터셋 ID 조회 (page/size 기반)
         user_dataset_ids = dataset_crud.get_datasets_by_member_id(
             db,
             current_user.member_id,
             skip=skip,
-            limit=limit
+            limit=size
         )
 
         if not user_dataset_ids:
-            return DatasetListWrapper(data=[])
+            return _create_pagination_response([], total_datasets, page, size)
 
-        # 2. Surro API에서 전체 조회
+        # 3. Surro API에서 전체 조회
         all_surro_datasets = await dataset_service.get_datasets(
             skip=0,
             limit=1000,
@@ -64,24 +83,18 @@ async def get_datasets(
             }
         )
 
-        # 3. 필터링
+        # 4. 사용자 소유 데이터셋만 필터링
         filtered = [d for d in all_surro_datasets if d.id in user_dataset_ids]
 
-        # 4. 사용자 정보
-        member_info = InnoUserInfo(
-            member_id=current_user.member_id,
-            role=current_user.role,
-            name=current_user.name
-        )
-
-        # 5. surro_data + member_info 합치기
+        # 5. 사용자 정보 추가
+        member_info = _create_inno_user_info(current_user)
         wrapped = []
         for d in filtered:
             d_dict = d.model_dump()
             d_dict["member_info"] = member_info.model_dump()
             wrapped.append(DatasetWithMemberInfo(**d_dict))
 
-        return DatasetListWrapper(data=wrapped)
+        return _create_pagination_response(wrapped, total_datasets, page, size)
 
     except Exception as e:
         logger.error(f"Error getting datasets for {current_user.member_id}: {str(e)}")
@@ -89,7 +102,6 @@ async def get_datasets(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get datasets: {str(e)}"
         )
-
 
 @router.get("/{dataset_id}", response_model=DatasetResponse)
 async def get_dataset(
