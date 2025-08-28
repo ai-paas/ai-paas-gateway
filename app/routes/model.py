@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 import logging
 import json
+import math
 
 from app.database import get_db
 from app.auth import get_current_user, get_current_admin_user
@@ -29,29 +30,54 @@ def _create_inno_user_info(user: Member) -> InnoUserInfo:
     )
 
 
-@router.get("/custom-models", response_model=ModelListWrapper)
+def _create_pagination_response(data: List[Any], total: int, page: int, size: int) -> Dict[str, Any]:
+    return {
+        "data": data,
+        "total": total,
+        "page": page,
+        "size": size
+    }
+
+
+@router.get("/custom-models")
 async def get_user_models(
-        skip: int = Query(0, ge=0),
-        limit: int = Query(100, ge=1, le=1000),
-        provider_id: Optional[int] = Query(None),
-        type_id: Optional[int] = Query(None),
-        format_id: Optional[int] = Query(None),
-        search: Optional[str] = Query(None),
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
+        provider_id: Optional[int] = Query(None, description="프로바이더 ID로 필터링"),
+        type_id: Optional[int] = Query(None, description="모델 타입 ID로 필터링"),
+        format_id: Optional[int] = Query(None, description="모델 포맷 ID로 필터링"),
+        search: Optional[str] = Query(None, description="검색어"),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    현재 로그인한 사용자가 생성한 모델만 조회
+    현재 로그인한 사용자가 생성한 모델만 조회 (페이지네이션 포함)
     """
     try:
-        # 1. 사용자 커스텀 모델 ID 조회
-        user_model_ids = model_crud.get_models_by_member_id(
-            db, current_user.member_id, skip=skip, limit=limit
-        )
+        # 1. 사용자 커스텀 모델 총 개수 조회
+        total_user_models = db.query(Model).filter(
+            Model.created_by == current_user.member_id,
+            Model.deleted_at.is_(None)
+        ).count()
 
-        # 2. Surro API 모델 전체 조회
+        if total_user_models == 0:
+            return _create_pagination_response([], 0, page, size)
+
+        # page/size 기반 조회
+        skip = (page - 1) * size
+        user_models = db.query(Model).filter(
+            Model.created_by == current_user.member_id,
+            Model.deleted_at.is_(None)
+        ).offset(skip).limit(size).all()
+
+        user_model_ids = [model.surro_model_id for model in user_models if model.surro_model_id]
+
+        if not user_model_ids:
+            return _create_pagination_response([], total_user_models, page, size)
+
+        # 3. Surro API 모델 전체 조회 후 필터링
         all_surro_models = await model_service.get_models(
-            skip=0, limit=1000,
+            skip=0, limit=1000,  # 전체 조회 후 필터링
             provider_id=provider_id, type_id=type_id,
             format_id=format_id, search=search,
             user_info={
@@ -61,24 +87,16 @@ async def get_user_models(
             }
         )
 
-        # 3. 사용자 커스텀 모델만 필터링
+        # 4. 사용자 커스텀 모델만 필터링
         filtered_models = [m for m in all_surro_models if m.id in user_model_ids]
-
-        # 4. 사용자 정보 생성
-        member_info = InnoUserInfo(
-            member_id=current_user.member_id,
-            role=current_user.role,
-            name=current_user.name
-        )
 
         # 5. surro_data + member_info 합치기
         wrapped_models = []
         for surro_model in filtered_models:
             model_dict = surro_model.model_dump()
-            model_dict["member_info"] = member_info.model_dump()
-            wrapped_models.append(ModelWithMemberInfo(**model_dict))
+            wrapped_models.append(ModelResponse(**model_dict))
 
-        return ModelListWrapper(data=wrapped_models)
+        return _create_pagination_response(wrapped_models, total_user_models, page, size)
 
     except Exception as e:
         logger.error(f"Error getting user models for {current_user.member_id}: {str(e)}")
@@ -87,32 +105,45 @@ async def get_user_models(
             detail=f"Failed to get user models: {str(e)}"
         )
 
-
-@router.get("/model-catalog", response_model=ModelListWrapper)
+@router.get("/model-catalog")
 async def get_catalog_models(
-        skip: int = Query(0, ge=0),
-        limit: int = Query(100, ge=1, le=1000),
-        provider_id: Optional[int] = Query(None),
-        type_id: Optional[int] = Query(None),
-        format_id: Optional[int] = Query(None),
-        search: Optional[str] = Query(None),
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
+        provider_id: Optional[int] = Query(None, description="프로바이더 ID로 필터링"),
+        type_id: Optional[int] = Query(None, description="모델 타입 ID로 필터링"),
+        format_id: Optional[int] = Query(None, description="모델 포맷 ID로 필터링"),
+        search: Optional[str] = Query(None, description="검색어"),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    모델 카탈로그 조회 (is_catalog가 true인 모델만)
+    모델 카탈로그 조회 (is_catalog가 true인 모델만, 페이지네이션 포함)
     """
     try:
-        # 1. 카탈로그 모델 ID 조회
+        # 1. 카탈로그 모델 총 개수 조회
+        total_catalog_models = db.query(Model).filter(
+            Model.is_catalog == True,
+            Model.deleted_at.is_(None)
+        ).count()
+
+        if total_catalog_models == 0:
+            return _create_pagination_response([], 0, page, size)
+
+        # 2. 카탈로그 모델 조회 (페이지네이션 적용)
+        skip = (page - 1) * size
         catalog_models = db.query(Model).filter(
             Model.is_catalog == True,
             Model.deleted_at.is_(None)
-        ).all()
-        catalog_ids = [m.surro_model_id for m in catalog_models]
+        ).offset(skip).limit(size).all()
 
-        # 2. Surro API 모델 전체 조회
+        catalog_model_ids = [model.surro_model_id for model in catalog_models if model.surro_model_id]
+
+        if not catalog_model_ids:
+            return _create_pagination_response([], total_catalog_models, page, size)
+
+        # 3. Surro API 모델 전체 조회 후 필터링 (custom-models와 동일한 패턴)
         all_surro_models = await model_service.get_models(
-            skip=0, limit=1000,
+            skip=0, limit=1000,  # 전체 조회 후 필터링
             provider_id=provider_id, type_id=type_id,
             format_id=format_id, search=search,
             user_info={
@@ -122,24 +153,16 @@ async def get_catalog_models(
             }
         )
 
-        # 3. 카탈로그 모델만 필터링
-        filtered_models = [m for m in all_surro_models if m.id in catalog_ids]
+        # 4. 카탈로그 모델만 필터링
+        filtered_models = [m for m in all_surro_models if m.id in catalog_model_ids]
 
-        # 4. 사용자 정보 생성
-        member_info = InnoUserInfo(
-            member_id=current_user.member_id,
-            role=current_user.role,
-            name=current_user.name
-        )
-
-        # 5. surro_data + member_info 합치기
+        # 4. surro_data + member_info 합치기
         wrapped_models = []
         for surro_model in filtered_models:
             model_dict = surro_model.model_dump()
-            model_dict["member_info"] = member_info.model_dump()
-            wrapped_models.append(ModelWithMemberInfo(**model_dict))
+            wrapped_models.append(ModelResponse(**model_dict))
 
-        return ModelListWrapper(data=wrapped_models)
+        return _create_pagination_response(wrapped_models, total_catalog_models, page, size)
 
     except Exception as e:
         logger.error(f"Error getting catalog models: {str(e)}")
@@ -148,17 +171,20 @@ async def get_catalog_models(
             detail=f"Failed to get catalog models: {str(e)}"
         )
 
+
 @router.get("/providers")
 async def get_providers(
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
+        provider_name: Optional[str] = Query(None, description="프로바이더 이름으로 필터링"),
         db: Session = Depends(get_db),
-        provider_name: str = Query(None),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    사용 가능한 프로바이더 목록 조회
+    사용 가능한 프로바이더 목록 조회 (페이지네이션 포함)
     """
     try:
-        providers = await model_service.get_model_providers(
+        all_providers_data = await model_service.get_model_providers(
             user_info={
                 'member_id': current_user.member_id,
                 'role': current_user.role,
@@ -166,7 +192,27 @@ async def get_providers(
             },
             provider_name=provider_name
         )
-        return providers
+
+        skip = (page - 1) * size
+
+        if isinstance(all_providers_data, list):
+            total = len(all_providers_data)
+            paginated_data = all_providers_data[skip:skip + size]
+            return _create_pagination_response(paginated_data, total, page, size)
+
+        elif isinstance(all_providers_data, dict) and 'data' in all_providers_data:
+            data = all_providers_data.get('data', [])
+            total_from_api = all_providers_data.get('total', len(data))
+
+            start_idx = skip
+            end_idx = skip + size
+            final_data = data[start_idx:end_idx] if start_idx < len(data) else []
+
+            return _create_pagination_response(final_data, total_from_api, page, size)
+
+        else:
+            return _create_pagination_response([], 0, page, size)
+
     except Exception as e:
         logger.error(f"Error getting providers: {str(e)}")
         raise HTTPException(
@@ -177,15 +223,17 @@ async def get_providers(
 
 @router.get("/types")
 async def get_model_types(
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
+        type_name: Optional[str] = Query(None, description="모델 타입 이름으로 필터링"),
         db: Session = Depends(get_db),
-        type_name: str = Query(None),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    사용 가능한 모델 타입 목록 조회
+    사용 가능한 모델 타입 목록 조회 (페이지네이션 포함)
     """
     try:
-        types = await model_service.get_model_types(
+        all_types_data = await model_service.get_model_types(
             user_info={
                 'member_id': current_user.member_id,
                 'role': current_user.role,
@@ -193,7 +241,27 @@ async def get_model_types(
             },
             type_name=type_name
         )
-        return types
+
+        skip = (page - 1) * size
+
+        if isinstance(all_types_data, list):
+            total = len(all_types_data)
+            paginated_data = all_types_data[skip:skip + size]
+            return _create_pagination_response(paginated_data, total, page, size)
+
+        elif isinstance(all_types_data, dict) and 'data' in all_types_data:
+            data = all_types_data.get('data', [])
+            total_from_api = all_types_data.get('total', len(data))
+
+            start_idx = skip
+            end_idx = skip + size
+            final_data = data[start_idx:end_idx] if start_idx < len(data) else []
+
+            return _create_pagination_response(final_data, total_from_api, page, size)
+
+        else:
+            return _create_pagination_response([], 0, page, size)
+
     except Exception as e:
         logger.error(f"Error getting model types: {str(e)}")
         raise HTTPException(
@@ -204,15 +272,17 @@ async def get_model_types(
 
 @router.get("/formats")
 async def get_model_formats(
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
+        format_name: Optional[str] = Query(None, description="모델 포맷 이름으로 필터링"),
         db: Session = Depends(get_db),
-        format_name: str = Query(None),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    사용 가능한 모델 포맷 목록 조회
+    사용 가능한 모델 포맷 목록 조회 (페이지네이션 포함)
     """
     try:
-        formats = await model_service.get_model_formats(
+        all_formats_data = await model_service.get_model_formats(
             user_info={
                 'member_id': current_user.member_id,
                 'role': current_user.role,
@@ -220,13 +290,34 @@ async def get_model_formats(
             },
             format_name=format_name
         )
-        return formats
+
+        skip = (page - 1) * size
+
+        if isinstance(all_formats_data, list):
+            total = len(all_formats_data)
+            paginated_data = all_formats_data[skip:skip + size]
+            return _create_pagination_response(paginated_data, total, page, size)
+
+        elif isinstance(all_formats_data, dict) and 'data' in all_formats_data:
+            data = all_formats_data.get('data', [])
+            total_from_api = all_formats_data.get('total', len(data))
+
+            start_idx = skip
+            end_idx = skip + size
+            final_data = data[start_idx:end_idx] if start_idx < len(data) else []
+
+            return _create_pagination_response(final_data, total_from_api, page, size)
+
+        else:
+            return _create_pagination_response([], 0, page, size)
+
     except Exception as e:
         logger.error(f"Error getting model formats: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get model formats: {str(e)}"
         )
+
 
 
 @router.get("/{model_id}", response_model=ModelResponse)
