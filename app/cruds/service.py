@@ -70,6 +70,7 @@ class ServiceCRUD:
     def delete_service(self, db: Session, service_id: int) -> bool:
         db_service = self.get_service(db, service_id)
         if db_service:
+            db.delete(db_service)
             db.commit()
             return True
         return False
