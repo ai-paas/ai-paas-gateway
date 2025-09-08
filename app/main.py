@@ -38,13 +38,13 @@ app = FastAPI(
 # CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 프로덕션에서는 특정 도메인으로 제한
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 라우터 등록 (순서가 중요! 프록시 라우터는 가장 마지막에)
+# 라우터 등록
 app.include_router(auth.router, prefix=settings.API_V1_STR)
 app.include_router(service.router, prefix=settings.API_V1_STR)
 app.include_router(member.router, prefix=settings.API_V1_STR)
