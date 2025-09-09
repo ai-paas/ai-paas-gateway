@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, ConfigDict, model_validator
+from pydantic import BaseModel, Field, ConfigDict, model_validator, validator
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 
@@ -8,6 +8,8 @@ class ModelListParams(BaseModel):
     sort: Optional[str] = Field("downloads", description="정렬 방식 (downloads, created, relevance)")
     page: Optional[int] = Field(1, ge=1, description="페이지 번호")
     limit: Optional[int] = Field(30, ge=1, le=100, description="페이지 당 항목 수")
+    num_parameters_min: Optional[str] = Field("num_parameters_min", description="Minimum parameters (e.g., '3B', '7B', '24B')")
+    num_parameters_max: Optional[str] = Field("num_parameters_max", description="Maximum parameters (e.g., '128B', '256B')")
 
 
 class HubModelResponse(BaseModel):
@@ -32,8 +34,19 @@ class HubModelResponse(BaseModel):
 
     # 상태 정보
     private: Optional[bool] = Field(False, description="비공개 여부")
-    gated: Optional[bool] = Field(False, description="게이트 여부")
+    gated: Optional[str] = Field(None, description="게이트 여부")
     sha: Optional[str] = Field(None, description="SHA 해시")
+
+    @validator('gated', pre=True)
+    def normalize_gated(cls, v):
+        """gated 필드를 문자열로 정규화"""
+        if v is None:
+            return None
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, str):
+            return v.lower()
+        return str(v)
 
 
 class ModelListResponse(BaseModel):

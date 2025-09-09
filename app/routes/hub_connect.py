@@ -39,6 +39,8 @@ async def get_hub_models(
         sort: str = Query("downloads", description=""),
         page: int = Query(1, ge=1, description="페이지 번호"),
         limit: int = Query(30, ge=1, le=100, description="페이지 당 항목 수"),
+        num_parameters_min: str = Query("", description="Minimum parameters (e.g., '3B', '7B', '24B')"),
+        num_parameters_max: str = Query("", description="Maximum parameters (e.g., '128B', '256B')"),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -50,7 +52,9 @@ async def get_hub_models(
             market=market,
             sort=sort,
             page=page,
-            limit=limit
+            limit=limit,
+            num_parameters_min=num_parameters_min,
+            num_parameters_max=num_parameters_max
         )
 
         # 사용자 정보 구성
