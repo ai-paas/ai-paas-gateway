@@ -188,6 +188,10 @@ class HubConnectService:
                 query_params["page"] = params.page
             if params.limit:
                 query_params["limit"] = params.limit
+            if params.num_parameters_min:
+                query_params["num_parameters_min"] = params.num_parameters_min
+            if params.num_parameters_max:
+                query_params["num_parameters_max"] = params.num_parameters_max
 
             logger.info(f"Getting hub models from: {url}")
             logger.info(f"Parameters: {query_params}")
