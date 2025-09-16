@@ -3,7 +3,7 @@ from typing import Optional, Any, Dict
 import logging
 
 from app.auth import get_current_user
-from app.schemas.any_cloud import AnyCloudResponse, GenericRequest
+from app.schemas.any_cloud import AnyCloudResponse, AnyCloudDataResponse, GenericRequest
 from app.services.any_cloud_service import any_cloud_service
 from app.models import Member
 
@@ -22,9 +22,8 @@ def _create_user_info_dict(user: Member) -> Dict[str, str]:
 
 
 # 클러스터 목록 조회
-@router.get("/system/clusters", response_model=AnyCloudResponse)
-async def any_cloud_get_api(
-        # path: str = Path(..., description="Any Cloud API 경로"),
+@router.get("/system/clusters", response_model=AnyCloudDataResponse)
+async def get_any_cloud_clusters(
         request: Request = None,
         current_user: Member = Depends(get_current_user)
 ):
@@ -43,7 +42,65 @@ async def any_cloud_get_api(
             **query_params
         )
 
-        return AnyCloudResponse(data=response["data"])
+        return AnyCloudDataResponse(data=response["data"])
+
+    except Exception as e:
+        logger.error(f"Error calling Any Cloud GET API for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to call Any Cloud API: {str(e)}"
+        )
+
+# 클러스터 조회
+@router.get("/system/cluster/exists", response_model=AnyCloudDataResponse)
+async def check_any_cloud_cluster_exists(
+        _clusterId: str = Query(..., description="조회할 클러스터 아이디"),
+        request: Request = None,
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    클러스터 존재 여부를 확인합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+        query_params = dict(request.query_params) if request else {}
+
+        response = await any_cloud_service.generic_get(
+            path="/system/cluster/exists",
+            user_info=user_info,
+            **query_params
+        )
+
+        return AnyCloudDataResponse(data=response["data"])
+
+    except Exception as e:
+        logger.error(f"Error calling Any Cloud GET API for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to call Any Cloud API: {str(e)}"
+        )
+
+# 클러스터 상세 조회
+@router.get("/system/cluster/{cluster_id}", response_model=AnyCloudResponse)
+async def get_any_cloud_cluster(
+        cluster_id: str = Path(..., description="cluster_id"),
+        request: Request = None,
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    클러스터 상세 정보를 조회합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+        query_params = dict(request.query_params) if request else {}
+
+        response = await any_cloud_service.generic_get_unwrapped(
+            path=f"/system/cluster/{cluster_id}",
+            user_info=user_info,
+            **query_params
+        )
+
+        return response
 
     except Exception as e:
         logger.error(f"Error calling Any Cloud GET API for {current_user.member_id}: {str(e)}")
