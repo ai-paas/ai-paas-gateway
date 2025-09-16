@@ -111,13 +111,29 @@ class AnyCloudService:
                 detail=f"Internal error: {str(e)}"
             )
 
+    async def generic_get_unwrapped(
+            self,
+            path: str,
+            user_info: Optional[Dict[str, str]] = None,
+            **query_params
+    ) -> Any:
+        """범용 GET 요청 (data 래핑 제거) - 단일 조회용"""
+        response = await self._make_request(
+            "GET", path, user_info=user_info, params=query_params
+        )
+
+        # data 필드가 있으면 data 내용만 반환, 없으면 전체 응답 반환
+        if isinstance(response, dict) and "data" in response:
+            return response["data"]
+        return response
+
     async def generic_get(
             self,
             path: str,
             user_info: Optional[Dict[str, str]] = None,
             **query_params
     ) -> Dict[str, Any]:
-        """범용 GET 요청 (동적 엔드포인트 지원)"""
+        """범용 GET 요청 (동적 엔드포인트 지원) - 전체 조회용"""
         return await self._make_request(
             "GET", path, user_info=user_info, params=query_params
         )
