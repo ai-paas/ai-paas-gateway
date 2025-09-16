@@ -53,6 +53,8 @@ app.include_router(model.router, prefix=settings.API_V1_STR)
 app.include_router(dataset.router, prefix=settings.API_V1_STR)
 app.include_router(hub_connect.router, prefix=settings.API_V1_STR)
 app.include_router(any_cloud.router, prefix=settings.API_V1_STR)
+app.include_router(any_cloud.router_cluster, prefix=settings.API_V1_STR)
+app.include_router(any_cloud.router_helm, prefix=settings.API_V1_STR)
 
 # 기본 엔드포인트
 @app.get("/")
