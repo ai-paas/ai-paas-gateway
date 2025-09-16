@@ -44,6 +44,14 @@ class Settings:
     HUB_CONNECT_API_USERNAME: str = os.getenv("HUB_CONNECT_API_USERNAME", "")
     HUB_CONNECT_API_PASSWORD: str = os.getenv("HUB_CONNECT_API_PASSWORD", "")
 
+    # Any Cloud API 인증 설정
+    ANY_CLOUD_ENABLED: bool = os.getenv("ANY_CLOUD_ENABLED", "false").lower() == "true"
+    ANY_CLOUD_TARGET_BASE_URL: str = os.getenv("ANY_CLOUD_TARGET_BASE_URL", "")
+    ANY_CLOUD_TIMEOUT: float = float(os.getenv("ANY_CLOUD_TIMEOUT", "30.0"))
+    ANY_CLOUD_CONNECT_TIMEOUT: float = float(os.getenv("ANY_CLOUD_CONNECT_TIMEOUT", "5.0"))
+    ANY_CLOUD_MAX_CONNECTIONS: int = int(os.getenv("ANY_CLOUD_MAX_CONNECTIONS", "100"))
+    ANY_CLOUD_MAX_KEEPALIVE_CONNECTIONS: int = int(os.getenv("ANY_CLOUD_MAX_KEEPALIVE_CONNECTIONS", "20"))
+
     def __init__(self):
         # 필수 환경변수 체크
         if not self.DATABASE_URL:
