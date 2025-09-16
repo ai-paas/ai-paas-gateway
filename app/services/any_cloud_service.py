@@ -138,6 +138,34 @@ class AnyCloudService:
             "GET", path, user_info=user_info, params=query_params
         )
 
+    async def get_clusters(self, user_info: dict) -> dict:
+        """
+        클러스터 목록 조회 전용 메소드
+        """
+        return await self.generic_get(
+            path="/system/clusters",  # 고정된 경로
+            user_info=user_info
+        )
+
+    async def check_cluster_exists(self, cluster_id: str, user_info: dict) -> dict:
+        """
+        클러스터 존재 여부 확인 전용 메소드
+        """
+        return await self.generic_get(
+            path="/system/cluster/exists",  # 고정된 경로
+            user_info=user_info,
+            _clusterId=cluster_id  # 쿼리 파라미터로 전달
+        )
+
+    async def get_cluster_detail(self, cluster_id: str, user_info: dict) -> dict:
+        """
+        클러스터 상세 조회 전용 메소드
+        """
+        return await self.generic_get_unwrapped(
+            path=f"/system/cluster/{cluster_id}",  # 클러스터 ID가 포함된 경로
+            user_info=user_info
+        )
+
     async def generic_put(
             self,
             path: str,
@@ -171,6 +199,25 @@ class AnyCloudService:
         """범용 POST 요청 (동적 엔드포인트 지원)"""
         return await self._make_request(
             "POST", path, user_info=user_info, json=data, params=query_params
+        )
+
+    async def create_cluster(self, data: dict, user_info: dict) -> dict:
+        """
+        클러스터 생성 전용 메소드
+        """
+        return await self.generic_post(
+            path="/system/cluster",  # 고정된 경로
+            data=data,
+            user_info=user_info
+        )
+
+    async def delete_cluster(self, cluster_id: str, user_info: dict) -> dict:
+        """
+        클러스터 생성 전용 메소드
+        """
+        return await self.generic_delete(
+            path=f"/system/cluster/{cluster_id}",  # 클러스터 ID가 포함된 경로
+            user_info=user_info
         )
 
 

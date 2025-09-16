@@ -22,3 +22,22 @@ class AnyCloudUserInfo(BaseModel):
 class GenericRequest(BaseModel):
     """범용 요청 데이터"""
     data: Dict[str, Any] = Field(..., description="요청 데이터")
+
+class ClusterCreateRequest(BaseModel):
+    """클러스터 생성 요청 스키마"""
+    clusterType: str = Field(..., description="클러스터 타입")
+    clusterProvider: str = Field(..., description="클러스터 제공자")
+    clusterName: str = Field(..., description="클러스터 이름")
+    description: str = Field(..., description="클러스터 설명")
+    apiServerIp: str = Field(..., description="API 서버 IP")
+    apiServerUrl: str = Field(..., description="API 서버 URL")
+    serverCA: str = Field(..., description="서버 CA 인증서")
+    clientCA: str = Field(..., description="클라이언트 CA 인증서")
+    clientKey: str = Field(..., description="클라이언트 키")
+    monitServerURL: str = Field(..., description="모니터링 서버 URL")
+
+class ClusterDeleteResponse(BaseModel):
+    """클러스터 삭제 응답 모델"""
+    success: bool = Field(..., description="삭제 성공 여부")
+    cluster_id: str = Field(..., description="삭제된 클러스터 ID")
+    message: str = Field(..., description="삭제 결과 메시지")
