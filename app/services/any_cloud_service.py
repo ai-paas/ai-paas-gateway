@@ -193,6 +193,25 @@ class AnyCloudService:
             user_info=user_info
         )
 
+    async def get_monitoring_node(self, cluster_name: str, user_info: dict) -> dict:
+        """
+        클러스터 내 노드별 상태 조회 전용 메소드
+        """
+        return await self.generic_get_unwrapped(
+            path=f"/monit/modeStatus/{cluster_name}",
+            user_info=user_info
+        )
+
+    async def get_monitoring_metric(self, cluster_name: str, type: str, key: str, filter: dict, user_info: dict) -> dict:
+        """
+        모니터링 메트릭 조회 전용 메소드
+        """
+        return await self.generic_get_unwrapped(
+            path=f"/monit/resourceMonit/{cluster_name}/{type}/{key}",
+            user_info=user_info,
+            **filter  # filter dict를 **kwargs로 전개하여 쿼리 파라미터로 전달
+        )
+
     async def generic_put(
             self,
             path: str,
@@ -238,12 +257,22 @@ class AnyCloudService:
             user_info=user_info
         )
 
-    async def delete_cluster(self, cluster_id: str, user_info: dict) -> dict:
+    async def create_helm_repo(self, data: dict, user_info: dict) -> dict:
         """
-        클러스터 생성 전용 메소드
+        헬름 저장소 생성 전용 메소드
+        """
+        return await self.generic_post(
+            path="/helm-repos",  # 고정된 경로
+            data=data,
+            user_info=user_info
+        )
+
+    async def delete_helm_repo(self, helm_repo_name: str, user_info: dict) -> dict:
+        """
+        헬름 저장소 생성 전용 메소드
         """
         return await self.generic_delete(
-            path=f"/system/cluster/{cluster_id}",  # 클러스터 ID가 포함된 경로
+            path=f"/helm-repos/{helm_repo_name}",
             user_info=user_info
         )
 

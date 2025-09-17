@@ -41,3 +41,22 @@ class ClusterDeleteResponse(BaseModel):
     success: bool = Field(..., description="삭제 성공 여부")
     cluster_id: str = Field(..., description="삭제된 클러스터 ID")
     message: str = Field(..., description="삭제 결과 메시지")
+
+class HelmRepoCreateRequest(BaseModel):
+    """헬름 저장소 생성 요청 스키마"""
+    name: str = Field(..., description="헬름 저장소 이름")
+    url: str = Field(..., description="헬름 저장소 url")
+    username: str = Field(..., description="유저 이름")
+    password: str = Field(..., description="비밀번호")
+    caFile: str = Field(..., description="csFile")
+    insecureSkipTLSVerify: bool = Field(..., description="insecureSkipTLSVerify")
+
+class HelmRepoDeleteResponse(BaseModel):
+    """헬름 저장소 삭제 응답 모델"""
+    success: bool = Field(..., description="삭제 성공 여부")
+    name: str = Field(..., description="삭제된 헬름 저장소 이름")
+    message: str = Field(..., description="삭제 결과 메시지")
+
+class FilterModel(BaseModel):
+    namespace: Optional[str] = Field(None, description="네임스페이스")
+    duration: Optional[str] = Field(None, description="기간")
