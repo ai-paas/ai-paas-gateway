@@ -174,6 +174,89 @@ async def any_cloud_delete_api(
             detail="Internal server error occurred while deleting cluster"
         )
 
+# 헬름 저장소 목록 조회 API
+@router_helm.get("/helm-repos", response_model=AnyCloudDataResponse)
+async def get_helms(
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    헬름 저장소 전체 목록을 조회합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.get_helm_repos(
+            user_info=user_info
+        )
+
+        # 목록 조회는 data로 래핑하여 반환
+        return AnyCloudDataResponse(data=response["data"])
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting helm-repos for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve helm-repos"
+        )
+
+# 헬름 저장소 존재 여부 확인 API
+@router_helm.get("/helm-repos/{helm_repo_name}/exists")
+async def get_helms_exists(
+        helm_repo_name: str = Path(..., description="조회할 헬름 저장소 이름"),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    헬름 저장소 존재 여부를 확인합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.check_helm_repos_exists(
+            helm_repo_name=helm_repo_name,
+            user_info=user_info
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting helm-repos for {helm_repo_name} existence for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to check helm-repos existence"
+        )
+
+# 헬름 저장소 상세 조회 API
+@router_helm.get("/helm-repos/{helm_repo_name}")
+async def get_helm_repo_detail(
+        helm_repo_name: str = Path(..., description="조회할 헬름 저장소 이름"),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    헬름 저장소 상세 정보를 조회합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.get_helm_repos_detail(
+            helm_repo_name=helm_repo_name,
+            user_info=user_info
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting helm-repo {helm_repo_name} detail for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve helm-repo details"
+        )
+
 # 범용 POST API
 @router.post("/api/{path:path}", response_model=AnyCloudResponse)
 async def any_cloud_post_api(

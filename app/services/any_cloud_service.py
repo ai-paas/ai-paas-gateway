@@ -166,6 +166,33 @@ class AnyCloudService:
             user_info=user_info
         )
 
+    async def get_helm_repos(self, user_info: dict) -> dict:
+        """
+        헬름 저장소 목록 조회 전용 메소드
+        """
+        return await self.generic_get(
+            path="/helm-repos",  # 고정된 경로
+            user_info=user_info
+        )
+
+    async def check_helm_repos_exists(self, helm_repo_name: str, user_info: dict) -> dict:
+        """
+        헬름 저장소 존재 여부 확인 전용 메소드
+        """
+        return await self.generic_get(
+            path=f"/helm-repos/{helm_repo_name}/exists",  # 고정된 경로
+            user_info=user_info
+        )
+
+    async def get_helm_repos_detail(self, helm_repo_name: str, user_info: dict) -> dict:
+        """
+        헬름 저장소 상세 조회 전용 메소드
+        """
+        return await self.generic_get_unwrapped(
+            path=f"/helm-repos/{helm_repo_name}",  # 클러스터 ID가 포함된 경로
+            user_info=user_info
+        )
+
     async def generic_put(
             self,
             path: str,
