@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.config import settings
-from app.routes import service, member, auth, workflow, model, dataset, hub_connect
+from app.routes import service, member, auth, workflow, model, dataset, hub_connect, any_cloud
 import uvicorn
 import logging
 
@@ -44,7 +44,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 라우터 등록 (순서가 중요! 프록시 라우터는 가장 마지막에)
+# 라우터 등록
 app.include_router(auth.router, prefix=settings.API_V1_STR)
 app.include_router(service.router, prefix=settings.API_V1_STR)
 app.include_router(member.router, prefix=settings.API_V1_STR)
@@ -52,6 +52,10 @@ app.include_router(workflow.router, prefix=settings.API_V1_STR)
 app.include_router(model.router, prefix=settings.API_V1_STR)
 app.include_router(dataset.router, prefix=settings.API_V1_STR)
 app.include_router(hub_connect.router, prefix=settings.API_V1_STR)
+app.include_router(any_cloud.router, prefix=settings.API_V1_STR)
+app.include_router(any_cloud.router_cluster, prefix=settings.API_V1_STR)
+app.include_router(any_cloud.router_helm, prefix=settings.API_V1_STR)
+app.include_router(any_cloud.router_monit, prefix=settings.API_V1_STR)
 
 # 기본 엔드포인트
 @app.get("/")
