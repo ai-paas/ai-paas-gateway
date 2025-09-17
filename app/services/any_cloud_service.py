@@ -198,7 +198,7 @@ class AnyCloudService:
         클러스터 내 노드별 상태 조회 전용 메소드
         """
         return await self.generic_get_unwrapped(
-            path=f"/monit/modeStatus/{cluster_name}",
+            path=f"/monit/nodeStatus/{cluster_name}",
             user_info=user_info
         )
 
