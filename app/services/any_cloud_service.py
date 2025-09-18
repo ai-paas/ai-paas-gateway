@@ -267,9 +267,18 @@ class AnyCloudService:
             user_info=user_info
         )
 
+    async def delete_cluster(self, cluster_id: str, user_info: dict) -> dict:
+        """
+        클러스터 삭제 전용 메소드
+        """
+        return await self.generic_delete(
+            path=f"/system/cluster/{cluster_id}",  # 클러스터 ID가 포함된 경로
+            user_info=user_info
+        )
+    
     async def delete_helm_repo(self, helm_repo_name: str, user_info: dict) -> dict:
         """
-        헬름 저장소 생성 전용 메소드
+        헬름 저장소 삭제 전용 메소드
         """
         return await self.generic_delete(
             path=f"/helm-repos/{helm_repo_name}",
