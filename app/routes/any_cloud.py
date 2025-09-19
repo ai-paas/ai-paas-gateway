@@ -15,6 +15,8 @@ router = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Test"])
 router_cluster = APIRouter(prefix="/any-cloud/system", tags=["Any Cloud - Cluster"])
 router_helm = APIRouter(prefix="/any-cloud", tags=["Any Cloud - HelmRepository"])
 router_monit = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Monitoring"])
+router_package = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Packages"])
+router_catalog = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Catalog"])
 
 def _create_user_info_dict(user: Member) -> Dict[str, str]:
     """Member 객체에서 user_info 딕셔너리 생성"""
@@ -417,104 +419,160 @@ async def get_monitoring_metric(
             detail="Failed to get monitoring metric"
         )
 
-# 범용 POST API
-@router.post("/api/{path:path}", response_model=AnyCloudResponse)
-async def any_cloud_post_api(
-        path: str = Path(..., description="Any Cloud API 경로"),
-        request_data: GenericRequest = Body(...),
-        request: Request = None,
+# 클러스터 특정 리소스 목록 조회 API
+@router_package.get("/kubernetes/{resource_type}", response_model=AnyCloudDataResponse)
+async def get_kubernetes_resource(
+        resource_type: str = Path(..., description="조회할 Resource 타입 (예 : daemonSets. deployments, replicaSets, statefulSets, jobs, cronJobs, endpoints, namespaces, nodes, persistentVolumes, persistentVolumeClaims, pods, secrets,servies, serviceAccounts, configMaps, events, roles, roleBindings, clusterRoles, clusterRoleBindings, horizontalPodAuoscalers, ingresses, storageClasses)", example="nodes"),
+        clusterName: str = Query(..., description="조회할 cluster 이름", example="aws-kubernetes-001"),
+        namespace: str = Query("", description="조회할 namespace 이름", example="default"),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    Any Cloud 범용 POST API 호출
-
-    예시:
-    - POST /any-cloud/api/resources
-    - POST /any-cloud/api/instances/123/start
-    - POST /any-cloud/api/services/deploy
+    쿠버네티스 특정 리소스 전체를 조회합니다.
     """
     try:
         user_info = _create_user_info_dict(current_user)
 
-        # 쿼리 파라미터도 함께 전달
-        query_params = dict(request.query_params) if request else {}
-
-        response = await any_cloud_service.generic_post(
-            path=f"/{path}",
-            data=request_data.data,
-            user_info=user_info,
-            **query_params
+        response = await any_cloud_service.get_kubernetes_resource(
+            resource_type=resource_type,
+            clusterName=clusterName,
+            namespace=namespace,
+            user_info=user_info
         )
 
         return AnyCloudResponse(data=response["data"])
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error calling Any Cloud POST API {path} for {current_user.member_id}: {str(e)}")
+        logger.error(f"Error getting kubernetes cluster resource for {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to call Any Cloud POST API: {str(e)}"
+            detail="Failed to retrieve kubernetes cluster resource"
         )
 
-
-# 범용 PUT API
-@router.put("/api/{path:path}", response_model=AnyCloudResponse)
-async def any_cloud_put_api(
-        path: str = Path(..., description="Any Cloud API 경로"),
-        request_data: GenericRequest = Body(...),
-        request: Request = None,
+# 클러스터 특정 리소스 목록 조회 API
+@router_package.get("/kubernetes/{resource_type}/{resource_name}", response_model=AnyCloudResponse)
+async def get_kubernetes_resource_name(
+        resource_type: str = Path(..., description="조회할 Resource 타입 (예 : daemonSets. deployments, replicaSets, statefulSets, jobs, cronJobs, endpoints, namespaces, nodes, persistentVolumes, persistentVolumeClaims, pods, secrets,servies, serviceAccounts, configMaps, events, roles, roleBindings, clusterRoles, clusterRoleBindings, horizontalPodAuoscalers, ingresses, storageClasses)", example="nodes"),
+        resource_name: str = Path(..., description="조회할 Resource 이름", example="master"),
+        clusterName: str = Query(..., description="조회할 cluster 이름", example="aws-kubernetes-001"),
+        namespace: str = Query("", description="조회할 namespace 이름", example="default"),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    Any Cloud 범용 PUT API 호출
+    쿠버네티스 특정 리소스 전체를 조회합니다.
     """
     try:
         user_info = _create_user_info_dict(current_user)
 
-        query_params = dict(request.query_params) if request else {}
-
-        response = await any_cloud_service.generic_put(
-            path=f"/{path}",
-            data=request_data.data,
-            user_info=user_info,
-            **query_params
+        response = await any_cloud_service.get_kubernetes_resource_name(
+            resource_type=resource_type,
+            resource_name=resource_name,
+            clusterName=clusterName,
+            namespace=namespace,
+            user_info=user_info
         )
 
-        return AnyCloudResponse(data=response["data"])
+        return response
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error calling Any Cloud PUT API {path} for {current_user.member_id}: {str(e)}")
+        logger.error(f"Error getting kubernetes cluster resource for {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to call Any Cloud PUT API: {str(e)}"
+            detail="Failed to retrieve kubernetes cluster resource"
         )
 
-
-# 범용 DELETE API
-@router.delete("/api/{path:path}", response_model=AnyCloudResponse)
-async def any_cloud_delete_api(
-        path: str = Path(..., description="Any Cloud API 경로"),
-        request: Request = None,
+# 클러스터 특정 리소스 삭제 API
+@router_package.delete("/kubernetes/{resource_type}/{resource_name}", response_model=AnyCloudResponse)
+async def delete_kubernetes_resource_name(
+        resource_type: str = Path(..., description="조회할 Resource 타입 (예 : daemonSets. deployments, replicaSets, statefulSets, jobs, cronJobs, endpoints, namespaces, nodes, persistentVolumes, persistentVolumeClaims, pods, secrets,servies, serviceAccounts, configMaps, events, roles, roleBindings, clusterRoles, clusterRoleBindings, horizontalPodAuoscalers, ingresses, storageClasses)", example="nodes"),
+        resource_name: str = Path(..., description="조회할 Resource 이름", example="master"),
+        clusterName: str = Query(..., description="조회할 cluster 이름", example="aws-kubernetes-001"),
+        namespace: str = Query("", description="조회할 namespace 이름", example="default"),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    Any Cloud 범용 DELETE API 호출
+    쿠버네티스 특정 리소스를 삭제합니다.
     """
     try:
         user_info = _create_user_info_dict(current_user)
 
-        query_params = dict(request.query_params) if request else {}
-
-        response = await any_cloud_service.generic_delete(
-            path=f"/{path}",
-            user_info=user_info,
-            **query_params
+        response = await any_cloud_service.get_kubernetes_resource_name(
+            resource_type=resource_type,
+            resource_name=resource_name,
+            clusterName=clusterName,
+            namespace=namespace,
+            user_info=user_info
         )
 
-        return AnyCloudResponse(data=response["data"])
+        return response
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error calling Any Cloud DELETE API {path} for {current_user.member_id}: {str(e)}")
+        logger.error(f"Error getting deleting cluster resource for {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to call Any Cloud DELETE API: {str(e)}"
+            detail="Internal server error occurred while deleting kubernetes cluster resource"
+        )
+
+# 클러스터 연결 테스트 API
+@router_package.get("/kubernetes/test-connection", response_model=AnyCloudResponse)
+async def test_cluster(
+        clusterName: str = Query(..., description="조회할 cluster 이름", example="openstack"),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    클러스터 연결 상태를 테스트합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.get_kubernetes_test(
+            clusterName=clusterName,
+            user_info=user_info
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting kubernetes cluster for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve kubernetes cluster"
+        )
+
+# 클러스터 목록 조회 API
+@router_catalog.get("/catalog/releases", response_model=AnyCloudDataResponse)
+async def get_helm_releases(
+        clusterId: str = Query(..., description="조회할 cluster ID", example="aws-kubernetes-001"),
+        namespace: str = Query("", description="조회할 namespace 이름", example="default"),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    Helm CLI를 사용하여 클러스터의 모든 릴리즈 목록을 조회합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.get_catalog_releases(
+            clusterId=clusterId,
+            namespace=namespace,
+            user_info=user_info
+        )
+
+        return AnyCloudDataResponse(data=response["data"])
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting clusters for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve clusters"
         )

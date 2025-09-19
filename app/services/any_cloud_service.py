@@ -212,6 +212,49 @@ class AnyCloudService:
             **filter  # filter dict를 **kwargs로 전개하여 쿼리 파라미터로 전달
         )
 
+    async def get_kubernetes_resource(self, resource_type: str, clusterName: str, namespace: str, user_info: dict) -> dict:
+        """
+        쿠버네티스 특정 리소스 조회 전용 메소드
+        """
+        return await self.generic_get(
+            path=f"/kubernetes/{resource_type}",  # 고정된 경로
+            clusterName=clusterName,
+            namespace=namespace,
+            user_info=user_info
+        )
+
+    async def get_kubernetes_resource_name(self, resource_type: str, resource_name: str, clusterName: str, namespace: str, user_info: dict) -> dict:
+        """
+        쿠버네티스 특정 리소스 조회 전용 메소드
+        """
+        return await self.generic_get(
+            path=f"/kubernetes/{resource_type}/{resource_name}",  # 고정된 경로
+            clusterName=clusterName,
+            namespace=namespace,
+            user_info=user_info
+        )
+
+    async def delete_kubernetes_resource(self, resource_type: str, resource_name: str, clusterName: str, namespace: str, user_info: dict) -> dict:
+        """
+        쿠버네티스 특정 리소스 삭제 전용 메소드
+        """
+        return await self.generic_delete(
+            path=f"/kubernetes/{resource_type}/{resource_name}",  # 고정된 경로
+            clusterName=clusterName,
+            namespace=namespace,
+            user_info=user_info
+        )
+
+    async def get_kubernetes_test(self, clusterName: str, user_info: dict) -> dict:
+        """
+        클러스터 연결 상태를 테스트합니다.
+        """
+        return await self.generic_get(
+            path="/kubernetes/test-connection",  # 고정된 경로
+            clusterName=clusterName,
+            user_info=user_info
+        )
+
     async def generic_put(
             self,
             path: str,
@@ -282,6 +325,17 @@ class AnyCloudService:
         """
         return await self.generic_delete(
             path=f"/helm-repos/{helm_repo_name}",
+            user_info=user_info
+        )
+
+    async def get_catalog_releases(self, clusterId: str, namespace: str, user_info: dict) -> dict:
+        """
+        클러스터 목록 조회 전용 메소드
+        """
+        return await self.generic_get(
+            path="/charts/releases",  # 고정된 경로
+            clusterId=clusterId,
+            namespace=namespace,
             user_info=user_info
         )
 
