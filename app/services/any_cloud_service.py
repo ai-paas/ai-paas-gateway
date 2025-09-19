@@ -1,3 +1,5 @@
+from http.client import responses
+
 import httpx
 import logging
 import asyncio
@@ -138,6 +140,65 @@ class AnyCloudService:
             "GET", path, user_info=user_info, params=query_params
         )
 
+    async def generic_put(
+            self,
+            path: str,
+            data: Dict[str, Any],
+            user_info: Optional[Dict[str, str]] = None,
+            **query_params
+    ) -> Dict[str, Any]:
+        """범용 PUT 요청"""
+        response = await self._make_request(
+            "PUT", path, user_info=user_info, json=data, params=query_params
+        )
+
+        # data 필드가 있으면 data 내용만 반환, 없으면 전체 응답 반환
+        if isinstance(response, dict) and "data" in response:
+            return response["data"]
+        return response
+
+    async def generic_delete(
+            self,
+            path: str,
+            user_info: Optional[Dict[str, str]] = None,
+            **query_params
+    ) -> Dict[str, Any]:
+        """범용 DELETE 요청"""
+        return await self._make_request(
+            "DELETE", path, user_info=user_info, params=query_params
+        )
+
+    async def generic_post(
+            self,
+            path: str,
+            data: Dict[str, Any],
+            user_info: Optional[Dict[str, str]] = None,
+            **query_params
+    ) -> Dict[str, Any]:
+        """범용 POST 요청 (동적 엔드포인트 지원)"""
+        response = await self._make_request(
+            "POST", path, user_info=user_info, json=data, params=query_params
+        )
+        # data 필드가 있으면 data 내용만 반환, 없으면 전체 응답 반환
+        if isinstance(response, dict) and "data" in response:
+            return response["data"]
+        return response
+
+    async def simple_post(
+            self,
+            path: str,
+            user_info: Optional[Dict[str, str]] = None,
+            **query_params
+    ) -> Dict[str, Any]:
+        """데이터 없는 단순 POST 요청 (트리거/액션용)"""
+        response = await self._make_request(
+            "POST", path, user_info=user_info, params=query_params
+        )
+        # data 필드가 있으면 data 내용만 반환, 없으면 전체 응답 반환
+        if isinstance(response, dict) and "data" in response:
+            return response["data"]
+        return response
+
     async def get_clusters(self, user_info: dict) -> dict:
         """
         클러스터 목록 조회 전용 메소드
@@ -154,7 +215,7 @@ class AnyCloudService:
         return await self.generic_get(
             path="/system/cluster/exists",  # 고정된 경로
             user_info=user_info,
-            _clusterId=cluster_id  # 쿼리 파라미터로 전달
+            clusterId=cluster_id  # 쿼리 파라미터로 전달
         )
 
     async def get_cluster_detail(self, cluster_id: str, user_info: dict) -> dict:
@@ -163,6 +224,24 @@ class AnyCloudService:
         """
         return await self.generic_get_unwrapped(
             path=f"/system/cluster/{cluster_id}",  # 클러스터 ID가 포함된 경로
+            user_info=user_info
+        )
+
+    async def get_cluster_test_connection(self, cluster_id: str, user_info: dict) -> dict:
+        """
+        클러스터 연결 테스트 메소드
+        """
+        return await self.generic_get_unwrapped(
+            path=f"/system/cluster/{cluster_id}/test-connection",  # 클러스터 ID가 포함된 경로
+            user_info=user_info
+        )
+
+    async def cluster_refresh(self, cluster_id: str, user_info: dict) -> dict:
+        """
+        클러스터 상태 강제 업데이트 메소드
+        """
+        return await self.simple_post(
+            path=f"/system/cluster/{cluster_id}/refresh",  # 클러스터 ID가 포함된 경로
             user_info=user_info
         )
 
@@ -255,47 +334,23 @@ class AnyCloudService:
             user_info=user_info
         )
 
-    async def generic_put(
-            self,
-            path: str,
-            data: Dict[str, Any],
-            user_info: Optional[Dict[str, str]] = None,
-            **query_params
-    ) -> Dict[str, Any]:
-        """범용 PUT 요청"""
-        return await self._make_request(
-            "PUT", path, user_info=user_info, json=data, params=query_params
-        )
-
-    async def generic_delete(
-            self,
-            path: str,
-            user_info: Optional[Dict[str, str]] = None,
-            **query_params
-    ) -> Dict[str, Any]:
-        """범용 DELETE 요청"""
-        return await self._make_request(
-            "DELETE", path, user_info=user_info, params=query_params
-        )
-
-    async def generic_post(
-            self,
-            path: str,
-            data: Dict[str, Any],
-            user_info: Optional[Dict[str, str]] = None,
-            **query_params
-    ) -> Dict[str, Any]:
-        """범용 POST 요청 (동적 엔드포인트 지원)"""
-        return await self._make_request(
-            "POST", path, user_info=user_info, json=data, params=query_params
-        )
-
     async def create_cluster(self, data: dict, user_info: dict) -> dict:
         """
         클러스터 생성 전용 메소드
         """
         return await self.generic_post(
             path="/system/cluster",  # 고정된 경로
+            data=data,
+            user_info=user_info
+        )
+
+    async def update_cluster(self, data: dict, cluster_id: str, user_info: dict) -> dict:
+        """
+        클러스터 생성 전용 메소드
+        """
+        logger.info(f"Sending data to Any Cloud: {data}")  # 로그 추가
+        return await self.generic_put(
+            path=f"/system/cluster/{cluster_id}",  # 고정된 경로
             data=data,
             user_info=user_info
         )
