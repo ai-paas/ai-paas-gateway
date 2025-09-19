@@ -5,7 +5,7 @@ import json
 
 from app.auth import get_current_user
 from app.schemas.any_cloud import AnyCloudResponse, AnyCloudDataResponse, GenericRequest, ClusterCreateRequest, \
-    ClusterDeleteResponse, HelmRepoCreateRequest, FilterModel
+    ClusterDeleteResponse, HelmRepoCreateRequest, FilterModel, ClusterUpdateRequest
 from app.services.any_cloud_service import any_cloud_service
 from app.models import Member
 
@@ -56,7 +56,7 @@ async def get_clusters(
 # 클러스터 존재 여부 확인 API
 @router_cluster.get("/cluster/exists")
 async def check_cluster_exists(
-        cluster_id: str = Query(..., alias="_clusterId", description="조회할 클러스터 ID"),
+        cluster_id: str = Query(..., alias="cluster_id", description="조회할 클러스터 ID"),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -109,8 +109,77 @@ async def get_cluster_detail(
             detail="Failed to retrieve cluster details"
         )
 
+
+# 클러스터 연결 테스트
+@router_cluster.get("/cluster/{cluster_id}/test-connection")
+async def get_cluster_test_connection(
+        cluster_id: str = Path(..., description="조회할 클러스터 ID"),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    클러스터 연결 상태를 테스트합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.get_cluster_test_connection(
+            cluster_id=cluster_id,
+            user_info=user_info
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting cluster {cluster_id} detail for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve cluster details"
+        )
+
+# 클러스터 수정
+@router_cluster.put("/cluster/{cluster_id}")
+async def update_any_cloud_cluster(
+        request: Request,  # 추가
+        cluster_data: ClusterUpdateRequest,
+        cluster_id: str = Path(..., description="수정할 클러스터 ID"),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    클러스터를 업데이트합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        # 클러스터 데이터를 딕셔너리로 변환
+        cluster_dict = cluster_data.dict()
+
+        # Any Cloud 서비스 호출
+        response = await any_cloud_service.update_cluster(
+            data=cluster_dict,
+            cluster_id=cluster_id,
+            user_info=user_info
+        )
+
+        return response
+
+    except ValueError as ve:
+        logger.error(f"Validation error updating cluster for {current_user.member_id}: {str(ve)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid cluster data: {str(ve)}"
+        )
+
+    except Exception as e:
+        logger.error(f"Error updating cluster for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update cluster: {str(e)}"
+        )
+
 # 클러스터 생성
-@router_cluster.post("/cluster", response_model=AnyCloudResponse)
+@router_cluster.post("/cluster")
 async def create_any_cloud_cluster(
         cluster_data: ClusterCreateRequest,
         current_user: Member = Depends(get_current_user)
@@ -130,7 +199,7 @@ async def create_any_cloud_cluster(
             user_info=user_info
         )
 
-        return AnyCloudResponse(data=response["data"])
+        return response
 
     except ValueError as ve:
         logger.error(f"Validation error creating cluster for {current_user.member_id}: {str(ve)}")
@@ -144,6 +213,40 @@ async def create_any_cloud_cluster(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create cluster: {str(e)}"
+        )
+
+
+# 클러스터 상태 강제 업데이트
+@router_cluster.post("/cluster/{cluster_id}/refresh")
+async def cluster_refresh(
+        cluster_id: str = Path(..., description="조회할 클러스터 ID"),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    클러스터 상태를 강제로 업데이트합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.cluster_refresh(
+            cluster_id=cluster_id,
+            user_info=user_info
+        )
+
+        return response
+
+    except ValueError as ve:
+        logger.error(f"Validation error refresh cluster for {current_user.member_id}: {str(ve)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid cluster data: {str(ve)}"
+        )
+
+    except Exception as e:
+        logger.error(f"Error refresh cluster for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to refresh cluster: {str(e)}"
         )
 
 # 클러스터 삭제
@@ -547,7 +650,7 @@ async def test_cluster(
             detail="Failed to retrieve kubernetes cluster"
         )
 
-# 클러스터 목록 조회 API
+# 카탈로그 목록 조회 API
 @router_catalog.get("/catalog/releases", response_model=AnyCloudDataResponse)
 async def get_helm_releases(
         clusterId: str = Query(..., description="조회할 cluster ID", example="aws-kubernetes-001"),
