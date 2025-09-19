@@ -60,3 +60,15 @@ class HelmRepoDeleteResponse(BaseModel):
 class FilterModel(BaseModel):
     namespace: Optional[str] = Field(None, description="네임스페이스")
     duration: Optional[str] = Field(None, description="기간")
+
+class ClusterUpdateRequest(BaseModel):
+    """클러스터 수정 요청 스키마"""
+    description: str = Field(..., description="클러스터 설명")
+    clusterType: str = Field(..., description="클러스터 타입")
+    clusterProvider: str = Field(..., description="클러스터 제공자")
+    apiServerUrl: str = Field(..., description="API 서버 URL")
+    apiServerIp: str = Field(..., description="API 서버 IP")
+    serverCa: str = Field(..., description="서버 CA 인증서")
+    clientCa: str = Field(..., description="클라이언트 CA 인증서")
+    clientKey: str = Field(..., description="클라이언트 키")
+    monitServerUrl: str = Field(..., description="모니터링 서버 URL")
