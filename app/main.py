@@ -59,9 +59,10 @@ async def selective_cors_middleware(request, call_next):
     return response
 
 
-# OPTIONS 요청 처리 (Preflight)
+# OPTIONS 요청 처리 (Preflight) - Swagger에서 숨김
 @app.options(f"{settings.API_V1_STR}/members/{{path:path}}", include_in_schema=False)
-@app.options(f"{settings.API_V1_STR}/members", include_in_schema=False)
+@app.options(f"{settings.API_V1_STR}/members/", include_in_schema=False)
+@app.options(f"{settings.API_V1_STR}/members", include_in_schema=False)  # trailing slash 없는 버전 추가
 async def handle_cors_preflight():
     """멤버 API용 CORS preflight 요청 처리"""
     response = Response()
