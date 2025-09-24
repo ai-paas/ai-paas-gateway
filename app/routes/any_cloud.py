@@ -250,7 +250,7 @@ async def cluster_refresh(
         )
 
 # 클러스터 삭제
-@router_cluster.delete("/cluster/{cluster_id}", response_model=AnyCloudResponse)
+@router_cluster.delete("/cluster/{cluster_id}")
 async def cluster_delete_api(
         cluster_id: str = Path(..., description="cluster_id"),
         current_user: Member = Depends(get_current_user)

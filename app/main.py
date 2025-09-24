@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from contextlib import asynccontextmanager
 from app.config import settings
 from app.routes import service, member, auth, workflow, model, dataset, hub_connect, any_cloud
@@ -36,13 +37,39 @@ app = FastAPI(
 )
 
 # CORS 설정
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # 프로덕션에서는 특정 도메인으로 제한
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["*"],  # 프로덕션에서는 특정 도메인으로 제한
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
+
+@app.middleware("http")
+async def selective_cors_middleware(request, call_next):
+    response = await call_next(request)
+
+    # /members 경로에만 CORS 헤더 추가
+    if request.url.path.startswith(f"{settings.API_V1_STR}/members"):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        response.headers["Access-Control-Allow-Credentials"] = "false"
+
+    return response
+
+
+# OPTIONS 요청 처리 (Preflight)
+@app.options(f"{settings.API_V1_STR}/members/{{path:path}}")
+@app.options(f"{settings.API_V1_STR}/members")
+async def handle_cors_preflight():
+    """멤버 API용 CORS preflight 요청 처리"""
+    response = Response()
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Credentials"] = "false"
+    return response
 
 # 라우터 등록
 app.include_router(auth.router, prefix=settings.API_V1_STR)
