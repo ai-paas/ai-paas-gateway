@@ -164,9 +164,13 @@ class AnyCloudService:
             **query_params
     ) -> Dict[str, Any]:
         """범용 DELETE 요청"""
-        return await self._make_request(
+        response = await self._make_request(
             "DELETE", path, user_info=user_info, params=query_params
         )
+
+        if isinstance(response, dict) and "data" in response:
+            return response["data"]
+        return response
 
     async def generic_post(
             self,
@@ -361,6 +365,7 @@ class AnyCloudService:
         """
         return await self.generic_post(
             path="/helm-repos",  # 고정된 경로
+
             data=data,
             user_info=user_info
         )
