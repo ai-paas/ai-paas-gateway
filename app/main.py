@@ -60,8 +60,8 @@ async def selective_cors_middleware(request, call_next):
 
 
 # OPTIONS 요청 처리 (Preflight)
-@app.options(f"{settings.API_V1_STR}/members/{{path:path}}")
-@app.options(f"{settings.API_V1_STR}/members")
+@app.options(f"{settings.API_V1_STR}/members/{{path:path}}", include_in_schema=False)
+@app.options(f"{settings.API_V1_STR}/members", include_in_schema=False)
 async def handle_cors_preflight():
     """멤버 API용 CORS preflight 요청 처리"""
     response = Response()
