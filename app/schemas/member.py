@@ -74,7 +74,7 @@ class MemberResponse(BaseModel):
     name: str
     member_id: str
     email: str
-    phone: Optional[str] = None
+    phone: Optional[int] = None
     role: str
     is_active: bool
     created_at: datetime
