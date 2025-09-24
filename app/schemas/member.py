@@ -14,7 +14,7 @@ class MemberBase(BaseModel):
     name: str  # 이름 (필수)
     member_id: str  # 아이디 (필수)
     email: EmailStr  # 이메일 (필수)
-    phone: Optional[int] = None  # 연락처
+    phone: Optional[str] = None  # 연락처
     role: str = "user"  # 역할 (사용자/관리자)
     is_active: bool = True
     description: Optional[str] = None  # 설명 (선택사항)
@@ -61,7 +61,7 @@ class MemberUpdate(BaseModel):
     member_id: Optional[str] = None
     email: Optional[EmailStr] = None
     password: Optional[str] = None  # 비밀번호 변경
-    phone: Optional[int] = None
+    phone: Optional[str] = None
     role: Optional[str] = None
     is_active: Optional[bool] = None
     description: Optional[str] = None
@@ -74,7 +74,7 @@ class MemberResponse(BaseModel):
     name: str
     member_id: str
     email: str
-    phone: Optional[int] = None
+    phone: Optional[str] = None
     role: str
     is_active: bool
     created_at: datetime
