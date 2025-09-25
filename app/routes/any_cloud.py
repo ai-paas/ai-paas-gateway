@@ -710,7 +710,7 @@ async def get_catalog_list(
 
 # 차트 상세 조회 API
 @router_catalog.get("/catalog/{repoName}/{chartName}/detail")
-async def get_catalog_list(
+async def get_catalog_detail(
         repoName: str = Path(..., description="Helm repository 이름", example="chart-museum-external"),
         chartName: str = Path(..., description="조회할 차트 이름", example="nginx"),
         current_user: Member = Depends(get_current_user)
@@ -740,7 +740,7 @@ async def get_catalog_list(
 
 # 차트 README.md 조회 API
 @router_catalog.get("/catalog/{repoName}/{chartName}/readme")
-async def get_catalog_list(
+async def get_catalog_readme(
         repoName: str = Path(..., description="Helm repository 이름", example="chart-museum-external"),
         chartName: str = Path(..., description="조회할 차트 이름", example="nginx"),
         version: str = Query("", description="차트 버전 (선택사항)", example="15.4.4"),
