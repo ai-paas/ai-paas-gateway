@@ -390,7 +390,7 @@ class AnyCloudService:
 
     async def get_catalog_releases(self, clusterId: str, namespace: str, user_info: dict) -> dict:
         """
-        클러스터 목록 조회 전용 메소드
+        Helm Release 목록 조회 전용 메소드
         """
         return await self.generic_get(
             path="/charts/releases",  # 고정된 경로
@@ -398,6 +398,40 @@ class AnyCloudService:
             namespace=namespace,
             user_info=user_info
         )
+
+    async def get_catalog_list(self, repoName: str, user_info: dict) -> dict:
+        """
+        Helm 차트 목록 조회 전용 메소드
+        """
+        return await self.generic_get(
+            path=f"/charts/{repoName}",  # 고정된 경로
+            repoName=repoName,
+            user_info=user_info
+        )
+
+    async def get_catalog_chart(self, repoName: str, chartName: str, user_info: dict) -> dict:
+        """
+        차트 상세 조회 전용 메소드
+        """
+        return await self.generic_get_unwrapped(
+            path=f"/charts/{repoName}/{chartName}/detail",  # 고정된 경로
+            repoName=repoName,
+            chartName=chartName,
+            user_info=user_info
+        )
+
+    async def get_catalog_readme(self, repoName: str, chartName: str, version: str, user_info: dict) -> dict:
+        """
+        차트 README.md 조회 전용 메소드
+        """
+        return await self.generic_get_unwrapped(
+            path=f"/charts/{repoName}/{chartName}/readme",  # 고정된 경로
+            repoName=repoName,
+            chartName=chartName,
+            version=version,
+            user_info=user_info
+        )
+
 
 
 # 싱글톤 인스턴스
