@@ -674,8 +674,98 @@ async def get_helm_releases(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting clusters for {current_user.member_id}: {str(e)}")
+        logger.error(f"Error getting clusters releases for {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve clusters"
+            detail="Failed to retrieve clusters releases"
+        )
+
+# 카탈로그 목록 조회 API
+@router_catalog.get("/catalog/{repoName}", response_model=AnyCloudDataResponse)
+async def get_catalog_list(
+        repoName: str = Path(..., description="Helm repository 이름", example="chart-museum-external"),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    DB에서 repoName로 RepositoryEntity 조회 후 해당 url에서 index.yaml을 다운로드하여 차트 목록을 반환합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.get_catalog_list(
+            repoName=repoName,
+            user_info=user_info
+        )
+
+        return AnyCloudDataResponse(data=response["data"])
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting catalogs for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve catalogs"
+        )
+
+# 차트 상세 조회 API
+@router_catalog.get("/catalog/{repoName}/{chartName}/detail")
+async def get_catalog_list(
+        repoName: str = Path(..., description="Helm repository 이름", example="chart-museum-external"),
+        chartName: str = Path(..., description="조회할 차트 이름", example="nginx"),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    DB에서 repoName 또는 이름으로 RepositoryEntity 조회 후 해당 url에서 index.yaml을 다운로드하여 특정 차트 상세 정보를 반환합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.get_catalog_chart(
+            repoName=repoName,
+            chartName=chartName,
+            user_info=user_info
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting chart for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve chart"
+        )
+
+# 차트 README.md 조회 API
+@router_catalog.get("/catalog/{repoName}/{chartName}/readme")
+async def get_catalog_list(
+        repoName: str = Path(..., description="Helm repository 이름", example="chart-museum-external"),
+        chartName: str = Path(..., description="조회할 차트 이름", example="nginx"),
+        version: str = Query("", description="차트 버전 (선택사항)", example="15.4.4"),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    Helm CLI를 사용하여 지정된 차트의 README.md 내용을 실시간으로 조회합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.get_catalog_readme(
+            repoName=repoName,
+            chartName=chartName,
+            version=version,
+            user_info=user_info
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting README.md for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve README.md"
         )
