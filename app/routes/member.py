@@ -91,14 +91,16 @@ def update_member(
     if not existing_member:
         raise HTTPException(status_code=404, detail="Member not found")
 
-    # member_id 중복 체크 (변경하는 경우)
-    if member_update.member_id and member_update.member_id != existing_member.member_id:
+    # member_id 중복 체크 (기존 값과 다르게 변경하는 경우만)
+    if (member_update.member_id and
+        member_update.member_id != existing_member.member_id):
         member_id_exists = member_crud.get_member(db=db, member_id=member_update.member_id)
         if member_id_exists:
             raise HTTPException(status_code=400, detail="Member ID already exists")
 
-    # email 중복 체크 (변경하는 경우)
-    if member_update.email and member_update.email != existing_member.email:
+    # email 중복 체크 (기존 값과 다르게 변경하는 경우만)
+    if (member_update.email and
+        member_update.email != existing_member.email):
         email_exists = member_crud.get_member_by_email(db=db, email=str(member_update.email))
         if email_exists:
             raise HTTPException(status_code=400, detail="Email already exists")

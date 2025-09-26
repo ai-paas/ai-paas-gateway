@@ -203,6 +203,78 @@ class AnyCloudService:
             return response["data"]
         return response
 
+    async def generic_post_file(
+            self,
+            path: str,
+            data: Dict[str, Any],
+            user_info: Optional[Dict[str, str]] = None,
+            files: Optional[Dict[str, Any]] = None,
+            **query_params
+    ) -> Dict[str, Any]:
+        """범용 POST 요청 (파일 업로드 지원)"""
+
+        # 파일이 있으면 multipart/form-data로 전송
+        if files or any(key == "valuesFile" for key in data.keys()):
+            response = await self._make_multipart_request(
+                "POST", path, data=data, files=files, user_info=user_info, params=query_params
+            )
+        else:
+            response = await self._make_request(
+                "POST", path, user_info=user_info, json=data, params=query_params
+            )
+
+        # data 필드가 있으면 data 내용만 반환, 없으면 전체 응답 반환
+        if isinstance(response, dict) and "data" in response:
+            return response["data"]
+        return response
+
+    # _make_multipart_request 메소드 추가 (없다면)
+    async def _make_multipart_request(
+            self,
+            method: str,
+            path: str,
+            data: Optional[Dict[str, Any]] = None,
+            files: Optional[Dict[str, Any]] = None,
+            user_info: Optional[Dict[str, str]] = None,
+            params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """멀티파트 요청을 위한 메소드"""
+
+        headers = self._get_headers(user_info)
+        # multipart 요청시 Content-Type 헤더 제거 (httpx가 자동 설정)
+        headers.pop('Content-Type', None)
+
+        url = f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
+
+        # form data와 files 구성
+        form_data = {}
+        file_data = {}
+
+        if data:
+            for key, value in data.items():
+                if key == "valuesFile" and isinstance(value, str):
+                    # base64 디코딩해서 파일로 전송
+                    import base64
+                    file_content = base64.b64decode(value)
+                    file_data["valuesFile"] = ("values.yaml", file_content, "application/x-yaml")
+                else:
+                    form_data[key] = value
+
+        if files:
+            file_data.update(files)
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.request(
+                method=method,
+                url=url,
+                headers=headers,
+                data=form_data,
+                files=file_data,
+                params=params
+            )
+
+            return self._handle_response(response)
+
     async def get_clusters(self, user_info: dict) -> dict:
         """
         클러스터 목록 조회 전용 메소드
@@ -432,7 +504,68 @@ class AnyCloudService:
             user_info=user_info
         )
 
+    async def get_catalog_status(self, repoName: str, chartName: str, releaseName: str, clusterId: str, namespace: str, user_info: dict) -> dict:
+        """
+        차트 status 조회 전용 메소드
+        """
+        return await self.generic_get_unwrapped(
+            path=f"/charts/{repoName}/{chartName}/status",  # 고정된 경로
+            repoName=repoName,
+            chartName=chartName,
+            releaseName=releaseName,
+            clusterId=clusterId,
+            namespace=namespace,
+            user_info=user_info
+        )
 
+    async def get_catalog_values(self, repoName: str, chartName: str, version: str, user_info: dict) -> dict:
+        """
+        차트 values 조회 전용 메소드
+        """
+        return await self.generic_get_unwrapped(
+            path=f"/charts/{repoName}/{chartName}/values",  # 고정된 경로
+            repoName=repoName,
+            chartName=chartName,
+            version=version,
+            user_info=user_info
+        )
+
+    # service.py - 서비스 메소드 수정
+    async def create_catalog_deploy(
+            self,
+            repoName: str,
+            chartName: str,
+            releaseName: str,
+            clusterId: str,
+            namespace: str = "default",
+            version: Optional[str] = None,
+            valuesFile: Optional[bytes] = None,
+            user_info: dict = None
+    ) -> dict:
+        """
+        차트 배포 메소드
+        """
+        # 요청 데이터 구성
+        deploy_data = {
+            "releaseName": releaseName,
+            "clusterId": clusterId,
+            "namespace": namespace
+        }
+
+        # 선택적 필드 추가
+        if version:
+            deploy_data["version"] = version
+
+        # valuesFile 처리 - 파일이 있으면 base64 인코딩 또는 텍스트로 전송
+        if valuesFile:
+            import base64
+            deploy_data["valuesFile"] = base64.b64encode(valuesFile).decode('utf-8')
+
+        return await self.generic_post_file(
+            path=f"/charts/{repoName}/{chartName}/deploy",
+            data=deploy_data,
+            user_info=user_info
+        )
 
 # 싱글톤 인스턴스
 any_cloud_service = AnyCloudService()
