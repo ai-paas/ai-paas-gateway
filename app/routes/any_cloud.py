@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Path, Body, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Path, Body, Request, UploadFile, File, Form
 from typing import Optional, Any, Dict
 import logging
 import json
@@ -768,4 +768,122 @@ async def get_catalog_readme(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve README.md"
+        )
+
+# 차트 배포 상태 조회 API
+@router_catalog.get("/catalog/{repoName}/{chartName}/status")
+async def get_catalog_status(
+        repoName: str = Path(..., description="Helm repository 이름", example="chart-museum-external"),
+        chartName: str = Path(..., description="조회할 차트 이름", example="nginx"),
+        releaseName: str = Query(..., description="릴리즈 이름", example="nginx-test-release"),
+        clusterId: str = Query(..., description="클러스터 ID", example="cluster-001"),
+        namespace: str = Query("", description="네임스페이스", example="default"),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    Helm CLI를 사용하여 특정 릴리즈의 배포 상태를 조회합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.get_catalog_status(
+            repoName=repoName,
+            chartName=chartName,
+            releaseName=releaseName,
+            clusterId=clusterId,
+            namespace=namespace,
+            user_info=user_info
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting status for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve status"
+        )
+
+# 차트 values.yaml 조회 API
+@router_catalog.get("/catalog/{repoName}/{chartName}/values")
+async def get_catalog_values(
+        repoName: str = Path(..., description="Helm repository 이름", example="chart-museum-external"),
+        chartName: str = Path(..., description="조회할 차트 이름", example="nginx"),
+        version: str = Query("", description="차트 버전 (선택사항)", example="15.4.4"),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    Helm CLI를 사용하여 지정된 차트의 values.yaml 내용을 실시간으로 조회합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.get_catalog_values(
+            repoName=repoName,
+            chartName=chartName,
+            version=version,
+            user_info=user_info
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting values for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve values"
+        )
+
+@router_catalog.post("/catalog/{repoName}/{chartName}/deploy")
+async def post_catalog_deploy(
+        repoName: str = Path(..., description="Helm repository 이름", example="my-repo"),
+        chartName: str = Path(..., description="차트 이름", example="nginx"),
+        releaseName: str = Form(..., description="Helm 릴리즈 이름", example="my-nginx"),
+        clusterId: str = Form(..., description="배포할 클러스터 ID", example="cluster-001"),
+        namespace: str = Form(default="default", description="배포할 네임스페이스", example="default"),
+        version: Optional[str] = Form(default=None, description="차트 버전 (미지정시 최신 버전)", example="15.4.4"),
+        valuesFile: Optional[UploadFile] = File(default=None, description="파일 선택"),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    ProcessBuilder를 사용하여 Helm CLI(helm install/upgrade)를 호출하여 차트를 배포합니다. values.yaml 파일 업로드가 가능합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        # valuesFile 처리
+        values_content = None
+        if valuesFile:
+            values_content = await valuesFile.read()
+            # 파일 타입 검증
+            if not valuesFile.filename.endswith(('.yaml', '.yml')):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Values file must be a YAML file"
+                )
+
+        response = await any_cloud_service.create_catalog_deploy(
+            repoName=repoName,
+            chartName=chartName,
+            releaseName=releaseName,
+            clusterId=clusterId,
+            namespace=namespace,
+            version=version,
+            valuesFile=values_content,
+            user_info=user_info
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deploying chart for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to deploy chart"
         )
