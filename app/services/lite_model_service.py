@@ -152,13 +152,10 @@ class LiteModelService:
             user_info: Optional[Dict[str, str]] = None,
             **query_params
     ) -> Dict[str, Any]:
-        """범용 POST 요청 (동적 엔드포인트 지원) - data 래핑 없이 그대로 반환"""
+        """범용 PUT 요청 (동적 엔드포인트 지원) - data 래핑 없이 그대로 반환"""
         response = await self._make_request(
-            "POST", path, user_info=user_info, json=data, params=query_params
+            "PUT", path, user_info=user_info, json=data, params=query_params
         )
-        # data 필드가 있으면 data 내용만 반환, 없으면 전체 응답 반환
-        if isinstance(response, dict) and "data" in response:
-            return response["data"]
         return response
 
     async def simple_post(
@@ -183,7 +180,7 @@ class LiteModelService:
             user_info: Optional[Dict[str, str]] = None,
             **query_params
     ) -> Dict[str, Any]:
-        """범용 PATCH 요청 (동적 엔드포인트 지원)"""
+        """범용 PUT 요청 (동적 엔드포인트 지원)"""
         response = await self._make_request(
             "PATCH", path, user_info=user_info, json=data, params=query_params
         )
@@ -279,32 +276,5 @@ class LiteModelService:
             user_info=user_info
         )
 
-    async def model_tensorrt(self, user_info: dict, optimize_data: dict) -> dict:
-        return await self.generic_post(
-            path="/models/bert/optimizers/tensorrt",
-            data=optimize_data,
-            user_info=user_info
-        )
-
-    async def model_openvino(self, user_info: dict, optimize_data: dict) -> dict:
-        return await self.generic_post(
-            path="/models/bert/optimizers/openvino",
-            data=optimize_data,
-            user_info=user_info
-        )
-
-    async def model_owlv2(self, user_info: dict, optimize_data: dict) -> dict:
-        return await self.generic_post(
-            path="/models/owlv2/optimizers/ptq",
-            data=optimize_data,
-            user_info=user_info
-        )
-
-    async def model_detr(self, user_info: dict, optimize_data: dict) -> dict:
-        return await self.generic_post(
-            path="/models/detr-resnet50/optimizers/ptq",
-            data=optimize_data,
-            user_info=user_info
-        )
 # 싱글톤 인스턴스
 lite_model_service = LiteModelService()
