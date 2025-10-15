@@ -12,7 +12,13 @@ from app.config import settings
 
 # 비밀번호 해싱 설정
 HASH_SCHEMES = os.getenv("PASSWORD_HASH_SCHEMES", "bcrypt").split(",")
-pwd_context = CryptContext(schemes=HASH_SCHEMES, deprecated="auto")
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+    bcrypt__default_ident="2b",
+    bcrypt__min_rounds=12,
+    bcrypt__max_rounds=12,
+)
 
 # Bearer 토큰 스키마
 security = HTTPBearer()
