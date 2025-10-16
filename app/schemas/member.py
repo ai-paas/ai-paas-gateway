@@ -36,6 +36,11 @@ class MemberCreate(MemberBase):
         # 8~16자, 영문 대소문자 + 숫자 + 특수문자 조합
         if not re.match(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{8,16}$", v):
             raise ValueError("비밀번호는 8~16자 영문 대소문자, 숫자, 특수문자를 포함해야 합니다.")
+
+        # bcrypt 72바이트 제한 체크 추가
+        if len(v.encode('utf-8')) > 72:
+            raise ValueError("비밀번호가 너무 깁니다. 더 짧은 비밀번호를 사용해주세요.")
+
         return v
 
     @validator("password_confirm")
