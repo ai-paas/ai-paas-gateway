@@ -30,7 +30,7 @@ async def get_models(
         page: Optional[int] = Query(1, alias="page", description="page_num"),
         size: Optional[int] = Query(10, alias="size", description="page_size"),
         name: Optional[str] = Query("", alias="name", description="name"),
-        optimizer_id: Optional[int] = Query("", alias="optimizer_id", description="optimizer_id"),
+        optimizer_id: Optional[int] = Query(None, alias="optimizer_id", description="optimizer_id"),
 ):
     """
     모델 전체 목록을 조회합니다.
@@ -93,7 +93,7 @@ async def get_models(
         page: Optional[int] = Query(1, alias="page", description="page_num"),
         size: Optional[int] = Query(10, alias="size", description="page_size"),
         name: Optional[str] = Query("", alias="name", description="name"),
-        model_id: Optional[int] = Query("", alias="model_id", description="model_id"),
+        model_id: Optional[int] = Query(None, alias="model_id", description="model_id"),
 ):
     """
     Optimizer 전체 목록을 조회합니다.
