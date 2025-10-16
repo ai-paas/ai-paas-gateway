@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Any, Optional, Dict
+from typing import Any, Optional, Dict, List
 
 
 class LiteModelResponse(BaseModel):
@@ -20,6 +20,14 @@ class OptimizeRequest(BaseModel):
 
 
 class TaskUpdate(BaseModel):
-    """Task 업데이트 요청 스키마"""
     progress_status: bool = Field(..., description="진행 상태")
     path_output_model: str = Field(..., description="출력 모델 경로")
+
+class ModelOptimizer(BaseModel):
+    saved_model_run_id: str = Field(..., description="모델 id")
+    saved_model_path: str = Field(..., description="모델 경로")
+
+class ModelOptimizerPTQ(BaseModel):
+    saved_model_run_id: str = Field(..., description="모델 id")
+    saved_model_path: str = Field(..., description="모델 경로")
+    quantization_layers: List[str] = Field(..., description="양자화 레이어 목록")
