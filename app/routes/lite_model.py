@@ -4,7 +4,7 @@ import logging
 import json
 
 from app.auth import get_current_user
-from app.schemas.lite_model import LiteModelResponse, LiteModelDataResponse, OptimizeRequest, TaskUpdate
+from app.schemas.lite_model import LiteModelResponse, LiteModelDataResponse, OptimizeRequest, TaskUpdate, ModelOptimizer, ModelOptimizerPTQ
 from app.services.lite_model_service import lite_model_service
 from app.models import Member
 
@@ -274,4 +274,116 @@ async def patch_task(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update task"
+        )
+
+# Bert Trt 실행 API (POST)
+@router_model.post("/bert/optimizers/tensorrt", response_model=LiteModelResponse)
+async def model_tensorrt(
+        current_user: Member = Depends(get_current_user),
+        request_data: ModelOptimizer = Body(..., description="Model Optimizer request body")
+):
+    """
+    Bert Trt
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await lite_model_service.model_tensorrt(
+            user_info=user_info,
+            optimize_data=request_data.dict(exclude_none=True)
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error executing optimize for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to execute optimize"
+        )
+
+# Openvino 실행 API (POST)
+@router_model.post("/bert/optimizers/openvino", response_model=LiteModelResponse)
+async def model_tensorrt(
+        current_user: Member = Depends(get_current_user),
+        request_data: ModelOptimizer = Body(..., description="Model Optimizer request body")
+):
+    """
+    Openvino
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await lite_model_service.model_openvino(
+            user_info=user_info,
+            optimize_data=request_data.dict(exclude_none=True)
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error executing optimize for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to execute optimize"
+        )
+
+# owlv2 실행 API (POST)
+@router_model.post("/owlv2/optimizers/ptq", response_model=LiteModelResponse)
+async def model_tensorrt(
+        current_user: Member = Depends(get_current_user),
+        request_data: ModelOptimizerPTQ = Body(..., description="Model Optimizer request body")
+):
+    """
+    owlv2
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await lite_model_service.model_owlv2(
+            user_info=user_info,
+            optimize_data=request_data.dict(exclude_none=True)
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error executing optimize for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to execute optimize"
+        )
+
+# Detr 실행 API (POST)
+@router_model.post("/detr-resnet50/optimizers/ptq", response_model=LiteModelResponse)
+async def model_tensorrt(
+        current_user: Member = Depends(get_current_user),
+        request_data: ModelOptimizer = Body(..., description="Model Optimizer request body")
+):
+    """
+    Detr
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await lite_model_service.model_detr(
+            user_info=user_info,
+            optimize_data=request_data.dict(exclude_none=True)
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error executing optimize for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to execute optimize"
         )

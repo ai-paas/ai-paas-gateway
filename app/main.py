@@ -61,6 +61,7 @@ app.include_router(any_cloud.router_catalog, prefix=settings.API_V1_STR)
 app.include_router(lite_model.router_info, prefix=settings.API_V1_STR)
 app.include_router(lite_model.router_optimize, prefix=settings.API_V1_STR)
 app.include_router(lite_model.router_task, prefix=settings.API_V1_STR)
+app.include_router(lite_model.router_model, prefix=settings.API_V1_STR)
 
 # 기본 엔드포인트
 @app.get("/")
