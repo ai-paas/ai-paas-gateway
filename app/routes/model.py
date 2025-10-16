@@ -333,7 +333,17 @@ async def get_model(
     """
     try:
         # 1. 사용자가 해당 모델을 소유하고 있는지 확인
-        if not model_crud.check_model_ownership(db, model_id, current_user.member_id):
+        is_owner = model_crud.check_model_ownership(db, model_id, current_user.member_id)
+
+        # 2. 소유하지 않았다면, 카탈로그 모델인지 확인
+        catalog_model = db.query(Model).filter(
+            Model.is_catalog == True,
+            Model.deleted_at.is_(None),
+            Model.surro_model_id == model_id
+        ).first()
+
+        # 3. 사용자 소유 모델도 아니고, 카탈로그 모델도 아닐 경우 접근 불가
+        if not is_owner and not catalog_model:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Model {model_id} not found or access denied"
