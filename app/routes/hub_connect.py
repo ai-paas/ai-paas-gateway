@@ -36,11 +36,12 @@ def _create_user_info_dict(user: Member) -> dict:
 @router.get("/models", response_model=HubModelListWrapper)
 async def get_hub_models(
         market: str = Query(..., description="Market name (e.g., huggingface, aihub)"),
-        sort: str = Query("downloads", description=""),
+        sort: str = Query("downloads", description="정렬 방식 (downloads, created, relevance)"),
         page: int = Query(1, ge=1, description="페이지 번호"),
         limit: int = Query(30, ge=1, le=100, description="페이지 당 항목 수"),
-        num_parameters_min: str = Query("", description="Minimum parameters (e.g., '3B', '7B', '24B')"),
-        num_parameters_max: str = Query("", description="Maximum parameters (e.g., '128B', '256B')"),
+        search: str = Query(None, description="검색 키워드"),
+        num_parameters_min: str = Query(None, description="Minimum parameters (e.g., '3B', '7B', '24B')"),
+        num_parameters_max: str = Query(None, description="Maximum parameters (e.g., '128B', '256B')"),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -53,6 +54,7 @@ async def get_hub_models(
             sort=sort,
             page=page,
             limit=limit,
+            search=search,
             num_parameters_min=num_parameters_min,
             num_parameters_max=num_parameters_max
         )
