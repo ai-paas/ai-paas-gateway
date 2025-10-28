@@ -8,15 +8,17 @@ class ModelListParams(BaseModel):
     sort: Optional[str] = Field("downloads", description="정렬 방식 (downloads, created, relevance)")
     page: Optional[int] = Field(1, ge=1, description="페이지 번호")
     limit: Optional[int] = Field(30, ge=1, le=100, description="페이지 당 항목 수")
-    num_parameters_min: Optional[str] = Field("num_parameters_min", description="Minimum parameters (e.g., '3B', '7B', '24B')")
-    num_parameters_max: Optional[str] = Field("num_parameters_max", description="Maximum parameters (e.g., '128B', '256B')")
+    search: Optional[str] = Field(None, description="검색 키워드")
+    num_parameters_min: Optional[str] = Field(None, description="Minimum parameters (e.g., '3B', '7B', '24B')")
+    num_parameters_max: Optional[str] = Field(None, description="Maximum parameters (e.g., '128B', '256B')")
 
 
 class HubModelResponse(BaseModel):
-    # 외부 API 필드들
+    """허브 모델 응답 (단순화된 구조)"""
+    # 기본 식별 정보
     mongo_id: Optional[str] = Field(None, alias="_id", description="MongoDB ObjectID")
     id: str = Field(..., description="모델 ID")
-    modelId: Optional[str] = Field(None, description="모델 ID (중복)")
+    modelId: Optional[str] = Field(None, description="모델 ID (id와 동일)")
     author: Optional[str] = Field(None, description="모델 작성자")
 
     # 시간 정보
@@ -30,23 +32,45 @@ class HubModelResponse(BaseModel):
     # 메타데이터
     tags: Optional[List[str]] = Field(default_factory=list, description="모델 태그")
     pipeline_tag: Optional[str] = Field(None, description="파이프라인 태그")
+    task: Optional[str] = Field(None, description="태스크 (pipeline_tag와 동일)")
     library_name: Optional[str] = Field(None, description="라이브러리 이름")
+
+    # 파라미터 정보
+    numParameters: Optional[int] = Field(None, description="파라미터 수")
+    parameterDisplay: Optional[str] = Field(None, description="파라미터 표시 (예: 22.7M)")
+    parameterRange: Optional[str] = Field(None, description="파라미터 범위 (예: small)")
 
     # 상태 정보
     private: Optional[bool] = Field(False, description="비공개 여부")
-    gated: Optional[str] = Field(None, description="게이트 여부")
+    gated: Optional[Union[bool, str]] = Field(None, description="게이트 여부")
     sha: Optional[str] = Field(None, description="SHA 해시")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @validator('modelId', pre=True, always=True)
+    def set_model_id_from_id(cls, v, values):
+        """modelId가 없으면 id 값으로 설정"""
+        if v is None and 'id' in values:
+            return values.get('id')
+        return v
 
     @validator('gated', pre=True)
     def normalize_gated(cls, v):
-        """gated 필드를 문자열로 정규화"""
+        """gated 필드를 정규화"""
         if v is None:
             return None
         if isinstance(v, bool):
-            return "true" if v else "false"
+            return v
         if isinstance(v, str):
-            return v.lower()
-        return str(v)
+            return v.lower() == "true"
+        return bool(v)
+
+    @validator('task', pre=True, always=True)
+    def set_task_from_pipeline_tag(cls, v, values):
+        """task가 없으면 pipeline_tag 값으로 설정"""
+        if v is None and 'pipeline_tag' in values:
+            return values.get('pipeline_tag')
+        return v
 
 
 class ModelListResponse(BaseModel):

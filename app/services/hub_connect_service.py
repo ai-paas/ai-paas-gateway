@@ -179,7 +179,9 @@ class HubConnectService:
             url = f"{self.base_url}/models/"
 
             # 쿼리 파라미터 구성
-            query_params = {}
+            query_params = {
+                "include_parameters": "true"  # 파라미터 정보 포함
+            }
             if params.market:
                 query_params["market"] = params.market
             if params.sort:
@@ -192,6 +194,9 @@ class HubConnectService:
                 query_params["num_parameters_min"] = params.num_parameters_min
             if params.num_parameters_max:
                 query_params["num_parameters_max"] = params.num_parameters_max
+            # 검색 파라미터 변환: search -> query (외부 API 형식)
+            if hasattr(params, 'search') and params.search:
+                query_params["query"] = params.search  # 외부 API는 'query' 사용
 
             logger.info(f"Getting hub models from: {url}")
             logger.info(f"Parameters: {query_params}")
