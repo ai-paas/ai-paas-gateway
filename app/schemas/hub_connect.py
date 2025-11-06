@@ -13,7 +13,7 @@ class ModelListParams(BaseModel):
     num_parameters_max: Optional[str] = Field(None, description="Maximum parameters (e.g., '128B', '256B')")
 
     # 추가 필터 파라미터들
-    tasks: Optional[str] = Field(None, description="Filter by task (single selection, mapped to pipeline_tag in external API)")
+    task: Optional[str] = Field(None, description="Filter by task (single selection, mapped to pipeline_tag in external API)")
     library: Optional[List[str]] = Field(None, description="Filter by library (multiple allowed, e.g., transformers, peft)")
     language: Optional[List[str]] = Field(None, description="Filter by language (multiple allowed, e.g., en, ru, multilingual)")
     license: Optional[str] = Field(None, description="Filter by license (single selection, e.g., license:apache-2.0)")
