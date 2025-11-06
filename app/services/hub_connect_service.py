@@ -198,6 +198,24 @@ class HubConnectService:
             if hasattr(params, 'search') and params.search:
                 query_params["query"] = params.search  # 외부 API는 'query' 사용
 
+            # 추가 필터 파라미터들 (tasks -> pipeline_tag로 매핑)
+            if params.tasks:
+                query_params["pipeline_tag"] = params.tasks  # tasks를 pipeline_tag로 매핑
+            if params.license:
+                query_params["license"] = params.license
+
+            # 배열 파라미터들 (httpx는 리스트를 자동으로 여러 쿼리 파라미터로 변환)
+            if params.library:
+                query_params["library"] = params.library
+            if params.language:
+                query_params["language"] = params.language
+            if params.apps:
+                query_params["apps"] = params.apps
+            if params.inference_provider:
+                query_params["inference_provider"] = params.inference_provider
+            if params.other:
+                query_params["other"] = params.other
+
             logger.info(f"Getting hub models from: {url}")
             logger.info(f"Parameters: {query_params}")
 
