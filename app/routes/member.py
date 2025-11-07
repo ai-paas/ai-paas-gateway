@@ -11,6 +11,8 @@ from app.auth import (
 from app.schemas.member import (
     MemberCreate, MemberUpdate, MemberResponse, MemberListResponse
 )
+from datetime import datetime
+
 
 router = APIRouter(prefix="/members", tags=["members"])
 
@@ -68,11 +70,15 @@ def get_member(
         db: Session = Depends(get_db),
         current_user = Depends(get_current_user)
 ):
-    """멤버 기본 정보 조회"""
+    """멤버 기본 정보 조회 (관리자는 비활성 회원도 조회 가능)"""
     check_member_access(current_user, member_id)
-    member = member_crud.get_member(db=db, member_id=member_id)
+
+    include_inactive = getattr(current_user, "role", None) == "admin"
+
+    member = member_crud.get_member(db=db, member_id=member_id, include_inactive=include_inactive)
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
+
     return member
 
 @router.put("/{member_id}", response_model=MemberResponse)
@@ -87,7 +93,7 @@ def update_member(
     check_member_access(current_user, member_id)
 
     # 기존 멤버 존재 여부 확인
-    existing_member = member_crud.get_member(db=db, member_id=member_id)
+    existing_member = member_crud.get_member(db=db, member_id=member_id, include_inactive=True)
     if not existing_member:
         raise HTTPException(status_code=404, detail="Member not found")
 
@@ -125,6 +131,24 @@ def delete_member(
     if not success:
         raise HTTPException(status_code=404, detail="Member not found")
     return {"message": "Member deleted successfully"}
+
+@router.patch("/{member_id}/status", response_model=MemberResponse)
+def toggle_member_status(
+        member_id: str,
+        is_active: bool,
+        db: Session = Depends(get_db),
+        _: None = Depends(get_current_admin_user)
+):
+    """멤버 활성/비활성 상태 변경"""
+    member = member_crud.get_member(db=db, member_id=member_id, include_inactive=True)
+    if not member:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    member.is_active = is_active
+    member.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(member)
+    return member
 
 
 # @router.get("/{member_id}/services")
