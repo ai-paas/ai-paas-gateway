@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Path
-from typing import Optional, Union
+from typing import Optional, Union, List
 import logging
 
 from app.auth import get_current_user
@@ -42,6 +42,13 @@ async def get_hub_models(
         search: str = Query(None, description="검색 키워드"),
         num_parameters_min: str = Query(None, description="Minimum parameters (e.g., '3B', '7B', '24B')"),
         num_parameters_max: str = Query(None, description="Maximum parameters (e.g., '128B', '256B')"),
+        task: Optional[str] = Query(None, description="Filter by task (single selection, mapped to pipeline_tag in external API)"),
+        library: Optional[List[str]] = Query(None, description="Filter by library (multiple allowed, e.g., transformers, peft)"),
+        language: Optional[List[str]] = Query(None, description="Filter by language (multiple allowed, e.g., en, ru, multilingual)"),
+        license: Optional[str] = Query(None, description="Filter by license (single selection, e.g., license:apache-2.0)"),
+        apps: Optional[List[str]] = Query(None, description="Filter by apps (multiple allowed, e.g., llama.cpp, lmstudio)"),
+        inference_provider: Optional[List[str]] = Query(None, description="Filter by inference provider (multiple allowed, e.g., novita, nebius)"),
+        other: Optional[List[str]] = Query(None, description="Other filters (multiple allowed, e.g., endpoints_compatible, 4-bit)"),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -56,7 +63,14 @@ async def get_hub_models(
             limit=limit,
             search=search,
             num_parameters_min=num_parameters_min,
-            num_parameters_max=num_parameters_max
+            num_parameters_max=num_parameters_max,
+            task=task,
+            library=library,
+            language=language,
+            license=license,
+            apps=apps,
+            inference_provider=inference_provider,
+            other=other
         )
 
         # 사용자 정보 구성
