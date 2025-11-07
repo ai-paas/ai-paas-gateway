@@ -198,6 +198,24 @@ class HubConnectService:
             if hasattr(params, 'search') and params.search:
                 query_params["query"] = params.search  # 외부 API는 'query' 사용
 
+            # 추가 필터 파라미터들 (task -> pipeline_tag로 매핑)
+            if params.task:
+                query_params["pipeline_tag"] = params.task  # task를 pipeline_tag로 매핑
+            if params.license:
+                query_params["license"] = params.license
+
+            # 배열 파라미터들 (httpx는 리스트를 자동으로 여러 쿼리 파라미터로 변환)
+            if params.library:
+                query_params["library"] = params.library
+            if params.language:
+                query_params["language"] = params.language
+            if params.apps:
+                query_params["apps"] = params.apps
+            if params.inference_provider:
+                query_params["inference_provider"] = params.inference_provider
+            if params.other:
+                query_params["other"] = params.other
+
             logger.info(f"Getting hub models from: {url}")
             logger.info(f"Parameters: {query_params}")
 
@@ -382,6 +400,14 @@ class HubConnectService:
             if response.status_code == 200:
                 tags_data = response.json()
 
+                # pipeline_tag 키를 task로 변경
+                if "pipeline_tag" in tags_data:
+                    tags_data["task"] = tags_data.pop("pipeline_tag")
+                    # 각 태그 아이템의 type 필드도 변경
+                    for tag_item in tags_data["task"]:
+                        if tag_item.get("type") == "pipeline_tag":
+                            tag_item["type"] = "task"
+
                 # TagListParams로 검증 및 변환
                 tag_params = TagListParams(**tags_data)
                 all_categories = tag_params.get_all_categories()
@@ -421,10 +447,12 @@ class HubConnectService:
     async def get_tags_by_group(self, group: str, market: str, user_info: Optional[Dict[str, str]] = None) -> TagGroupResponse:
         """특정 그룹의 태그 목록 조회"""
         try:
-            url = f"{self.base_url}/tags/{group}"
+            # 사용자가 'task'를 요청하면 외부 API에는 'pipeline_tag'로 매핑
+            external_group = "pipeline_tag" if group == "task" else group
+            url = f"{self.base_url}/tags/{external_group}"
             params = {"market": market}
 
-            logger.info(f"Getting tags for group '{group}' from: {url} with market: {market}")
+            logger.info(f"Getting tags for group '{group}' (external: '{external_group}') from: {url} with market: {market}")
 
             response = await self._make_authenticated_request(
                 "GET", url, user_info=user_info, params=params
@@ -441,6 +469,9 @@ class HubConnectService:
 
                     for item_dict in data_list:
                         try:
+                            # pipeline_tag 타입을 task로 변경
+                            if item_dict.get("type") == "pipeline_tag":
+                                item_dict["type"] = "task"
                             tag_item = TagItem(**item_dict)
                             tag_items.append(tag_item)
                         except Exception as e:
@@ -451,6 +482,9 @@ class HubConnectService:
                     remaining_count = 0
                     for item_dict in group_data:
                         try:
+                            # pipeline_tag 타입을 task로 변경
+                            if item_dict.get("type") == "pipeline_tag":
+                                item_dict["type"] = "task"
                             tag_item = TagItem(**item_dict)
                             tag_items.append(tag_item)
                         except Exception as e:

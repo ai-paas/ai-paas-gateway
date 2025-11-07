@@ -12,6 +12,15 @@ class ModelListParams(BaseModel):
     num_parameters_min: Optional[str] = Field(None, description="Minimum parameters (e.g., '3B', '7B', '24B')")
     num_parameters_max: Optional[str] = Field(None, description="Maximum parameters (e.g., '128B', '256B')")
 
+    # 추가 필터 파라미터들
+    task: Optional[str] = Field(None, description="Filter by task (single selection, mapped to pipeline_tag in external API)")
+    library: Optional[List[str]] = Field(None, description="Filter by library (multiple allowed, e.g., transformers, peft)")
+    language: Optional[List[str]] = Field(None, description="Filter by language (multiple allowed, e.g., en, ru, multilingual)")
+    license: Optional[str] = Field(None, description="Filter by license (single selection, e.g., license:apache-2.0)")
+    apps: Optional[List[str]] = Field(None, description="Filter by apps (multiple allowed, e.g., llama.cpp, lmstudio)")
+    inference_provider: Optional[List[str]] = Field(None, description="Filter by inference provider (multiple allowed, e.g., novita, nebius)")
+    other: Optional[List[str]] = Field(None, description="Other filters (multiple allowed, e.g., endpoints_compatible, 4-bit)")
+
 
 class HubModelResponse(BaseModel):
     """허브 모델 응답 (단순화된 구조)"""
