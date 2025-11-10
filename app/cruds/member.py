@@ -104,10 +104,10 @@ class MemberCRUD:
         return db_member
 
     def delete_member(self, db: Session, member_id: str) -> bool:
+        # 비활성화된 멤버도 포함해서 조회
         db_member = self.get_member(db, member_id, include_inactive=True)
         if db_member:
-            db_member.is_active = False
-            db_member.updated_at = datetime.utcnow()
+            db.delete(db_member)
             db.commit()
             return True
         return False

@@ -120,16 +120,17 @@ def delete_member(
         db: Session = Depends(get_db),
         current_user = Depends(get_current_user)
 ):
-    """member_id로 멤버 삭제 (소프트 삭제)"""
-    # 권한 검증
+    """member_id로 멤버 삭제 (하드 삭제)"""
     check_member_access(current_user, member_id)
-    member = member_crud.get_member(db=db, member_id=member_id)
+
+    member = member_crud.get_member(db=db, member_id=member_id, include_inactive=True)
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
 
     success = member_crud.delete_member(db=db, member_id=member.member_id)
     if not success:
         raise HTTPException(status_code=404, detail="Member not found")
+
     return {"message": "Member deleted successfully"}
 
 @router.patch("/{member_id}/status", response_model=MemberResponse)
