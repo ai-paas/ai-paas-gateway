@@ -567,7 +567,12 @@ class AnyCloudService:
             user_info=user_info
         )
 
-        data = response.get("data", [])
+        # 중첩된 data 구조 처리: {'data': {'data': {'releases': [...]}}}
+        data = response.get("data", {})
+        if isinstance(data, dict) and "data" in data:
+            data = data.get("data", {})
+
+        # releases 필드 추출
         if isinstance(data, dict):
             data = data.get("releases", [])
 
@@ -576,7 +581,7 @@ class AnyCloudService:
             page=page,
             size=size,
             search=search,
-            search_fields=["name", "chart", "namespace"]
+            search_fields=["name", "chart", "namespace", "revision", "status"]
         )
 
     async def get_catalog_list(
@@ -594,7 +599,12 @@ class AnyCloudService:
             user_info=user_info
         )
 
-        data = response.get("data", [])
+        # 중첩된 data 구조 처리: {'data': {'data': {'charts': [...]}}}
+        data = response.get("data", {})
+        if isinstance(data, dict) and "data" in data:
+            data = data.get("data", {})
+
+        # charts 필드 추출
         if isinstance(data, dict):
             data = data.get("charts", [])
 
@@ -603,7 +613,7 @@ class AnyCloudService:
             page=page,
             size=size,
             search=search,
-            search_fields=["name", "description"]
+            search_fields=["name", "description", "version", "appVersion"]
         )
 
     async def get_catalog_chart(self, repoName: str, chartName: str, version:str, user_info: dict) -> dict:
@@ -641,7 +651,7 @@ class AnyCloudService:
             releaseName=releaseName,
             clusterId=clusterId,
             namespace=namespace,
-            user_info=user_info
+            user_info= user_info
         )
 
     async def get_catalog_values(self, repoName: str, chartName: str, version: str, user_info: dict) -> dict:
