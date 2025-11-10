@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 from fastapi import HTTPException, status
 from app.config import settings
+from app.schemas.any_cloud import AnyCloudPagedResponse
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,42 @@ class AnyCloudService:
                 headers['X-User-Name-B64'] = name_b64
 
         return headers
+
+    def _apply_client_side_pagination(
+            self,
+            data: List[Any],
+            page: int,
+            size: int,
+            search: Optional[str] = None,
+            search_fields: Optional[List[str]] = None
+    ) -> AnyCloudPagedResponse:
+        """
+        클라이언트 사이드 페이징 처리
+        백엔드에서 전체 데이터를 받아서 페이징 처리
+        """
+        # 검색 처리
+        filtered_data = data
+        if search and search_fields:
+            search_lower = search.lower()
+            filtered_data = [
+                item for item in data
+                if any(
+                    search_lower in str(item.get(field, '')).lower()
+                    for field in search_fields
+                )
+            ]
+
+        total = len(filtered_data)
+        start = (page - 1) * size
+        end = start + size
+        paginated_data = filtered_data[start:end]
+
+        return AnyCloudPagedResponse.create(
+            data=paginated_data,
+            total=total,
+            page=page,
+            size=size
+        )
 
     async def _make_request(
             self,
@@ -275,13 +312,31 @@ class AnyCloudService:
 
             return self._handle_response(response)
 
-    async def get_clusters(self, user_info: dict) -> dict:
-        """
-        클러스터 목록 조회 전용 메소드
-        """
-        return await self.generic_get(
-            path="/system/clusters",  # 고정된 경로
+    async def get_clusters(
+            self,
+            user_info: dict,
+            page: int = 1,
+            size: int = 20,
+            search: Optional[str] = None
+    ) -> AnyCloudPagedResponse:
+        """클러스터 목록 조회 (페이징 적용)"""
+        response = await self.generic_get(
+            path="/system/clusters",
             user_info=user_info
+        )
+
+        # 응답에서 data 추출
+        data = response.get("data", [])
+        if isinstance(data, dict):
+            data = data.get("clusters", [])
+
+        # 클라이언트 사이드 페이징 적용
+        return self._apply_client_side_pagination(
+            data=data,
+            page=page,
+            size=size,
+            search=search,
+            search_fields=["clusterName", "clusterId", "clusterProvider", "clusterType"]
         )
 
     async def check_cluster_exists(self, cluster_id: str, user_info: dict) -> dict:
@@ -321,13 +376,29 @@ class AnyCloudService:
             user_info=user_info
         )
 
-    async def get_helm_repos(self, user_info: dict) -> dict:
-        """
-        헬름 저장소 목록 조회 전용 메소드
-        """
-        return await self.generic_get(
-            path="/helm-repos",  # 고정된 경로
+    async def get_helm_repos(
+            self,
+            user_info: dict,
+            page: int = 1,
+            size: int = 20,
+            search: Optional[str] = None
+    ) -> AnyCloudPagedResponse:
+        """헬름 저장소 목록 조회 (페이징 적용)"""
+        response = await self.generic_get(
+            path="/helm-repos",
             user_info=user_info
+        )
+
+        data = response.get("data", [])
+        if isinstance(data, dict):
+            data = data.get("repositories", [])
+
+        return self._apply_client_side_pagination(
+            data=data,
+            page=page,
+            size=size,
+            search=search,
+            search_fields=["name", "url"]
         )
 
     async def check_helm_repos_exists(self, helm_repo_name: str, user_info: dict) -> dict:
@@ -367,15 +438,34 @@ class AnyCloudService:
             **filter  # filter dict를 **kwargs로 전개하여 쿼리 파라미터로 전달
         )
 
-    async def get_kubernetes_resource(self, resource_type: str, clusterName: str, namespace: str, user_info: dict) -> dict:
-        """
-        쿠버네티스 특정 리소스 조회 전용 메소드
-        """
-        return await self.generic_get(
-            path=f"/kubernetes/{resource_type}",  # 고정된 경로
+    async def get_kubernetes_resource(
+            self,
+            resource_type: str,
+            clusterName: str,
+            namespace: str,
+            user_info: dict,
+            page: int = 1,
+            size: int = 20,
+            search: Optional[str] = None
+    ) -> AnyCloudPagedResponse:
+        """쿠버네티스 특정 리소스 조회 (페이징 적용)"""
+        response = await self.generic_get(
+            path=f"/kubernetes/{resource_type}",
             clusterName=clusterName,
             namespace=namespace,
             user_info=user_info
+        )
+
+        data = response.get("data", [])
+        if isinstance(data, dict):
+            data = data.get("items", [])
+
+        return self._apply_client_side_pagination(
+            data=data,
+            page=page,
+            size=size,
+            search=search,
+            search_fields=["name", "metadata.name"]
         )
 
     async def get_kubernetes_resource_name(self, resource_type: str, resource_name: str, clusterName: str, namespace: str, user_info: dict) -> dict:
@@ -460,28 +550,63 @@ class AnyCloudService:
             user_info=user_info
         )
 
-    async def get_catalog_releases(self, clusterId: str, namespace: str, user_info: dict) -> dict:
-        """
-        Helm Release 목록 조회 전용 메소드
-        """
-        return await self.generic_get(
-            path="/charts/releases",  # 고정된 경로
+    async def get_catalog_releases(
+            self,
+            clusterId: str,
+            namespace: str,
+            user_info: dict,
+            page: int = 1,
+            size: int = 20,
+            search: Optional[str] = None
+    ) -> AnyCloudPagedResponse:
+        """Helm Release 목록 조회 (페이징 적용)"""
+        response = await self.generic_get(
+            path="/charts/releases",
             clusterId=clusterId,
             namespace=namespace,
             user_info=user_info
         )
 
-    async def get_catalog_list(self, repoName: str, user_info: dict) -> dict:
-        """
-        Helm 차트 목록 조회 전용 메소드
-        """
-        return await self.generic_get(
-            path=f"/charts/{repoName}",  # 고정된 경로
+        data = response.get("data", [])
+        if isinstance(data, dict):
+            data = data.get("releases", [])
+
+        return self._apply_client_side_pagination(
+            data=data,
+            page=page,
+            size=size,
+            search=search,
+            search_fields=["name", "chart", "namespace"]
+        )
+
+    async def get_catalog_list(
+            self,
+            repoName: str,
+            user_info: dict,
+            page: int = 1,
+            size: int = 20,
+            search: Optional[str] = None
+    ) -> AnyCloudPagedResponse:
+        """Helm 차트 목록 조회 (페이징 적용)"""
+        response = await self.generic_get(
+            path=f"/charts/{repoName}",
             repoName=repoName,
             user_info=user_info
         )
 
-    async def get_catalog_chart(self, repoName: str, chartName: str, user_info: dict) -> dict:
+        data = response.get("data", [])
+        if isinstance(data, dict):
+            data = data.get("charts", [])
+
+        return self._apply_client_side_pagination(
+            data=data,
+            page=page,
+            size=size,
+            search=search,
+            search_fields=["name", "description"]
+        )
+
+    async def get_catalog_chart(self, repoName: str, chartName: str, version:str, user_info: dict) -> dict:
         """
         차트 상세 조회 전용 메소드
         """
@@ -489,6 +614,7 @@ class AnyCloudService:
             path=f"/charts/{repoName}/{chartName}/detail",  # 고정된 경로
             repoName=repoName,
             chartName=chartName,
+            version=version,
             user_info=user_info
         )
 
@@ -527,6 +653,18 @@ class AnyCloudService:
             repoName=repoName,
             chartName=chartName,
             version=version,
+            user_info=user_info
+        )
+
+    async def get_catalog_resources(self, clusterId: str, namespace: str, releaseName: str, user_info: dict) -> dict:
+        """
+        releases resources 조회 전용 메소드
+        """
+        return await self.generic_get_unwrapped(
+            path=f"/charts/releases/{releaseName}/resources",  # 고정된 경로
+            clusterId=clusterId,
+            namespace=namespace,
+            releaseName=releaseName,
             user_info=user_info
         )
 

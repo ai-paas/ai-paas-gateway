@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Any, Optional, Dict
+from typing import Any, Optional, Dict, List
 
 
 class AnyCloudResponse(BaseModel):
@@ -72,3 +72,23 @@ class ClusterUpdateRequest(BaseModel):
     clientCA: str = Field(..., description="클라이언트 CA 인증서")
     clientKey: str = Field(..., description="클라이언트 키")
     monitServerURL: str = Field(..., description="모니터링 서버 URL")
+
+class AnyCloudPagedResponse(BaseModel):
+    """Any Cloud API 페이징 응답 래퍼"""
+    data: List[Any] = Field(..., description="응답 데이터 목록")
+    total: int = Field(..., description="전체 데이터 개수")
+    page: int = Field(..., description="현재 페이지 번호")
+    size: int = Field(..., description="페이지 크기")
+    total_pages: int = Field(..., description="전체 페이지 수")
+
+    @classmethod
+    def create(cls, data: List[Any], total: int, page: int, size: int):
+        """페이징 응답 생성 헬퍼 메서드"""
+        total_pages = (total + size - 1) // size if size > 0 else 0
+        return cls(
+            data=data,
+            total=total,
+            page=page,
+            size=size,
+            total_pages=total_pages
+        )
