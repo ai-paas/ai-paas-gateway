@@ -63,16 +63,20 @@ class ModelCreate(ModelBase):
 
 
 class ModelCreateRequest(BaseModel):
-    """API 요청용 모델 생성 스키마"""
+    """API 요청용 모델 생성 스키마 (업데이트된 API 스펙)"""
     model_config = ConfigDict(protected_namespaces=())
 
     name: str = Field(..., description="모델 이름")
-    description: str = Field(..., description="모델 설명")
+    description: Optional[str] = Field(None, description="모델 설명")
+    repo_id: str = Field(..., description="모델 저장소 ID")
     provider_id: int = Field(..., description="프로바이더 ID")
     type_id: int = Field(..., description="모델 타입 ID")
     format_id: int = Field(..., description="모델 포맷 ID")
-    parent_model_id: Optional[int] = Field(None, description="부모 모델 ID")
-    registry_schema: Optional[str] = Field(None, description="모델 레지스트리 스키마")
+    parent_model_id: Optional[int] = Field(None, description="부모 모델 ID (내부 시스템 전용)")
+    task: Optional[str] = Field(None, max_length=500, description="모델 태스크")
+    parameter: Optional[str] = Field(None, max_length=100, description="모델 파라미터")
+    sample_code: Optional[str] = Field(None, description="샘플 코드")
+    model_registry_schema: Optional[str] = Field(None, description="모델 레지스트리 스키마 (내부 시스템 전용)")
 
 
 class ModelUpdate(BaseModel):
@@ -89,16 +93,20 @@ class ModelUpdate(BaseModel):
 
 
 class ModelResponse(BaseModel):
-    """모델 응답 (Surro API 형식)"""
+    """모델 응답 (Surro API 형식) - 기존 데이터와 호환"""
     model_config = ConfigDict(from_attributes=True, protected_namespaces=())
 
     id: int  # Surro API의 모델 ID
     name: str
-    description: str
+    description: Optional[str] = None  # Optional로 변경 (기존 데이터 호환)
+    repo_id: Optional[str] = None  # 새 필드 추가 (기존 데이터 호환)
     provider_info: Optional[ProviderInfo] = None
     type_info: Optional[TypeInfo] = None
     format_info: Optional[FormatInfo] = None
     parent_model_id: Optional[int] = None
+    task: Optional[str] = None  # 새 필드 추가
+    parameter: Optional[str] = None  # 새 필드 추가
+    sample_code: Optional[str] = None  # 새 필드 추가
     registry: Optional[ModelRegistry] = None
     created_at: datetime
     updated_at: datetime
@@ -106,6 +114,31 @@ class ModelResponse(BaseModel):
     created_by: Optional[str] = None
     updated_by: Optional[str] = None
     deleted_by: Optional[str] = None
+
+
+class ModelCreateResponse(BaseModel):
+    """모델 생성 응답 (새로운 API 스펙) - repo_id 필수"""
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
+
+    id: int
+    name: str
+    description: Optional[str] = None
+    repo_id: str  # 새로 생성된 모델은 repo_id 필수
+    provider_info: Optional[ProviderInfo] = None
+    type_info: Optional[TypeInfo] = None
+    format_info: Optional[FormatInfo] = None
+    parent_model_id: Optional[int] = None
+    task: Optional[str] = None
+    parameter: Optional[str] = None
+    sample_code: Optional[str] = None
+    registry: Optional[ModelRegistry] = None
+    created_at: datetime
+    updated_at: datetime
+    deleted_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
+    deleted_by: Optional[str] = None
+
 
 class InnoUserInfo(BaseModel):
     """사용자 정보"""
@@ -173,13 +206,6 @@ class ModelTestResponse(BaseModel):
     output: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     execution_time: Optional[float] = None
-
-
-class InnoUserInfo(BaseModel):
-    """Inno Gateway 사용자 정보"""
-    member_id: str = Field(..., description="사용자 ID")
-    role: str = Field(..., description="사용자 역할")
-    name: str = Field(..., description="사용자 이름")
 
 
 class InnoModelMapping(BaseModel):

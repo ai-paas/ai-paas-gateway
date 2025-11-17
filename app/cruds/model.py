@@ -158,12 +158,25 @@ class ModelCRUD:
             db: Session,
             surro_model_id: int,
             member_id: str,
-            model_name: str = None
+            model_name: str = None,
+            is_catalog: bool = False  # 새로운 파라미터 추가
     ) -> Model:
-        """Surro 모델과 Inno 사용자 매핑 생성 (간소화된 버전)"""
+        """Surro 모델과 Inno 사용자 매핑 생성 (간소화된 버전)
+
+        Args:
+            db: 데이터베이스 세션
+            surro_model_id: Surro API의 모델 ID
+            member_id: 생성한 사용자 ID
+            model_name: 모델 이름 (선택)
+            is_catalog: 카탈로그 모델 여부 (admin이 생성한 경우 True)
+
+        Returns:
+            생성된 Model 객체
+        """
         db_model = Model(
             surro_model_id=surro_model_id,  # Surro API의 모델 ID
             name=model_name or f"Model_{surro_model_id}",
+            is_catalog=is_catalog,  # 카탈로그 플래그 설정
             created_by=member_id,
             updated_by=member_id
         )
