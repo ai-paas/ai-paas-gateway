@@ -1,7 +1,7 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Index
 from sqlalchemy.sql import func
 from . import Base
-
+from datetime import datetime
 
 class Model(Base):
     """
@@ -23,9 +23,22 @@ class Model(Base):
     description = Column(Text, nullable=True, comment="모델 설명 (캐시용)")
 
     # 메타데이터
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, comment="생성 시간")
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False,
-                        comment="수정 시간")
+    created_at = Column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,  # Python 레벨 기본값
+        server_default=func.now(),  # DB 레벨 기본값
+        nullable=False,
+        comment="생성 시간"
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,  # Python 레벨 기본값
+        server_default=func.now(),  # DB 레벨 기본값
+        onupdate=datetime.utcnow,  # 업데이트 시 자동 갱신
+        nullable=False,
+        comment="수정 시간"
+    )
+
     updated_by = Column(String(50), nullable=True, comment="수정자 member_id")
 
     # 소프트 삭제
