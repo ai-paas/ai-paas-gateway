@@ -10,7 +10,6 @@ class Model(Base):
     - 나머지 상세 정보는 Surro API에서 실시간 조회
     """
     __tablename__ = "models"
-
     # 기본 키
     id = Column(Integer, primary_key=True, index=True, autoincrement=True, comment="Inno DB 내부 ID")
 
