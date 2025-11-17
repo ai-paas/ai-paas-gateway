@@ -8,7 +8,7 @@ from fastapi import HTTPException, status
 from app.config import settings
 from app.schemas.model import (
     ModelCreateRequest, ModelUpdate, ModelResponse,
-    ExternalModelResponse
+    ExternalModelResponse, ModelCreateResponse
 )
 
 logger = logging.getLogger(__name__)
@@ -328,26 +328,35 @@ class ModelService:
             file_data: Optional[bytes] = None,
             file_name: Optional[str] = None,
             user_info: Optional[Dict[str, str]] = None
-    ) -> ModelResponse:
+    ) -> ModelCreateResponse:
         """모델 생성"""
         try:
             url = f"{self.base_url}/models"
 
-            # multipart/form-data로 전송
-            files = []
+            # multipart/form-data로 전송할 데이터 준비
             data = {
                 "name": model_data.name,
-                "description": model_data.description,
+                "repo_id": model_data.repo_id,
                 "provider_id": str(model_data.provider_id),
                 "type_id": str(model_data.type_id),
                 "format_id": str(model_data.format_id)
             }
 
+            # Optional 필드 추가
+            if model_data.description:
+                data["description"] = model_data.description
             if model_data.parent_model_id:
                 data["parent_model_id"] = str(model_data.parent_model_id)
-            if model_data.registry_schema:
-                data["registry_schema"] = model_data.registry_schema
+            if model_data.task:
+                data["task"] = model_data.task
+            if model_data.parameter:
+                data["parameter"] = model_data.parameter
+            if model_data.sample_code:
+                data["sample_code"] = model_data.sample_code
+            if model_data.model_registry_schema:
+                data["model_registry_schema"] = model_data.model_registry_schema
 
+            files = []
             if file_data and file_name:
                 files.append(("file", (file_name, file_data, "application/octet-stream")))
 
@@ -360,21 +369,20 @@ class ModelService:
                     "POST", url, user_info=user_info, data=data, files=files
                 )
             else:
-                # 파일이 없는 경우 JSON 전송
-                json_data = {k: int(v) if k.endswith('_id') and v.isdigit() else v
-                             for k, v in data.items()}
+                # 파일이 없는 경우에도 multipart로 전송 (API 스펙에 따라)
                 response = await self._make_authenticated_request(
-                    "POST", url, user_info=user_info, json=json_data,
-                    headers={'Content-Type': 'application/json'}
+                    "POST", url, user_info=user_info, data=data
                 )
 
             if response.status_code in [200, 201]:
                 model_data = response.json()
-                return ModelResponse(**model_data)
+                return ModelCreateResponse(**model_data)
             else:
+                error_detail = response.text
+                logger.error(f"Model creation failed: {error_detail}")
                 raise HTTPException(
                     status_code=response.status_code,
-                    detail=f"Failed to create model: {response.text}"
+                    detail=f"Failed to create model: {error_detail}"
                 )
 
         except httpx.TimeoutException as e:
@@ -533,44 +541,44 @@ class ModelService:
             user_info: Optional[Dict[str, str]] = None,
             type_name: Optional[str] = None
     ):
-        """모델 목록에서 타입 정보 추출"""
+        """모델 타입 목록 조회"""
         try:
-            models = await self.get_models(user_info=user_info)
+            url = f"{self.base_url}/models/types"
+            params = {}
 
-            type_list = []
-            seen_ids = set()
-
-            for model in models:
-                # model은 ModelResponse 객체일 가능성이 높음
-                type_info = getattr(model, "type_info", None)
-                if not type_info:
-                    continue
-
-                # dict 변환 (pydantic model일 경우)
-                if hasattr(type_info, "model_dump"):
-                    type_dict = type_info.model_dump()
-                else:
-                    type_dict = dict(type_info)
-
-                # 중복 제거
-                if type_dict["id"] not in seen_ids:
-                    type_list.append(type_dict)
-                    seen_ids.add(type_dict["id"])
-
-            # type_name으로 필터링
             if type_name:
-                matched = next((t for t in type_list if t.get("name") == type_name), None)
-                if not matched:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail=f"Model type '{type_name}' not found"
-                    )
-                return matched  # 단일 객체 반환
+                params["type_name"] = type_name
 
-            return type_list
+            logger.info(f"Getting model types from: {url}")
+            logger.info(f"Parameters: {params}")
 
+            response = await self._make_authenticated_request(
+                "GET", url, user_info=user_info, params=params
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404 and type_name:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Model type '{type_name}' not found"
+                )
+            else:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Failed to get model types: {response.text}"
+                )
+
+        except HTTPException:
+            raise
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout getting model types: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="External service timeout"
+            )
         except Exception as e:
-            logger.error(f"Error extracting model types: {str(e)}")
+            logger.error(f"Error getting model types: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal error: {str(e)}"
@@ -581,44 +589,44 @@ class ModelService:
             user_info: Optional[Dict[str, str]] = None,
             provider_name: Optional[str] = None
     ):
-        """모델 목록에서 프로바이더 정보 추출"""
+        """모델 제공자 목록 조회"""
         try:
-            models = await self.get_models(user_info=user_info)
+            url = f"{self.base_url}/models/providers"
+            params = {}
 
-            provider_list = []
-            seen_ids = set()
-
-            for model in models:
-                # model은 ModelResponse 객체일 가능성이 높음
-                provider_info = getattr(model, "provider_info", None)
-                if not provider_info:
-                    continue
-
-                # dict 변환 (pydantic model일 경우)
-                if hasattr(provider_info, "model_dump"):
-                    provider_dict = provider_info.model_dump()
-                else:
-                    provider_dict = dict(provider_info)
-
-                # 중복 제거
-                if provider_dict["id"] not in seen_ids:
-                    provider_list.append(provider_dict)
-                    seen_ids.add(provider_dict["id"])
-
-            # provider_name 필터링
             if provider_name:
-                matched = next((t for t in provider_list if t.get("name") == provider_name), None)
-                if not matched:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail=f"Model provider '{provider_name}' not found"
-                    )
-                return matched  # 단일 객체 반환
+                params["provider_name"] = provider_name
 
-            return provider_list
+            logger.info(f"Getting model providers from: {url}")
+            logger.info(f"Parameters: {params}")
 
+            response = await self._make_authenticated_request(
+                "GET", url, user_info=user_info, params=params
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404 and provider_name:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Model provider '{provider_name}' not found"
+                )
+            else:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Failed to get model providers: {response.text}"
+                )
+
+        except HTTPException:
+            raise
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout getting model providers: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="External service timeout"
+            )
         except Exception as e:
-            logger.error(f"Error extracting model providers: {str(e)}")
+            logger.error(f"Error getting model providers: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal error: {str(e)}"
@@ -629,44 +637,44 @@ class ModelService:
             user_info: Optional[Dict[str, str]] = None,
             format_name: Optional[str] = None
     ):
-        """모델 목록에서 포맷 정보 추출"""
+        """모델 포맷 목록 조회"""
         try:
-            models = await self.get_models(user_info=user_info)
+            url = f"{self.base_url}/models/formats"
+            params = {}
 
-            format_list = []
-            seen_ids = set()
-
-            for model in models:
-                # model은 ModelResponse 객체일 가능성이 높음
-                format_info = getattr(model, "format_info", None)
-                if not format_info:
-                    continue
-
-                # dict 변환 (pydantic model일 경우)
-                if hasattr(format_info, "model_dump"):
-                    format_dict = format_info.model_dump()
-                else:
-                    format_dict = dict(format_info)
-
-                # 중복 제거
-                if format_dict["id"] not in seen_ids:
-                    format_list.append(format_dict)
-                    seen_ids.add(format_dict["id"])
-
-            # format_name 필터링
             if format_name:
-                matched = next((t for t in format_list if t.get("name") == format_name), None)
-                if not matched:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail=f"Model format '{format_name}' not found"
-                    )
-                return matched  # 단일 객체 반환
+                params["format_name"] = format_name
 
-            return format_list
+            logger.info(f"Getting model formats from: {url}")
+            logger.info(f"Parameters: {params}")
 
+            response = await self._make_authenticated_request(
+                "GET", url, user_info=user_info, params=params
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404 and format_name:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Model format '{format_name}' not found"
+                )
+            else:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Failed to get model formats: {response.text}"
+                )
+
+        except HTTPException:
+            raise
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout getting model formats: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="External service timeout"
+            )
         except Exception as e:
-            logger.error(f"Error extracting model formats: {str(e)}")
+            logger.error(f"Error getting model formats: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal error: {str(e)}"

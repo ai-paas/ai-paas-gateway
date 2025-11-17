@@ -10,7 +10,7 @@ from app.auth import get_current_user, get_current_admin_user
 from app.cruds import model_crud
 from app.schemas.model import (
     ModelResponse, ModelCreateRequest,
-    ModelTestRequest, ModelTestResponse,
+    ModelTestRequest, ModelTestResponse,ModelCreateResponse ,
     InnoUserInfo, ModelWithMemberInfo, ModelListWrapper
 )
 from app.services.model_service import model_service
@@ -38,6 +38,106 @@ def _create_pagination_response(data: List[Any], total: int, page: int, size: in
         "size": size
     }
 
+
+@router.post("", response_model=ModelCreateResponse)
+async def create_model(
+        name: str = Form(..., description="모델 이름"),
+        repo_id: str = Form(..., description="모델 저장소 ID"),
+        provider_id: int = Form(..., description="프로바이더 ID"),
+        type_id: int = Form(..., description="모델 타입 ID"),
+        format_id: int = Form(..., description="모델 포맷 ID"),
+        description: Optional[str] = Form(None, description="모델 설명"),
+        parent_model_id: Optional[int] = Form(None, description="부모 모델 ID (내부 시스템 전용)"),
+        task: Optional[str] = Form(None, max_length=500, description="모델 태스크"),
+        parameter: Optional[str] = Form(None, max_length=100, description="모델 파라미터"),
+        sample_code: Optional[str] = Form(None, description="샘플 코드"),
+        model_registry_schema: Optional[str] = Form(None, description="모델 레지스트리 스키마 (내부 시스템 전용)"),
+        file: Optional[UploadFile] = File(None, description="모델 파일 (binary)"),
+        db: Session = Depends(get_db),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    새 모델 생성
+
+    - Surro API에 모델을 생성한 후, Inno DB에 사용자-모델 매핑을 저장합니다.
+
+    **주의사항**:
+    - `provider_id`, `type_id`, `format_id`는 각각 해당하는 조회 API를 먼저 호출하여 ID 값을 확인한 후 사용
+    - `parent_model_id`와 `model_registry_schema`는 내부 시스템 전용 (프론트엔드에서는 전달하지 않음)
+    - **HuggingFace 모델**: `provider_id`가 huggingface의 ID와 일치해야 함
+    - **커스텀 모델**: `provider_id`가 custom의 ID와 일치하고 `file`이 필요함
+    - 모델 이름에 "yolo" 포함 시 자동으로 학습 가능 모델로 설정됨
+
+    **파일 업로드**:
+    - `file` 파라미터에 바이너리 파일을 첨부
+    - Swagger UI에서 "Choose File" 버튼으로 업로드 가능
+    - Content-Type: multipart/form-data
+    """
+    try:
+        # 파일 처리
+        file_data = None
+        file_name = None
+        if file:
+            file_data = await file.read()
+            file_name = file.filename
+            logger.info(f"File uploaded: {file_name}, size: {len(file_data)} bytes")
+
+        # 모델 생성 요청 데이터 구성
+        model_data = ModelCreateRequest(
+            name=name,
+            repo_id=repo_id,
+            description=description,
+            provider_id=provider_id,
+            type_id=type_id,
+            format_id=format_id,
+            parent_model_id=parent_model_id,
+            task=task,
+            parameter=parameter,
+            sample_code=sample_code,
+            model_registry_schema=model_registry_schema
+        )
+
+        # 1. Surro API를 통해 모델 생성
+        created_model = await model_service.create_model(
+            model_data=model_data,
+            file_data=file_data,
+            file_name=file_name,
+            user_info={
+                'member_id': current_user.member_id,
+                'role': current_user.role,
+                'name': current_user.name
+            }
+        )
+
+        # 2. Inno DB에 사용자-모델 매핑 저장
+        try:
+            # 관리자(admin)가 생성한 모델은 카탈로그 모델로 설정
+            is_catalog = current_user.role.lower() == 'admin'
+
+            model_crud.create_model_mapping(
+                db=db,
+                surro_model_id=created_model.id,
+                member_id=current_user.member_id,
+                model_name=created_model.name,
+                is_catalog=is_catalog
+            )
+            logger.info(
+                f"Created model mapping: surro_id={created_model.id}, "
+                f"member_id={current_user.member_id}, is_catalog={is_catalog}"
+            )
+        except Exception as mapping_error:
+            logger.error(f"Failed to create model mapping: {str(mapping_error)}")
+            # 매핑 저장에 실패해도 Surro API에는 이미 생성되었으므로, 경고만 로그
+            logger.warning(f"Model {created_model.id} created in Surro API but mapping failed")
+
+        return created_model
+
+    except Exception as e:
+        logger.error(f"Error creating model for user {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create model: {str(e)}"
+        )
 
 @router.get("/custom-models")
 async def get_user_models(
@@ -380,12 +480,16 @@ async def get_model(
 @router.post("", response_model=ModelResponse)
 async def create_model(
         name: str = Form(..., description="모델 이름"),
-        description: str = Form(..., description="모델 설명"),
+        repo_id: str = Form(..., description="모델 저장소 ID"),
         provider_id: int = Form(..., description="프로바이더 ID"),
         type_id: int = Form(..., description="모델 타입 ID"),
         format_id: int = Form(..., description="모델 포맷 ID"),
-        parent_model_id: Optional[int] = Form(None, description="부모 모델 ID"),
-        registry_schema: Optional[str] = Form(None, description="모델 레지스트리 스키마"),
+        description: Optional[str] = Form(None, description="모델 설명"),
+        parent_model_id: Optional[int] = Form(None, description="부모 모델 ID (내부 시스템 전용)"),
+        task: Optional[str] = Form(None, max_length=500, description="모델 태스크"),
+        parameter: Optional[str] = Form(None, max_length=100, description="모델 파라미터"),
+        sample_code: Optional[str] = Form(None, description="샘플 코드"),
+        model_registry_schema: Optional[str] = Form(None, description="모델 레지스트리 스키마 (내부 시스템 전용)"),
         file: Optional[UploadFile] = File(None, description="모델 파일"),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
@@ -394,6 +498,13 @@ async def create_model(
     새 모델 생성
 
     - Surro API에 모델을 생성한 후, Inno DB에 사용자-모델 매핑을 저장합니다.
+
+    주의사항:
+    - provider_id, type_id, format_id는 각각 해당하는 조회 API를 먼저 호출하여 ID 값을 확인한 후 사용
+    - parent_model_id와 model_registry_schema는 내부 시스템 전용 (프론트엔드에서는 전달하지 않음)
+    - HuggingFace 모델: provider_id가 huggingface의 ID와 일치해야 함
+    - 커스텀 모델: provider_id가 custom의 ID와 일치하고 file이 필요함
+    - 모델 이름에 "yolo" 포함 시 자동으로 학습 가능 모델로 설정됨
     """
     try:
         # 파일 처리
@@ -406,12 +517,16 @@ async def create_model(
         # 모델 생성 요청 데이터 구성
         model_data = ModelCreateRequest(
             name=name,
+            repo_id=repo_id,
             description=description,
             provider_id=provider_id,
             type_id=type_id,
             format_id=format_id,
             parent_model_id=parent_model_id,
-            registry_schema=registry_schema
+            task=task,
+            parameter=parameter,
+            sample_code=sample_code,
+            model_registry_schema=model_registry_schema
         )
 
         # 1. Surro API를 통해 모델 생성
