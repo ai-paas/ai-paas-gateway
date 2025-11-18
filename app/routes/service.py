@@ -23,7 +23,7 @@ router = APIRouter(prefix="/services", tags=["services"])
 async def create_service(
         service: ServiceCreate,
         db: Session = Depends(get_db),
-        current_user=Depends(get_current_admin_user)
+        current_user=Depends(get_current_user)
 ):
     """서비스 생성"""
     user_info = {
