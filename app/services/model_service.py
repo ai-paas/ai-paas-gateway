@@ -168,9 +168,6 @@ class ModelService:
             self,
             skip: int = 0,
             limit: int = 100,
-            provider_id: Optional[int] = None,
-            type_id: Optional[int] = None,
-            format_id: Optional[int] = None,
             search: Optional[str] = None,
             user_info: Optional[Dict[str, str]] = None
     ) -> List[ModelResponse]:
@@ -183,12 +180,6 @@ class ModelService:
             }
 
             # 필터 파라미터 추가
-            if provider_id:
-                params["provider_id"] = provider_id
-            if type_id:
-                params["type_id"] = type_id
-            if format_id:
-                params["format_id"] = format_id
             if search:
                 params["search"] = search
 
@@ -679,7 +670,6 @@ class ModelService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal error: {str(e)}"
             )
-
 
 # 싱글톤 인스턴스
 model_service = ModelService()
