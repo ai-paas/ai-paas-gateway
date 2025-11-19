@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from contextlib import asynccontextmanager
 from app.config import settings
-from app.routes import service, member, auth, workflow, model, dataset, hub_connect, any_cloud, lite_model
+from app.routes import service, member, auth, workflow, model, dataset, hub_connect, any_cloud, lite_model, prompt
 import uvicorn
 import logging
 
@@ -62,6 +62,7 @@ app.include_router(lite_model.router_info, prefix=settings.API_V1_STR)
 app.include_router(lite_model.router_optimize, prefix=settings.API_V1_STR)
 app.include_router(lite_model.router_task, prefix=settings.API_V1_STR)
 app.include_router(lite_model.router_model, prefix=settings.API_V1_STR)
+app.include_router(prompt.router, prefix=settings.API_V1_STR)
 
 # 기본 엔드포인트
 @app.get("/")
