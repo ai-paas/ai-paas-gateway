@@ -1,14 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from contextlib import asynccontextmanager
 from app.config import settings
-from app.routes import service, member, auth, workflow, external_api_test
+from app.routes import service, member, auth, workflow, model, dataset, hub_connect, any_cloud, lite_model, prompt
 import uvicorn
 import logging
-
-# 프록시가 활성화된 경우에만 import
-if settings.PROXY_ENABLED:
-    from app.routes import proxy
 
 # 로깅 설정
 logging.basicConfig(
@@ -23,16 +20,11 @@ async def lifespan(app: FastAPI):
     """애플리케이션 라이프사이클 관리"""
     # 시작 시
     logger.info("Starting AIPaaS Gateway API")
-    logger.info(f"Proxy enabled: {settings.PROXY_ENABLED}")
-    if settings.PROXY_ENABLED:
-        logger.info(f"Proxy target: {settings.PROXY_TARGET_BASE_URL}")
 
     yield
 
     # 종료 시
     logger.info("Shutting down AIPaaS Gateway API")
-    if settings.PROXY_ENABLED:
-        await proxy.cleanup_proxy()
 
 
 # FastAPI 앱 초기화
@@ -47,24 +39,30 @@ app = FastAPI(
 # CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 프로덕션에서는 특정 도메인으로 제한
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 라우터 등록 (순서가 중요! 프록시 라우터는 가장 마지막에)
+# 라우터 등록
 app.include_router(auth.router, prefix=settings.API_V1_STR)
 app.include_router(service.router, prefix=settings.API_V1_STR)
 app.include_router(member.router, prefix=settings.API_V1_STR)
 app.include_router(workflow.router, prefix=settings.API_V1_STR)
-app.include_router(external_api_test.router, prefix=settings.API_V1_STR)
-
-# 프록시 라우터는 가장 마지막에 등록 (모든 경로를 캐치하므로)
-if settings.PROXY_ENABLED:
-    app.include_router(proxy.router, prefix=settings.API_V1_STR)
-    logger.info("Proxy router registered")
-
+app.include_router(model.router, prefix=settings.API_V1_STR)
+app.include_router(dataset.router, prefix=settings.API_V1_STR)
+app.include_router(hub_connect.router, prefix=settings.API_V1_STR)
+app.include_router(any_cloud.router_cluster, prefix=settings.API_V1_STR)
+app.include_router(any_cloud.router_helm, prefix=settings.API_V1_STR)
+app.include_router(any_cloud.router_monit, prefix=settings.API_V1_STR)
+app.include_router(any_cloud.router_package, prefix=settings.API_V1_STR)
+app.include_router(any_cloud.router_catalog, prefix=settings.API_V1_STR)
+app.include_router(lite_model.router_info, prefix=settings.API_V1_STR)
+app.include_router(lite_model.router_optimize, prefix=settings.API_V1_STR)
+app.include_router(lite_model.router_task, prefix=settings.API_V1_STR)
+app.include_router(lite_model.router_model, prefix=settings.API_V1_STR)
+app.include_router(prompt.router, prefix=settings.API_V1_STR)
 
 # 기본 엔드포인트
 @app.get("/")

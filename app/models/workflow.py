@@ -1,7 +1,7 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean
 from sqlalchemy.orm import relationship, backref
 from datetime import datetime
-from app.models.base import Base
+from . import Base
 
 class Workflow(Base):
     __tablename__ = "workflows"
