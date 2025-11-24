@@ -5,7 +5,7 @@ import logging
 
 from app.database import get_db
 from app.auth import get_current_user, verify_member_access
-from app.crud import workflow_crud
+from app.cruds import workflow_crud
 from app.schemas.workflow import (
     WorkflowCreate, WorkflowUpdate, WorkflowResponse,
     WorkflowDetailResponse, WorkflowListResponse

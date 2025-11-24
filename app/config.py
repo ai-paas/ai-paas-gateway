@@ -22,7 +22,7 @@ class Settings:
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 
-    # 프록시 설정
+    # 외부 API 설정
     PROXY_ENABLED: bool = os.getenv("PROXY_ENABLED", "false").lower() == "true"
     PROXY_TARGET_BASE_URL: str = os.getenv("PROXY_TARGET_BASE_URL", "")
     PROXY_TARGET_PATH_PREFIX: str = os.getenv("PROXY_TARGET_PATH_PREFIX", "/api/v1")
@@ -30,7 +30,36 @@ class Settings:
     PROXY_CONNECT_TIMEOUT: float = float(os.getenv("PROXY_CONNECT_TIMEOUT", "5.0"))
     PROXY_MAX_CONNECTIONS: int = int(os.getenv("PROXY_MAX_CONNECTIONS", "100"))
     PROXY_MAX_KEEPALIVE_CONNECTIONS: int = int(os.getenv("PROXY_MAX_KEEPALIVE_CONNECTIONS", "20"))
-    
+    EXTERNAL_API_USERNAME: str = os.getenv("EXTERNAL_API_USERNAME", "")
+    EXTERNAL_API_PASSWORD: str = os.getenv("EXTERNAL_API_PASSWORD", "")
+
+    # Hub Connect API 인증 설정
+    HUB_CONNECT_ENABLED: bool = os.getenv("HUB_CONNECT_ENABLED", "false").lower() == "true"
+    HUB_CONNECT_TARGET_BASE_URL: str = os.getenv("HUB_CONNECT_TARGET_BASE_URL", "")
+    HUB_CONNECT_TARGET_PATH_PREFIX: str = os.getenv("HUB_CONNECT_TARGET_PATH_PREFIX", "/api/v1")
+    HUB_CONNECT_TIMEOUT: float = float(os.getenv("HUB_CONNECT_TIMEOUT", "30.0"))
+    HUB_CONNECT_CONNECT_TIMEOUT: float = float(os.getenv("HUB_CONNECT_CONNECT_TIMEOUT", "5.0"))
+    HUB_CONNECT_MAX_CONNECTIONS: int = int(os.getenv("HUB_CONNECT_MAX_CONNECTIONS", "100"))
+    HUB_CONNECT_MAX_KEEPALIVE_CONNECTIONS: int = int(os.getenv("HUB_CONNECT_MAX_KEEPALIVE_CONNECTIONS", "20"))
+    HUB_CONNECT_API_USERNAME: str = os.getenv("HUB_CONNECT_API_USERNAME", "")
+    HUB_CONNECT_API_PASSWORD: str = os.getenv("HUB_CONNECT_API_PASSWORD", "")
+
+    # Any Cloud API 인증 설정
+    ANY_CLOUD_ENABLED: bool = os.getenv("ANY_CLOUD_ENABLED", "false").lower() == "true"
+    ANY_CLOUD_TARGET_BASE_URL: str = os.getenv("ANY_CLOUD_TARGET_BASE_URL", "")
+    ANY_CLOUD_TIMEOUT: float = float(os.getenv("ANY_CLOUD_TIMEOUT", "30.0"))
+    ANY_CLOUD_CONNECT_TIMEOUT: float = float(os.getenv("ANY_CLOUD_CONNECT_TIMEOUT", "5.0"))
+    ANY_CLOUD_MAX_CONNECTIONS: int = int(os.getenv("ANY_CLOUD_MAX_CONNECTIONS", "100"))
+    ANY_CLOUD_MAX_KEEPALIVE_CONNECTIONS: int = int(os.getenv("ANY_CLOUD_MAX_KEEPALIVE_CONNECTIONS", "20"))
+
+    # 최적화 모델 API 인증 설정
+    LITE_MODEL_ENABLED: bool = os.getenv("LITE_MODEL_ENABLED", "false").lower() == "true"
+    LITE_MODEL_TARGET_BASE_URL: str = os.getenv("LITE_MODEL_TARGET_BASE_URL", "")
+    LITE_MODEL_TIMEOUT: float = float(os.getenv("LITE_MODEL_TIMEOUT", "30.0"))
+    LITE_MODEL_CONNECT_TIMEOUT: float = float(os.getenv("LITE_MODEL_CONNECT_TIMEOUT", "5.0"))
+    LITE_MODEL_MAX_CONNECTIONS: int = int(os.getenv("LITE_MODEL_MAX_CONNECTIONS", "100"))
+    LITE_MODEL_MAX_KEEPALIVE_CONNECTIONS: int = int(os.getenv("LITE_MODEL_MAX_KEEPALIVE_CONNECTIONS", "20"))
+
     def __init__(self):
         # 필수 환경변수 체크
         if not self.DATABASE_URL:
@@ -40,8 +69,26 @@ class Settings:
         if not self.JWT_SECRET_KEY:
             raise ValueError("JWT_SECRET_KEY environment variable is required")
 
-        # 프록시 설정 검증
+        # 외부 API 설정 검증
         if self.PROXY_ENABLED and not self.PROXY_TARGET_BASE_URL:
             raise ValueError("PROXY_TARGET_BASE_URL is required when PROXY_ENABLED is true")
+
+        # 외부 API 인증 설정 검증 (프록시가 활성화된 경우)
+        if self.PROXY_ENABLED:
+            if not self.EXTERNAL_API_USERNAME:
+                raise ValueError("EXTERNAL_API_USERNAME is required when PROXY_ENABLED is true")
+            if not self.EXTERNAL_API_PASSWORD:
+                raise ValueError("EXTERNAL_API_PASSWORD is required when PROXY_ENABLED is true")
+
+        # HUB Connect API 설정 검증
+        if self.HUB_CONNECT_ENABLED and not self.HUB_CONNECT_TARGET_BASE_URL:
+            raise ValueError("HUB_CONNECT_TARGET_BASE_URL is required when HUB_CONNECT_ENABLED is true")
+
+        # 외부 API 인증 설정 검증 (프록시가 활성화된 경우)
+        if self.HUB_CONNECT_ENABLED:
+            if not self.HUB_CONNECT_API_USERNAME:
+                raise ValueError("HUB_CONNECT_API_USERNAME is required when HUB_CONNECT_ENABLED is true")
+            if not self.HUB_CONNECT_API_PASSWORD:
+                raise ValueError("HUB_CONNECT_API_PASSWORD is required when HUB_CONNECT_ENABLED is true")
 
 settings = Settings()

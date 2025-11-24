@@ -1,6 +1,7 @@
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, validator
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
 from datetime import datetime
+import re
 
 # 타입 체킹할 때만 import (순환 참조 방지)
 if TYPE_CHECKING:
@@ -21,6 +22,38 @@ class MemberBase(BaseModel):
 
 class MemberCreate(MemberBase):
     password: str  # 비밀번호 (생성시에만 필요)
+    password_confirm: str  # 비밀번호 확인 추가
+
+    @validator("member_id")
+    def validate_member_id(cls, v):
+        # 알파벳 소문자 + 숫자 + '-' 조합, 5~45자
+        if not re.match(r"^[a-z0-9-]{5,45}$", v):
+            raise ValueError("아이디는 알파벳 소문자, 숫자, '-' 조합으로 5~45자여야 합니다.")
+        return v
+
+    @validator("password")
+    def validate_password(cls, v):
+        # 8~16자, 영문 대소문자 + 숫자 + 특수문자 조합
+        if not re.match(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{8,16}$", v):
+            raise ValueError("비밀번호는 8~16자 영문 대소문자, 숫자, 특수문자를 포함해야 합니다.")
+
+        # bcrypt 72바이트 제한 체크 추가
+        if len(v.encode('utf-8')) > 72:
+            raise ValueError("비밀번호가 너무 깁니다. 더 짧은 비밀번호를 사용해주세요.")
+
+        return v
+
+    @validator("password_confirm")
+    def passwords_match(cls, v, values):
+        if "password" in values and v != values["password"]:
+            raise ValueError("비밀번호와 비밀번호 확인이 일치하지 않습니다.")
+        return v
+
+    @validator("phone")
+    def validate_phone(cls, v):
+        if v and not re.match(r"^\d+$", v):
+            raise ValueError("연락처는 숫자만 입력해야 합니다.")
+        return v
 
 
 class MemberUpdate(BaseModel):
@@ -55,7 +88,7 @@ class MemberDetailResponse(MemberResponse):
 
 
 class MemberListResponse(BaseModel):
-    members: List[MemberResponse]
+    data: List[MemberResponse]
     total: int
     page: int
     size: int
