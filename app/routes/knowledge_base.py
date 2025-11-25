@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import Optional, List
 from app.database import get_db
 from app.cruds.knowledge_base import knowledge_base_crud
 from app.auth import get_current_user
@@ -24,45 +24,93 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge-bases"])
 
 
-# ===== 메타데이터 조회 API =====
+# ===== 메타데이터 조회 API (페이징 추가) =====
 
 @router.get("/chunk-types", response_model=ChunkTypeListResponse)
-async def get_chunk_types(current_user=Depends(get_current_user)):
-    """청크 타입 목록 조회"""
+async def get_chunk_types(
+        page: int = Query(1, ge=1, description="페이지 번호 (기본값: 1)"),
+        size: int = Query(100, ge=1, le=1000, description="페이지당 항목 수 (기본값: 100)"),
+        current_user=Depends(get_current_user)
+):
+    """청크 타입 목록 조회 (페이징)"""
     user_info = {
         'member_id': current_user.member_id,
         'role': current_user.role,
         'name': current_user.name
     }
 
-    chunk_types = await knowledge_base_service.get_chunk_types(user_info)
-    return ChunkTypeListResponse(data=chunk_types)
+    all_chunk_types = await knowledge_base_service.get_chunk_types(user_info)
+
+    # 페이징 처리
+    total = len(all_chunk_types)
+    start = (page - 1) * size
+    end = start + size
+    chunk_types = all_chunk_types[start:end]
+
+    return ChunkTypeListResponse(
+        data=chunk_types,
+        total=total,
+        page=page,
+        size=size
+    )
 
 
 @router.get("/languages", response_model=LanguageListResponse)
-async def get_languages(current_user=Depends(get_current_user)):
-    """언어 목록 조회"""
+async def get_languages(
+        page: int = Query(1, ge=1, description="페이지 번호 (기본값: 1)"),
+        size: int = Query(100, ge=1, le=1000, description="페이지당 항목 수 (기본값: 100)"),
+        current_user=Depends(get_current_user)
+):
+    """언어 목록 조회 (페이징)"""
     user_info = {
         'member_id': current_user.member_id,
         'role': current_user.role,
         'name': current_user.name
     }
 
-    languages = await knowledge_base_service.get_languages(user_info)
-    return LanguageListResponse(data=languages)
+    all_languages = await knowledge_base_service.get_languages(user_info)
+
+    # 페이징 처리
+    total = len(all_languages)
+    start = (page - 1) * size
+    end = start + size
+    languages = all_languages[start:end]
+
+    return LanguageListResponse(
+        data=languages,
+        total=total,
+        page=page,
+        size=size
+    )
 
 
 @router.get("/search-methods", response_model=SearchMethodListResponse)
-async def get_search_methods(current_user=Depends(get_current_user)):
-    """검색 방법 목록 조회"""
+async def get_search_methods(
+        page: int = Query(1, ge=1, description="페이지 번호 (기본값: 1)"),
+        size: int = Query(100, ge=1, le=1000, description="페이지당 항목 수 (기본값: 100)"),
+        current_user=Depends(get_current_user)
+):
+    """검색 방법 목록 조회 (페이징)"""
     user_info = {
         'member_id': current_user.member_id,
         'role': current_user.role,
         'name': current_user.name
     }
 
-    search_methods = await knowledge_base_service.get_search_methods(user_info)
-    return SearchMethodListResponse(data=search_methods)
+    all_search_methods = await knowledge_base_service.get_search_methods(user_info)
+
+    # 페이징 처리
+    total = len(all_search_methods)
+    start = (page - 1) * size
+    end = start + size
+    search_methods = all_search_methods[start:end]
+
+    return SearchMethodListResponse(
+        data=search_methods,
+        total=total,
+        page=page,
+        size=size
+    )
 
 
 # ===== Knowledge Base CRUD =====
@@ -110,15 +158,11 @@ async def create_knowledge_base(
     try:
         db_kb = knowledge_base_crud.create_knowledge_base(
             db=db,
-            name=name,
-            description=description,
+            name=external_kb.name,
+            description=external_kb.description,
             created_by=current_user.member_id,
             surro_knowledge_id=external_kb.id,
-            collection_name=external_kb.collection_name,
-            chunk_size=external_kb.chunk_size,
-            chunk_overlap=external_kb.chunk_overlap,
-            top_k=external_kb.top_k,
-            threshold=int(external_kb.threshold * 100)
+            collection_name=external_kb.collection_name
         )
         logger.info(
             f"Created knowledge base: surro_id={external_kb.id}, "
@@ -126,9 +170,6 @@ async def create_knowledge_base(
         )
     except Exception as mapping_error:
         logger.error(f"Failed to create knowledge base: {str(mapping_error)}")
-        logger.warning(
-            f"Knowledge base {external_kb.id} created in external API but DB save failed"
-        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Knowledge base created in external API but failed to save: {str(mapping_error)}"
@@ -141,9 +182,9 @@ async def create_knowledge_base(
         created_at=db_kb.created_at,
         updated_at=db_kb.updated_at,
         created_by=db_kb.created_by,
-        name=external_kb.name,
-        description=external_kb.description,
-        collection_name=external_kb.collection_name,
+        name=db_kb.name,
+        description=db_kb.description,
+        collection_name=db_kb.collection_name,
         chunk_size=external_kb.chunk_size,
         chunk_overlap=external_kb.chunk_overlap,
         top_k=external_kb.top_k,
@@ -153,19 +194,20 @@ async def create_knowledge_base(
 
 @router.get("/", response_model=KnowledgeBaseListResponse)
 async def get_knowledge_bases(
-        page: Optional[int] = Query(None, ge=1, description="페이지 번호 (1부터 시작)"),
-        size: Optional[int] = Query(None, ge=1, le=1000, description="페이지당 항목 수"),
+        page: int = Query(1, ge=1, description="페이지 번호 (기본값: 1)"),
+        size: int = Query(10, ge=1, le=1000, description="페이지당 항목 수 (기본값: 10)"),
         search: Optional[str] = Query(None, description="검색어 (이름, 설명, collection_name)"),
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
-    """지식베이스 목록 조회 (우리 DB 기준)"""
-    skip = None
-    limit = None
+    """지식베이스 목록 조회 (페이징)
 
-    if page is not None and size is not None:
-        skip = (page - 1) * size
-        limit = size
+    - **page**: 페이지 번호 (기본값: 1)
+    - **size**: 페이지당 항목 수 (기본값: 10)
+    - **search**: 검색어 (선택)
+    """
+    skip = (page - 1) * size
+    limit = size
 
     # DB에서 조회
     knowledge_bases, total = knowledge_base_crud.get_knowledge_bases(
@@ -186,10 +228,10 @@ async def get_knowledge_bases(
             name=kb.name,
             description=kb.description,
             collection_name=kb.collection_name,
-            chunk_size=kb.chunk_size,
-            chunk_overlap=kb.chunk_overlap,
-            top_k=kb.top_k,
-            threshold=kb.threshold / 100.0 if kb.threshold is not None else None
+            chunk_size=None,
+            chunk_overlap=None,
+            top_k=None,
+            threshold=None
         )
         for kb in knowledge_bases
     ]
@@ -209,7 +251,7 @@ async def get_knowledge_base(
         current_user=Depends(get_current_user)
 ):
     """지식베이스 상세 정보 조회"""
-    # DB에서 조회
+    # DB에서 조회 (우리 메타 정보)
     db_kb = knowledge_base_crud.get_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id
@@ -230,9 +272,12 @@ async def get_knowledge_base(
     )
 
     if not external_kb:
-        raise HTTPException(status_code=404, detail="Knowledge base not found in external service")
+        raise HTTPException(
+            status_code=404,
+            detail="Knowledge base not found in external service"
+        )
 
-    # 응답 생성
+    # 응답: 우리 DB 메타 정보 + 외부 API 전체 데이터
     return KnowledgeBaseDetailResponse(
         id=db_kb.id,
         surro_knowledge_id=db_kb.surro_knowledge_id,
@@ -262,7 +307,6 @@ async def update_knowledge_base(
         current_user=Depends(get_current_user)
 ):
     """지식베이스 정보 수정"""
-    # 우리 DB에서 기존 지식베이스 조회 (권한 확인용)
     existing_kb = knowledge_base_crud.get_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id
@@ -325,10 +369,10 @@ async def update_knowledge_base(
         name=updated_external.name,
         description=updated_external.description,
         collection_name=updated_external.collection_name,
-        chunk_size=existing_kb.chunk_size,
-        chunk_overlap=existing_kb.chunk_overlap,
-        top_k=existing_kb.top_k,
-        threshold=existing_kb.threshold / 100.0 if existing_kb.threshold is not None else None
+        chunk_size=updated_external.chunk_size,
+        chunk_overlap=updated_external.chunk_overlap,
+        top_k=updated_external.top_k,
+        threshold=updated_external.threshold
     )
 
 
@@ -339,7 +383,6 @@ async def delete_knowledge_base(
         current_user=Depends(get_current_user)
 ):
     """지식베이스 삭제"""
-    # 외부 ID로 우리 DB에서 기존 지식베이스 조회
     existing_kb = knowledge_base_crud.get_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id
@@ -390,7 +433,6 @@ async def add_file_to_knowledge_base(
         current_user=Depends(get_current_user)
 ):
     """지식베이스에 파일 추가"""
-    # 권한 확인
     existing_kb = knowledge_base_crud.get_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id
@@ -401,7 +443,6 @@ async def add_file_to_knowledge_base(
     if current_user.role != "admin" and existing_kb.created_by != current_user.member_id:
         raise HTTPException(status_code=403, detail="Permission denied")
 
-    # 외부 API에 파일 추가
     user_info = {
         'member_id': current_user.member_id,
         'role': current_user.role,
@@ -414,7 +455,6 @@ async def add_file_to_knowledge_base(
         user_info
     )
 
-    # 응답 생성
     return KnowledgeBaseDetailResponse(
         id=existing_kb.id,
         surro_knowledge_id=existing_kb.surro_knowledge_id,
@@ -444,7 +484,6 @@ async def delete_file_from_knowledge_base(
         current_user=Depends(get_current_user)
 ):
     """지식베이스에서 파일 삭제"""
-    # 권한 확인
     existing_kb = knowledge_base_crud.get_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id
@@ -455,7 +494,6 @@ async def delete_file_from_knowledge_base(
     if current_user.role != "admin" and existing_kb.created_by != current_user.member_id:
         raise HTTPException(status_code=403, detail="Permission denied")
 
-    # 외부 API에서 파일 삭제
     user_info = {
         'member_id': current_user.member_id,
         'role': current_user.role,
@@ -468,7 +506,6 @@ async def delete_file_from_knowledge_base(
         user_info
     )
 
-    # 응답 생성
     return KnowledgeBaseDetailResponse(
         id=existing_kb.id,
         surro_knowledge_id=existing_kb.surro_knowledge_id,
@@ -500,7 +537,6 @@ async def search_knowledge_base(
         current_user=Depends(get_current_user)
 ):
     """지식베이스 검색"""
-    # 권한 확인
     existing_kb = knowledge_base_crud.get_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id
@@ -508,7 +544,6 @@ async def search_knowledge_base(
     if not existing_kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
 
-    # 외부 API 검색
     user_info = {
         'member_id': current_user.member_id,
         'role': current_user.role,
@@ -531,7 +566,6 @@ async def get_search_records(
         current_user=Depends(get_current_user)
 ):
     """지식베이스 검색 기록 조회"""
-    # 권한 확인
     existing_kb = knowledge_base_crud.get_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id
@@ -539,7 +573,6 @@ async def get_search_records(
     if not existing_kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
 
-    # 외부 API에서 검색 기록 조회
     user_info = {
         'member_id': current_user.member_id,
         'role': current_user.role,
