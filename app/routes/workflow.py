@@ -22,6 +22,25 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
 
+# ===== Component Types =====
+
+@router.get("/component-types")
+async def get_component_types(
+        current_user=Depends(get_current_user)
+):
+    """사용 가능한 컴포넌트 타입 조회"""
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name
+    }
+
+    component_types = await workflow_service.get_component_types(user_info)
+
+    # data로 래핑
+    return {
+        "data": component_types
+    }
 
 # ===== Workflow CRUD =====
 
@@ -175,6 +194,182 @@ async def get_workflows(
         size=size
     )
 
+# ===== Template 관련 =====
+
+@router.post("/templates", status_code=status.HTTP_201_CREATED)
+async def create_template(
+        template_create: WorkflowCreateRequest,
+        current_user=Depends(get_current_user)
+):
+    """워크플로우 템플릿 생성"""
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name
+    }
+
+    workflow_definition_dict = None
+    if template_create.workflow_definition:
+        workflow_definition_dict = template_create.workflow_definition.dict()
+
+    template_response = await workflow_service.create_template(
+        name=template_create.name,
+        description=template_create.description,
+        category=template_create.category,
+        workflow_definition=workflow_definition_dict,
+        user_info=user_info
+    )
+
+    return template_response
+
+@router.get("/templates")
+async def get_templates(
+        page: Optional[int] = Query(None, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: Optional[int] = Query(None, ge=1, le=1000, description="페이지당 항목 수"),
+        category: Optional[str] = Query(None, description="카테고리 필터"),
+        current_user=Depends(get_current_user)
+):
+    """워크플로우 템플릿 목록 조회 (외부 API에서만 조회)"""
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name
+    }
+
+    templates_response = await workflow_service.get_templates(
+        page=page,
+        page_size=size,
+        category=category,
+        user_info=user_info
+    )
+
+    # 외부 API 응답을 그대로 반환
+    return templates_response
+
+
+@router.get("/templates/{template_id}")
+async def get_template(
+        template_id: str,
+        current_user=Depends(get_current_user)
+):
+    """워크플로우 템플릿 상세 조회 (외부 API에서만 조회)"""
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name
+    }
+
+    template_response = await workflow_service.get_template(
+        template_id,
+        user_info
+    )
+
+    if not template_response:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    return template_response
+
+@router.put("/templates/{template_id}")
+async def update_template(
+        template_id: str,
+        template_update: WorkflowUpdateRequest,
+        current_user=Depends(get_current_user)
+):
+    """워크플로우 템플릿 수정"""
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name
+    }
+
+    workflow_definition_dict = None
+    if template_update.workflow_definition:
+        workflow_definition_dict = template_update.workflow_definition.dict()
+
+    template_response = await workflow_service.update_template(
+        template_id=template_id,
+        name=template_update.name,
+        description=template_update.description,
+        category=template_update.category,
+        status=template_update.status,
+        workflow_definition=workflow_definition_dict,
+        user_info=user_info
+    )
+
+    return template_response
+
+
+@router.delete("/templates/{template_id}", status_code=204)
+async def delete_template(
+        template_id: str,
+        current_user=Depends(get_current_user)
+):
+    """워크플로우 템플릿 삭제"""
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name
+    }
+
+    success = await workflow_service.delete_template(
+        template_id,
+        user_info
+    )
+
+    if not success:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    return None
+
+@router.post("/templates/{template_id}/clone")
+async def clone_template(
+        template_id: str,
+        workflow_name: str = Query(..., description="새로 생성할 워크플로우 이름"),
+        service_id: Optional[int] = Query(None, description="연결할 서비스 ID"),
+        db: Session = Depends(get_db),
+        current_user=Depends(get_current_user)
+):
+    """템플릿으로부터 워크플로우 생성"""
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name
+    }
+
+    # 외부 API에서 템플릿 복제
+    clone_response = await workflow_service.clone_template(
+        template_id=template_id,
+        workflow_name=workflow_name,
+        service_id=service_id,
+        user_info=user_info
+    )
+
+    # 우리 DB에 저장
+    try:
+        db_workflow = workflow_crud.create_workflow(
+            db=db,
+            name=workflow_name,
+            description=clone_response.get('description'),
+            created_by=current_user.member_id,
+            surro_workflow_id=clone_response['id']
+        )
+        logger.info(
+            f"Created workflow from template: surro_id={clone_response['id']}, "
+            f"template_id={template_id}, member_id={current_user.member_id}"
+        )
+
+        # 응답에 DB 메타정보 추가
+        clone_response['db_id'] = db_workflow.id
+        clone_response['db_created_at'] = db_workflow.created_at.isoformat()
+        clone_response['db_created_by'] = db_workflow.created_by
+
+    except Exception as mapping_error:
+        logger.error(f"Failed to save cloned workflow to DB: {str(mapping_error)}")
+        logger.warning(
+            f"Workflow {clone_response['id']} created from template but DB save failed"
+        )
+
+    return clone_response
 
 @router.get("/{surro_workflow_id}", response_model=WorkflowDetailResponse)
 async def get_workflow(
@@ -206,26 +401,31 @@ async def get_workflow(
     if not external_workflow:
         raise HTTPException(status_code=404, detail="Workflow not found in external service")
 
-    # 응답 생성
+    # 응답 생성 (DB 필수 필드 + 외부 API 전체 데이터)
     return WorkflowDetailResponse(
+        # DB 메타 정보 (필수)
         id=db_workflow.id,
         surro_workflow_id=db_workflow.surro_workflow_id,
         created_at=db_workflow.created_at,
         updated_at=db_workflow.updated_at,
         created_by=db_workflow.created_by,
+        # 외부 API 데이터
         name=external_workflow.name,
         description=external_workflow.description,
         category=external_workflow.category,
         status=external_workflow.status,
         service_id=external_workflow.service_id,
+        service_name=external_workflow.service_name,
         creator_id=external_workflow.creator_id,
         is_template=external_workflow.is_template,
         template_id=external_workflow.template_id,
+        template_name=external_workflow.template_name,
         kubeflow_run_id=external_workflow.kubeflow_run_id,
+        public_url=external_workflow.public_url,
+        backend_api_url=external_workflow.backend_api_url,
         components=external_workflow.components,
         component_connections=external_workflow.component_connections
     )
-
 
 @router.put("/{surro_workflow_id}", response_model=WorkflowResponse)
 async def update_workflow(
@@ -351,7 +551,6 @@ async def delete_workflow(
             detail=f"Failed to start workflow deletion: {str(e)}"
         )
 
-
 @router.post("/{surro_workflow_id}/finalize-deletion")
 async def finalize_workflow_deletion(
         surro_workflow_id: str,
@@ -390,9 +589,7 @@ async def finalize_workflow_deletion(
             detail=f"Failed to finalize workflow deletion: {str(e)}"
         )
 
-
 # ===== Workflow 실행 =====
-
 @router.post("/{surro_workflow_id}/execute", response_model=WorkflowExecuteResponse)
 async def execute_workflow(
         surro_workflow_id: str,
@@ -400,7 +597,43 @@ async def execute_workflow(
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
-    """워크플로우 실행"""
+    """
+    워크플로우 실행 (KServe 배포 + Kubeflow 파이프라인 실행)
+
+    워크플로우를 실행하여 ML 모델을 배포합니다. Kubeflow 파이프라인을 통해 KServe InferenceService를 생성하고,
+    모델 서빙 엔드포인트를 활성화합니다.
+
+    ## Process
+    1. 지식베이스가 모델 앞에 있는지 검증
+    2. MODEL 컴포넌트를 KServe InferenceService로 배포
+    3. 워크플로우를 Kubeflow 파이프라인으로 변환
+    4. 파이프라인 실행 및 모니터링 시작
+    5. KServeDeployment 테이블에 배포 정보 기록
+
+    ## Response Status
+    - **PENDING**: 대기중
+    - **RUNNING**: 실행중
+    - **SUCCEEDED**: 성공
+    - **FAILED**: 실패
+
+    ## Notes
+    - 워크플로우 상태가 **ERROR**인 경우만 실행 불가
+    - **DRAFT** 상태에서도 실행 가능 (파이프라인 완료 시 자동으로 ACTIVE로 변경됨)
+    - 지식베이스 컴포넌트는 모델 컴포넌트보다 앞에 있어야 함
+    - 배포된 모델은 `/workflows/{workflow_id}/models`로 확인
+    - 실행 상태는 `/workflows/{workflow_id}/status`로 모니터링
+    - 파이프라인 완료 시 워크플로우 상태가 자동으로 **ACTIVE**로 변경됨
+
+    ## Example Request
+    ```json
+    {
+      "parameters": {
+        "gpu_enabled": true,
+        "replicas": 2
+      }
+    }
+    ```
+    """
     # 권한 확인
     existing_workflow = workflow_crud.get_workflow_by_surro_id(
         db=db,
@@ -424,6 +657,74 @@ async def execute_workflow(
 
     return execute_response
 
+@router.get("/{surro_workflow_id}/status")
+async def get_workflow_status(
+        surro_workflow_id: str,
+        db: Session = Depends(get_db),
+        current_user=Depends(get_current_user)
+):
+    """워크플로우 실행 상태 조회"""
+    # 권한 확인
+    existing_workflow = workflow_crud.get_workflow_by_surro_id(
+        db=db,
+        surro_workflow_id=surro_workflow_id
+    )
+    if not existing_workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    # 외부 API 상태 조회
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name
+    }
+
+    status_response = await workflow_service.get_workflow_status(
+        surro_workflow_id,
+        user_info
+    )
+
+    return status_response
+
+# ===== Component Deployment Status (내부 API) =====
+
+@router.post("/{surro_workflow_id}/components/{component_id}/deployment-status")
+async def update_component_deployment_status(
+        surro_workflow_id: str,
+        component_id: str,
+        service_name: str = Form(...),
+        service_hostname: str = Form(...),
+        model_name: str = Form(...),
+        status: str = Form(...),
+        internal_url: Optional[str] = Form(None),
+        error_message: Optional[str] = Form(None),
+        current_user=Depends(get_current_user)
+):
+    """
+    컴포넌트 KServe 배포 상태 업데이트
+
+    중요: 이 API는 Kubeflow Pipeline 내부에서만 호출되는 내부 API입니다.
+    프론트엔드나 외부 클라이언트에서는 사용하지 않아야 합니다.
+    """
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name
+    }
+
+    update_response = await workflow_service.update_component_deployment_status(
+        workflow_id=surro_workflow_id,
+        component_id=component_id,
+        service_name=service_name,
+        service_hostname=service_hostname,
+        model_name=model_name,
+        status=status,
+        internal_url=internal_url,
+        error_message=error_message,
+        user_info=user_info
+    )
+
+    return update_response
 
 # ===== Workflow 테스트 =====
 
@@ -492,36 +793,6 @@ async def test_ml_workflow(
 
 # ===== Workflow 상태 및 모델 조회 =====
 
-@router.get("/{surro_workflow_id}/status")
-async def get_workflow_status(
-        surro_workflow_id: str,
-        db: Session = Depends(get_db),
-        current_user=Depends(get_current_user)
-):
-    """워크플로우 실행 상태 조회"""
-    # 권한 확인
-    existing_workflow = workflow_crud.get_workflow_by_surro_id(
-        db=db,
-        surro_workflow_id=surro_workflow_id
-    )
-    if not existing_workflow:
-        raise HTTPException(status_code=404, detail="Workflow not found")
-
-    # 외부 API 상태 조회
-    user_info = {
-        'member_id': current_user.member_id,
-        'role': current_user.role,
-        'name': current_user.name
-    }
-
-    status_response = await workflow_service.get_workflow_status(
-        surro_workflow_id,
-        user_info
-    )
-
-    return status_response
-
-
 @router.get("/{surro_workflow_id}/models")
 async def get_workflow_models(
         surro_workflow_id: str,
@@ -550,7 +821,6 @@ async def get_workflow_models(
     )
 
     return models_response
-
 
 # ===== Workflow 정리 =====
 
@@ -627,259 +897,3 @@ async def finalize_workflow_cleanup(
             status_code=500,
             detail=f"Failed to finalize workflow cleanup: {str(e)}"
         )
-
-
-# ===== Template 관련 =====
-
-@router.get("/templates")
-async def get_templates(
-        page: Optional[int] = Query(None, ge=1, description="페이지 번호 (1부터 시작)"),
-        size: Optional[int] = Query(None, ge=1, le=1000, description="페이지당 항목 수"),
-        category: Optional[str] = Query(None, description="카테고리 필터"),
-        current_user=Depends(get_current_user)
-):
-    """워크플로우 템플릿 목록 조회"""
-    user_info = {
-        'member_id': current_user.member_id,
-        'role': current_user.role,
-        'name': current_user.name
-    }
-
-    templates_response = await workflow_service.get_templates(
-        page=page,
-        page_size=size,
-        category=category,
-        user_info=user_info
-    )
-
-    # data로 래핑
-    if isinstance(templates_response, dict) and 'items' in templates_response:
-        return {
-            "data": templates_response['items'],
-            "total": templates_response.get('total', len(templates_response['items'])),
-            "page": page,
-            "size": size
-        }
-
-    return {
-        "data": templates_response if isinstance(templates_response, list) else [],
-        "total": len(templates_response) if isinstance(templates_response, list) else 0,
-        "page": page,
-        "size": size
-    }
-
-
-@router.get("/templates/{template_id}")
-async def get_template(
-        template_id: str,
-        current_user=Depends(get_current_user)
-):
-    """워크플로우 템플릿 상세 조회"""
-    user_info = {
-        'member_id': current_user.member_id,
-        'role': current_user.role,
-        'name': current_user.name
-    }
-
-    template_response = await workflow_service.get_template(
-        template_id,
-        user_info
-    )
-
-    if not template_response:
-        raise HTTPException(status_code=404, detail="Template not found")
-
-    return template_response
-
-
-@router.post("/templates", status_code=status.HTTP_201_CREATED)
-async def create_template(
-        template_create: WorkflowCreateRequest,
-        current_user=Depends(get_current_user)
-):
-    """워크플로우 템플릿 생성"""
-    user_info = {
-        'member_id': current_user.member_id,
-        'role': current_user.role,
-        'name': current_user.name
-    }
-
-    workflow_definition_dict = None
-    if template_create.workflow_definition:
-        workflow_definition_dict = template_create.workflow_definition.dict()
-
-    template_response = await workflow_service.create_template(
-        name=template_create.name,
-        description=template_create.description,
-        category=template_create.category,
-        workflow_definition=workflow_definition_dict,
-        user_info=user_info
-    )
-
-    return template_response
-
-
-@router.put("/templates/{template_id}")
-async def update_template(
-        template_id: str,
-        template_update: WorkflowUpdateRequest,
-        current_user=Depends(get_current_user)
-):
-    """워크플로우 템플릿 수정"""
-    user_info = {
-        'member_id': current_user.member_id,
-        'role': current_user.role,
-        'name': current_user.name
-    }
-
-    workflow_definition_dict = None
-    if template_update.workflow_definition:
-        workflow_definition_dict = template_update.workflow_definition.dict()
-
-    template_response = await workflow_service.update_template(
-        template_id=template_id,
-        name=template_update.name,
-        description=template_update.description,
-        category=template_update.category,
-        status=template_update.status,
-        workflow_definition=workflow_definition_dict,
-        user_info=user_info
-    )
-
-    return template_response
-
-
-@router.delete("/templates/{template_id}", status_code=204)
-async def delete_template(
-        template_id: str,
-        current_user=Depends(get_current_user)
-):
-    """워크플로우 템플릿 삭제"""
-    user_info = {
-        'member_id': current_user.member_id,
-        'role': current_user.role,
-        'name': current_user.name
-    }
-
-    success = await workflow_service.delete_template(
-        template_id,
-        user_info
-    )
-
-    if not success:
-        raise HTTPException(status_code=404, detail="Template not found")
-
-    return None
-
-
-@router.post("/templates/{template_id}/clone")
-async def clone_template(
-        template_id: str,
-        workflow_name: str = Query(..., description="새로 생성할 워크플로우 이름"),
-        service_id: Optional[int] = Query(None, description="연결할 서비스 ID"),
-        db: Session = Depends(get_db),
-        current_user=Depends(get_current_user)
-):
-    """템플릿으로부터 워크플로우 생성"""
-    user_info = {
-        'member_id': current_user.member_id,
-        'role': current_user.role,
-        'name': current_user.name
-    }
-
-    # 외부 API에서 템플릿 복제
-    clone_response = await workflow_service.clone_template(
-        template_id=template_id,
-        workflow_name=workflow_name,
-        service_id=service_id,
-        user_info=user_info
-    )
-
-    # 우리 DB에 저장
-    try:
-        db_workflow = workflow_crud.create_workflow(
-            db=db,
-            name=workflow_name,
-            description=clone_response.get('description'),
-            created_by=current_user.member_id,
-            surro_workflow_id=clone_response['id']
-        )
-        logger.info(
-            f"Created workflow from template: surro_id={clone_response['id']}, "
-            f"template_id={template_id}, member_id={current_user.member_id}"
-        )
-
-        # 응답에 DB 메타정보 추가
-        clone_response['db_id'] = db_workflow.id
-        clone_response['db_created_at'] = db_workflow.created_at.isoformat()
-        clone_response['db_created_by'] = db_workflow.created_by
-
-    except Exception as mapping_error:
-        logger.error(f"Failed to save cloned workflow to DB: {str(mapping_error)}")
-        logger.warning(
-            f"Workflow {clone_response['id']} created from template but DB save failed"
-        )
-
-    return clone_response
-
-
-# ===== Component Types =====
-
-@router.get("/component-types")
-async def get_component_types(
-        current_user=Depends(get_current_user)
-):
-    """사용 가능한 컴포넌트 타입 조회"""
-    user_info = {
-        'member_id': current_user.member_id,
-        'role': current_user.role,
-        'name': current_user.name
-    }
-
-    component_types = await workflow_service.get_component_types(user_info)
-
-    # data로 래핑
-    return {
-        "data": component_types
-    }
-
-
-# ===== Component Deployment Status (내부 API) =====
-
-@router.post("/{surro_workflow_id}/components/{component_id}/deployment-status")
-async def update_component_deployment_status(
-        surro_workflow_id: str,
-        component_id: str,
-        service_name: str = Form(...),
-        service_hostname: str = Form(...),
-        model_name: str = Form(...),
-        status: str = Form(...),
-        internal_url: Optional[str] = Form(None),
-        error_message: Optional[str] = Form(None),
-        current_user=Depends(get_current_user)
-):
-    """
-    컴포넌트 KServe 배포 상태 업데이트
-
-    중요: 이 API는 Kubeflow Pipeline 내부에서만 호출되는 내부 API입니다.
-    프론트엔드나 외부 클라이언트에서는 사용하지 않아야 합니다.
-    """
-    user_info = {
-        'member_id': current_user.member_id,
-        'role': current_user.role,
-        'name': current_user.name
-    }
-
-    update_response = await workflow_service.update_component_deployment_status(
-        workflow_id=surro_workflow_id,
-        component_id=component_id,
-        service_name=service_name,
-        service_hostname=service_hostname,
-        model_name=model_name,
-        status=status,
-        internal_url=internal_url,
-        error_message=error_message,
-        user_info=user_info
-    )
-
-    return update_response

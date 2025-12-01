@@ -5,17 +5,78 @@ from datetime import datetime
 
 # ===== 외부 API 응답 스키마 =====
 
+class ModelProviderSchema(BaseModel):
+    """모델 제공자 정보"""
+    id: int
+    name: str
+    description: str
+
+
+class ModelTypeSchema(BaseModel):
+    """모델 타입 정보"""
+    id: int
+    name: str
+    description: str
+
+
+class ModelFormatSchema(BaseModel):
+    """모델 포맷 정보"""
+    id: int
+    name: str
+    description: str
+
+
+class ModelRegistrySchema(BaseModel):
+    """모델 레지스트리 정보"""
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
+    id: int
+    artifact_path: str
+    uri: str
+    run_id: Optional[str] = None
+    reference_model_id: int
+
+
+class ModelDetailSchema(BaseModel):
+    """모델 상세 정보"""
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
+    deleted_by: Optional[str] = None
+    id: int
+    name: str
+    description: Optional[str] = None
+    repo_id: Optional[str] = None
+    provider_info: ModelProviderSchema
+    type_info: ModelTypeSchema
+    format_info: ModelFormatSchema
+    parent_model_id: Optional[int] = None
+    registry: ModelRegistrySchema
+    task: Optional[str] = None
+    parameter: Optional[str] = None
+    sample_code: Optional[str] = None
+
+
 class ExternalComponentSchema(BaseModel):
     """외부 API 컴포넌트 스키마"""
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
+    deleted_by: Optional[str] = None
     id: str
     workflow_id: str
     name: str
     type: str  # START, END, MODEL, KNOWLEDGE_BASE
     model_id: Optional[int] = None
+    model: Optional[ModelDetailSchema] = None
     knowledge_base_id: Optional[int] = None
     prompt_id: Optional[int] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
 
 
 class ExternalConnectionSchema(BaseModel):
@@ -24,6 +85,8 @@ class ExternalConnectionSchema(BaseModel):
     workflow_id: str
     source_component_id: str
     target_component_id: str
+    source_component: ExternalComponentSchema
+    target_component: ExternalComponentSchema
     created_at: Optional[datetime] = None
 
 
@@ -41,8 +104,16 @@ class ExternalWorkflowDetailResponse(BaseModel):
     kubeflow_run_id: Optional[str] = None
     components: List[ExternalComponentSchema] = []
     component_connections: List[ExternalConnectionSchema] = []
+    service_name: Optional[str] = None
+    template_name: Optional[str] = None
+    public_url: Optional[str] = None
+    backend_api_url: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
+    deleted_by: Optional[str] = None
 
 
 class ExternalWorkflowBriefResponse(BaseModel):
@@ -125,7 +196,7 @@ class WorkflowResponse(BaseModel):
 
 class WorkflowDetailResponse(BaseModel):
     """워크플로우 상세 응답 (전체 정보)"""
-    # DB 메타 정보
+    # DB 메타 정보 (필수)
     id: int
     surro_workflow_id: str
     created_at: datetime
@@ -138,10 +209,14 @@ class WorkflowDetailResponse(BaseModel):
     category: Optional[str] = None
     status: str
     service_id: Optional[str] = None
+    service_name: Optional[str] = None
     creator_id: int
     is_template: bool
     template_id: Optional[str] = None
+    template_name: Optional[str] = None
     kubeflow_run_id: Optional[str] = None
+    public_url: Optional[str] = None
+    backend_api_url: Optional[str] = None
     components: List[ExternalComponentSchema] = []
     component_connections: List[ExternalConnectionSchema] = []
 
@@ -158,15 +233,19 @@ class WorkflowListResponse(BaseModel):
 
 class WorkflowExecuteRequest(BaseModel):
     """워크플로우 실행 요청"""
-    parameters: Optional[Dict[str, Any]] = Field(None, description="실행 파라미터")
+    parameters: Optional[Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="실행 파라미터 (커스텀 설정 값들을 전달)",
+        example={"gpu_enabled": True, "replicas": 2}
+    )
 
 
 class WorkflowExecuteResponse(BaseModel):
     """워크플로우 실행 응답"""
-    workflow_id: str
-    kubeflow_run_id: str
-    status: str
-    message: str
+    workflow_id: str = Field(..., description="실행된 워크플로우 UUID")
+    kubeflow_run_id: str = Field(..., description="Kubeflow 파이프라인 실행 ID")
+    status: str = Field(..., description="실행 상태 (PENDING/RUNNING/SUCCEEDED/FAILED)")
+    message: str = Field(..., description="상태 메시지")
 
 
 # ===== 워크플로우 테스트 관련 =====
