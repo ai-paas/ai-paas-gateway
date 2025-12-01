@@ -28,6 +28,23 @@ router = APIRouter(prefix="/workflows", tags=["workflows"])
 async def get_component_types(
         current_user=Depends(get_current_user)
 ):
+
+    """
+    사용 가능한 컴포넌트 타입 조회
+
+    워크플로우 구성에 사용할 수 있는 컴포넌트 타입 목록을 조회합니다. 각 타입별로 고유한 component_id와 설명을 제공하여 워크플로우 정의 시 활용할 수 있습니다.
+
+    ## Usage Example
+    1. 이 API로 사용 가능한 컴포넌트 타입 확인
+    2. workflow_definition 작성 시 component_id 사용
+    3. 각 컴포넌트 타입에 맞는 설정 적용
+
+    ## Notes
+    - 고정된 타입 목록 반환 (동적 변경 없음)
+    - 워크플로우는 반드시 START로 시작하고 END로 종료
+    - MODEL 타입은 model_id 필수, prompt_id 선택
+    - KNOWLEDGE_BASE 타입은 knowledge_base_id 필수
+    """
     """사용 가능한 컴포넌트 타입 조회"""
     user_info = {
         'member_id': current_user.member_id,
