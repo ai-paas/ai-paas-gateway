@@ -217,24 +217,43 @@ async def get_knowledge_bases(
         search=search
     )
 
-    # 응답 데이터 구성
-    response_data = [
-        KnowledgeBaseResponse(
-            id=kb.id,
-            surro_knowledge_id=kb.surro_knowledge_id,
-            created_at=kb.created_at,
-            updated_at=kb.updated_at,
-            created_by=kb.created_by,
-            name=kb.name,
-            description=kb.description,
-            collection_name=kb.collection_name,
-            chunk_size=None,
-            chunk_overlap=None,
-            top_k=None,
-            threshold=None
+    # 외부 API에서 전체 목록 조회
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name
+    }
+
+    try:
+        external_kbs = await knowledge_base_service.get_knowledge_bases(user_info=user_info)
+        # surro_knowledge_id를 키로 하는 딕셔너리 생성
+        external_kb_map = {kb.id: kb for kb in external_kbs}
+    except Exception as e:
+        logger.warning(f"Failed to fetch external knowledge bases: {str(e)}")
+        external_kb_map = {}
+
+    # 응답 데이터 구성 (DB 메타 정보 + 외부 API 데이터 병합)
+    response_data = []
+    for kb in knowledge_bases:
+        external_kb = external_kb_map.get(kb.surro_knowledge_id)
+
+        response_data.append(
+            KnowledgeBaseResponse(
+                id=kb.id,
+                surro_knowledge_id=kb.surro_knowledge_id,
+                created_at=kb.created_at,
+                updated_at=kb.updated_at,
+                created_by=kb.created_by,
+                name=kb.name,
+                description=kb.description,
+                collection_name=kb.collection_name,
+                # 외부 API 데이터가 있으면 사용, 없으면 None
+                chunk_size=external_kb.chunk_size if external_kb else None,
+                chunk_overlap=external_kb.chunk_overlap if external_kb else None,
+                top_k=external_kb.top_k if external_kb else None,
+                threshold=external_kb.threshold if external_kb else None
+            )
         )
-        for kb in knowledge_bases
-    ]
 
     return KnowledgeBaseListResponse(
         data=response_data,
