@@ -2,9 +2,11 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
 from typing import Optional, List
 from datetime import datetime
+import logging
 
 from app.models.dataset import Dataset
 
+logger = logging.getLogger(__name__)
 
 class DatasetCRUD:
     """데이터셋 CRUD 작업 클래스 - Inno DB에서 사용자별 데이터셋 매핑 관리"""
