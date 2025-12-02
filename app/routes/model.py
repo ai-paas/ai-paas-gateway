@@ -140,11 +140,121 @@ async def create_model(
         )
 
 
+@router.get("")
+async def get_all_models(
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
+        search: Optional[str] = Query(None, description="검색어"),
+        model_type_id: Optional[int] = Query(None, description="모델 타입 ID로 필터링"),
+        model_provider_id: Optional[int] = Query(None, description="모델 제공자 ID로 필터링"),
+        model_format_id: Optional[int] = Query(None, description="모델 포맷 ID로 필터링"),
+        filter_type: Optional[str] = Query(None, description="필터 타입: 'custom'(내 모델만), 'catalog'(카탈로그만), None(전체)"),
+        db: Session = Depends(get_db),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    전체 모델 조회 (커스텀 모델 + 카탈로그 모델, 페이지네이션 포함)
+    filter_type으로 특정 타입만 조회 가능
+    """
+    try:
+        # 1. Surro API에서 전체 모델 조회
+        all_surro_models = await model_service.get_models(
+            skip=0,
+            limit=1000,
+            search=None,
+            user_info={
+                'member_id': current_user.member_id,
+                'role': current_user.role,
+                'name': current_user.name
+            }
+        )
+
+        # 2. 로컬 DB에서 모델 정보 조회
+        user_model_ids = []
+        catalog_model_ids = []
+
+        if filter_type != 'catalog':  # catalog만 조회하는 경우가 아니면 user 모델도 조회
+            user_models = db.query(Model).filter(
+                Model.created_by == current_user.member_id,
+                Model.deleted_at.is_(None)
+            ).all()
+            user_model_ids = [model.surro_model_id for model in user_models if model.surro_model_id]
+
+        if filter_type != 'custom':  # custom만 조회하는 경우가 아니면 catalog 모델도 조회
+            catalog_models = db.query(Model).filter(
+                Model.is_catalog == True,
+                Model.deleted_at.is_(None)
+            ).all()
+            catalog_model_ids = [model.surro_model_id for model in catalog_models if model.surro_model_id]
+
+        # 3. filter_type에 따라 모델 필터링
+        if filter_type == 'custom':
+            # 내 모델만
+            filtered_models = [m for m in all_surro_models if m.id in user_model_ids]
+        elif filter_type == 'catalog':
+            # 카탈로그 모델만
+            filtered_models = [m for m in all_surro_models if m.id in catalog_model_ids]
+        else:
+            # 전체 (중복 제거)
+            all_model_ids = set(user_model_ids) | set(catalog_model_ids)
+            filtered_models = [m for m in all_surro_models if m.id in all_model_ids]
+
+        # 4. 검색어 필터링
+        if search:
+            search_lower = search.lower()
+            filtered_models = [
+                m for m in filtered_models
+                if search_lower in m.name.lower() or
+                   (m.description and search_lower in m.description.lower())
+            ]
+
+        # 5. 모델 타입, 제공자, 포맷 필터링
+        if model_type_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'type_info') and m.type_info and
+                   hasattr(m.type_info, 'id') and m.type_info.id == model_type_id
+            ]
+
+        if model_provider_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'provider_info') and m.provider_info and
+                   hasattr(m.provider_info, 'id') and m.provider_info.id == model_provider_id
+            ]
+
+        if model_format_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'format_info') and m.format_info and
+                   hasattr(m.format_info, 'id') and m.format_info.id == model_format_id
+            ]
+
+        # 6. 페이지네이션 적용
+        total = len(filtered_models)
+        skip = (page - 1) * size
+        paginated_models = filtered_models[skip:skip + size]
+
+        # 7. ModelResponse로 변환
+        wrapped_models = [ModelResponse(**m.model_dump()) for m in paginated_models]
+
+        return _create_pagination_response(wrapped_models, total, page, size)
+
+    except Exception as e:
+        logger.error(f"Error getting all models for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get models: {str(e)}"
+        )
+
 @router.get("/custom-models")
 async def get_user_models(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
         search: Optional[str] = Query(None, description="검색어"),
+        model_type_id: Optional[int] = Query(None, description="모델 타입 ID로 필터링"),
+        model_provider_id: Optional[int] = Query(None, description="모델 제공자 ID로 필터링"),
+        model_format_id: Optional[int] = Query(None, description="모델 포맷 ID로 필터링"),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
@@ -178,7 +288,7 @@ async def get_user_models(
         # 3. 사용자 커스텀 모델만 필터링
         filtered_models = [m for m in all_surro_models if m.id in user_model_ids]
 
-        # 4. 로컬에서 추가 필터링 적용
+        # 4. 로컬에서 검색어 필터링 적용
         if search:
             search_lower = search.lower()
             filtered_models = [
@@ -187,12 +297,34 @@ async def get_user_models(
                    (m.description and search_lower in m.description.lower())
             ]
 
-        # 5. 필터링된 결과에 페이지네이션 적용
+        # 5. 모델 타입, 제공자, 포맷 필터링 (중첩 객체 구조)
+        if model_type_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'type_info') and m.type_info and
+                   hasattr(m.type_info, 'id') and m.type_info.id == model_type_id
+            ]
+
+        if model_provider_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'provider_info') and m.provider_info and
+                   hasattr(m.provider_info, 'id') and m.provider_info.id == model_provider_id
+            ]
+
+        if model_format_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'format_info') and m.format_info and
+                   hasattr(m.format_info, 'id') and m.format_info.id == model_format_id
+            ]
+
+        # 6. 필터링된 결과에 페이지네이션 적용
         total = len(filtered_models)
         skip = (page - 1) * size
         paginated_models = filtered_models[skip:skip + size]
 
-        # 6. ModelResponse로 변환
+        # 7. ModelResponse로 변환
         wrapped_models = [ModelResponse(**m.model_dump()) for m in paginated_models]
 
         return _create_pagination_response(wrapped_models, total, page, size)
@@ -210,6 +342,9 @@ async def get_catalog_models(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
         search: Optional[str] = Query(None, description="검색어"),
+        model_type_id: Optional[int] = Query(None, description="모델 타입 ID로 필터링"),
+        model_provider_id: Optional[int] = Query(None, description="모델 제공자 ID로 필터링"),
+        model_format_id: Optional[int] = Query(None, description="모델 포맷 ID로 필터링"),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
@@ -243,7 +378,7 @@ async def get_catalog_models(
         # 3. 카탈로그 모델만 필터링
         filtered_models = [m for m in all_surro_models if m.id in catalog_model_ids]
 
-        # 4. 로컬에서 추가 필터링 적용
+        # 4. 로컬에서 검색어 필터링 적용
         if search:
             search_lower = search.lower()
             filtered_models = [
@@ -252,12 +387,34 @@ async def get_catalog_models(
                    (m.description and search_lower in m.description.lower())
             ]
 
-        # 5. 필터링된 결과에 페이지네이션 적용
+        # 5. 모델 타입, 제공자, 포맷 필터링 (중첩 객체 구조)
+        if model_type_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'type_info') and m.type_info and
+                   hasattr(m.type_info, 'id') and m.type_info.id == model_type_id
+            ]
+
+        if model_provider_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'provider_info') and m.provider_info and
+                   hasattr(m.provider_info, 'id') and m.provider_info.id == model_provider_id
+            ]
+
+        if model_format_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'format_info') and m.format_info and
+                   hasattr(m.format_info, 'id') and m.format_info.id == model_format_id
+            ]
+
+        # 6. 필터링된 결과에 페이지네이션 적용
         total = len(filtered_models)
         skip = (page - 1) * size
         paginated_models = filtered_models[skip:skip + size]
 
-        # 6. ModelResponse로 변환
+        # 7. ModelResponse로 변환
         wrapped_models = [ModelResponse(**m.model_dump()) for m in paginated_models]
 
         return _create_pagination_response(wrapped_models, total, page, size)
@@ -268,7 +425,6 @@ async def get_catalog_models(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get catalog models: {str(e)}"
         )
-
 
 @router.get("/providers")
 async def get_providers(
