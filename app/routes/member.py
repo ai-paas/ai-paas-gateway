@@ -11,6 +11,8 @@ from app.auth import (
 from app.schemas.member import (
     MemberCreate, MemberUpdate, MemberResponse, MemberListResponse
 )
+from datetime import datetime
+
 
 router = APIRouter(prefix="/members", tags=["members"])
 
@@ -18,8 +20,8 @@ router = APIRouter(prefix="/members", tags=["members"])
 @router.post("/", response_model=MemberResponse)
 def create_member(
         member: MemberCreate,
-        db: Session = Depends(get_db)
-        # _: None = Depends(get_current_admin_user)
+        db: Session = Depends(get_db),
+        _: None = Depends(get_current_admin_user)
 ):
     """멤버 생성"""
     # 중복 체크 (member_id - 아이디)
@@ -68,11 +70,15 @@ def get_member(
         db: Session = Depends(get_db),
         current_user = Depends(get_current_user)
 ):
-    """멤버 기본 정보 조회"""
+    """멤버 기본 정보 조회 (관리자는 비활성 회원도 조회 가능)"""
     check_member_access(current_user, member_id)
-    member = member_crud.get_member(db=db, member_id=member_id)
+
+    include_inactive = getattr(current_user, "role", None) == "admin"
+
+    member = member_crud.get_member(db=db, member_id=member_id, include_inactive=include_inactive)
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
+
     return member
 
 @router.put("/{member_id}", response_model=MemberResponse)
@@ -87,18 +93,20 @@ def update_member(
     check_member_access(current_user, member_id)
 
     # 기존 멤버 존재 여부 확인
-    existing_member = member_crud.get_member(db=db, member_id=member_id)
+    existing_member = member_crud.get_member(db=db, member_id=member_id, include_inactive=True)
     if not existing_member:
         raise HTTPException(status_code=404, detail="Member not found")
 
-    # member_id 중복 체크 (변경하는 경우)
-    if member_update.member_id and member_update.member_id != existing_member.member_id:
+    # member_id 중복 체크 (기존 값과 다르게 변경하는 경우만)
+    if (member_update.member_id and
+        member_update.member_id != existing_member.member_id):
         member_id_exists = member_crud.get_member(db=db, member_id=member_update.member_id)
         if member_id_exists:
             raise HTTPException(status_code=400, detail="Member ID already exists")
 
-    # email 중복 체크 (변경하는 경우)
-    if member_update.email and member_update.email != existing_member.email:
+    # email 중복 체크 (기존 값과 다르게 변경하는 경우만)
+    if (member_update.email and
+        member_update.email != existing_member.email):
         email_exists = member_crud.get_member_by_email(db=db, email=str(member_update.email))
         if email_exists:
             raise HTTPException(status_code=400, detail="Email already exists")
@@ -112,17 +120,36 @@ def delete_member(
         db: Session = Depends(get_db),
         current_user = Depends(get_current_user)
 ):
-    """member_id로 멤버 삭제 (소프트 삭제)"""
-    # 권한 검증
+    """member_id로 멤버 삭제 (하드 삭제)"""
     check_member_access(current_user, member_id)
-    member = member_crud.get_member(db=db, member_id=member_id)
+
+    member = member_crud.get_member(db=db, member_id=member_id, include_inactive=True)
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
 
     success = member_crud.delete_member(db=db, member_id=member.member_id)
     if not success:
         raise HTTPException(status_code=404, detail="Member not found")
+
     return {"message": "Member deleted successfully"}
+
+@router.patch("/{member_id}/status", response_model=MemberResponse)
+def toggle_member_status(
+        member_id: str,
+        is_active: bool,
+        db: Session = Depends(get_db),
+        _: None = Depends(get_current_admin_user)
+):
+    """멤버 활성/비활성 상태 변경"""
+    member = member_crud.get_member(db=db, member_id=member_id, include_inactive=True)
+    if not member:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    member.is_active = is_active
+    member.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(member)
+    return member
 
 
 # @router.get("/{member_id}/services")

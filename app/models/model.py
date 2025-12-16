@@ -1,7 +1,7 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Index
 from sqlalchemy.sql import func
 from . import Base
-
+from datetime import datetime
 
 class Model(Base):
     """
@@ -10,7 +10,6 @@ class Model(Base):
     - 나머지 상세 정보는 Surro API에서 실시간 조회
     """
     __tablename__ = "models"
-
     # 기본 키
     id = Column(Integer, primary_key=True, index=True, autoincrement=True, comment="Inno DB 내부 ID")
 
@@ -23,15 +22,30 @@ class Model(Base):
     description = Column(Text, nullable=True, comment="모델 설명 (캐시용)")
 
     # 메타데이터
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, comment="생성 시간")
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False,
-                        comment="수정 시간")
+    created_at = Column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,  # Python 레벨 기본값
+        server_default=func.now(),  # DB 레벨 기본값
+        nullable=False,
+        comment="생성 시간"
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,  # Python 레벨 기본값
+        server_default=func.now(),  # DB 레벨 기본값
+        onupdate=datetime.utcnow,  # 업데이트 시 자동 갱신
+        nullable=False,
+        comment="수정 시간"
+    )
+
     updated_by = Column(String(50), nullable=True, comment="수정자 member_id")
 
     # 소프트 삭제
     deleted_at = Column(DateTime(timezone=True), nullable=True, comment="삭제 시간")
     deleted_by = Column(String(50), nullable=True, comment="삭제자 member_id")
     is_active = Column(Boolean, default=True, nullable=False, comment="활성화 상태")
+
+    is_catalog = Column(Boolean, default=True, nullable=False, comment="모델 카탈로그 여부")
 
     # 추가 메타데이터 (JSON 형태로 확장 가능한 필드)
     metadatas = Column(Text, nullable=True, comment="추가 메타데이터 (JSON)")
