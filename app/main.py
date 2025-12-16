@@ -1,8 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from contextlib import asynccontextmanager
 from app.config import settings
-from app.routes import service, member, auth, workflow, model
+from app.routes import service, member, auth, workflow, model, dataset, hub_connect, any_cloud, lite_model, prompt, knowledge_base
 import uvicorn
 import logging
 
@@ -38,18 +39,31 @@ app = FastAPI(
 # CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 프로덕션에서는 특정 도메인으로 제한
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 라우터 등록 (순서가 중요! 프록시 라우터는 가장 마지막에)
+# 라우터 등록
 app.include_router(auth.router, prefix=settings.API_V1_STR)
 app.include_router(service.router, prefix=settings.API_V1_STR)
 app.include_router(member.router, prefix=settings.API_V1_STR)
 app.include_router(workflow.router, prefix=settings.API_V1_STR)
 app.include_router(model.router, prefix=settings.API_V1_STR)
+app.include_router(dataset.router, prefix=settings.API_V1_STR)
+app.include_router(prompt.router, prefix=settings.API_V1_STR)
+app.include_router(knowledge_base.router, prefix=settings.API_V1_STR)
+app.include_router(hub_connect.router, prefix=settings.API_V1_STR)
+app.include_router(any_cloud.router_cluster, prefix=settings.API_V1_STR)
+app.include_router(any_cloud.router_helm, prefix=settings.API_V1_STR)
+app.include_router(any_cloud.router_monit, prefix=settings.API_V1_STR)
+app.include_router(any_cloud.router_package, prefix=settings.API_V1_STR)
+app.include_router(any_cloud.router_catalog, prefix=settings.API_V1_STR)
+app.include_router(lite_model.router_info, prefix=settings.API_V1_STR)
+app.include_router(lite_model.router_optimize, prefix=settings.API_V1_STR)
+app.include_router(lite_model.router_task, prefix=settings.API_V1_STR)
+app.include_router(lite_model.router_model, prefix=settings.API_V1_STR)
 
 # 기본 엔드포인트
 @app.get("/")

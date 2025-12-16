@@ -3,18 +3,18 @@ from sqlalchemy.orm import Session
 from typing import List, Optional, Dict, Any
 import logging
 import json
+import math
 
 from app.database import get_db
 from app.auth import get_current_user, get_current_admin_user
 from app.cruds import model_crud
 from app.schemas.model import (
-    ModelCreate, ModelUpdate, ModelResponse,
-    ModelListResponse, ModelCreateRequest,
-    ModelTestRequest, ModelTestResponse,
-    ExternalModelResponse, InnoUserInfo, EnhancedModelResponse
+    ModelResponse, ModelCreateRequest,
+    ModelTestRequest, ModelTestResponse,ModelCreateResponse ,
+    InnoUserInfo, ModelWithMemberInfo, ModelListWrapper
 )
 from app.services.model_service import model_service
-from app.models import Member
+from app.models import Member, Model
 
 logger = logging.getLogger(__name__)
 
@@ -30,44 +30,78 @@ def _create_inno_user_info(user: Member) -> InnoUserInfo:
     )
 
 
-@router.get("", response_model=List[EnhancedModelResponse])
-async def get_models(
-        skip: int = Query(0, ge=0, description="건너뛸 항목 수"),
-        limit: int = Query(100, ge=1, le=1000, description="반환할 최대 항목 수"),
-        provider_id: Optional[int] = Query(None, description="프로바이더 ID로 필터링"),
-        type_id: Optional[int] = Query(None, description="타입 ID로 필터링"),
-        format_id: Optional[int] = Query(None, description="포맷 ID로 필터링"),
-        search: Optional[str] = Query(None, description="이름 또는 설명 검색"),
+def _create_pagination_response(data: List[Any], total: int, page: int, size: int) -> Dict[str, Any]:
+    return {
+        "data": data,
+        "total": total,
+        "page": page,
+        "size": size
+    }
+
+
+@router.post("", response_model=ModelCreateResponse)
+async def create_model(
+        name: str = Form(..., description="모델 이름"),
+        repo_id: str = Form(..., description="모델 저장소 ID"),
+        provider_id: int = Form(..., description="프로바이더 ID"),
+        type_id: int = Form(..., description="모델 타입 ID"),
+        format_id: int = Form(..., description="모델 포맷 ID"),
+        description: Optional[str] = Form(None, description="모델 설명"),
+        parent_model_id: Optional[int] = Form(None, description="부모 모델 ID (내부 시스템 전용)"),
+        task: Optional[str] = Form(None, max_length=500, description="모델 태스크"),
+        parameter: Optional[str] = Form(None, max_length=100, description="모델 파라미터"),
+        sample_code: Optional[str] = Form(None, description="샘플 코드"),
+        model_registry_schema: Optional[str] = Form(None, description="모델 레지스트리 스키마 (내부 시스템 전용)"),
+        file: Optional[UploadFile] = File(None, description="모델 파일 (binary)"),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    사용자별 모델 목록 조회
+    새 모델 생성
 
-    - 현재 로그인한 사용자가 만든 모델만 반환합니다.
-    - Inno DB에서 사용자의 모델 ID 목록을 가져온 후, Surro API로 상세 정보를 조회합니다.
+    - Surro API에 모델을 생성한 후, Inno DB에 사용자-모델 매핑을 저장합니다.
+
+    **주의사항**:
+    - `provider_id`, `type_id`, `format_id`는 각각 해당하는 조회 API를 먼저 호출하여 ID 값을 확인한 후 사용
+    - `parent_model_id`와 `model_registry_schema`는 내부 시스템 전용 (프론트엔드에서는 전달하지 않음)
+    - **HuggingFace 모델**: `provider_id`가 huggingface의 ID와 일치해야 함
+    - **커스텀 모델**: `provider_id`가 custom의 ID와 일치하고 `file`이 필요함
+    - 모델 이름에 "yolo" 포함 시 자동으로 학습 가능 모델로 설정됨
+
+    **파일 업로드**:
+    - `file` 파라미터에 바이너리 파일을 첨부
+    - Swagger UI에서 "Choose File" 버튼으로 업로드 가능
+    - Content-Type: multipart/form-data
     """
     try:
-        # 1. Inno DB에서 현재 사용자가 만든 모델의 Surro ID 목록 조회
-        user_model_ids = model_crud.get_models_by_member_id(
-            db,
-            current_user.member_id,
-            skip=skip,
-            limit=limit
-        )
+        # 파일 처리
+        file_data = None
+        file_name = None
+        if file:
+            file_data = await file.read()
+            file_name = file.filename
+            logger.info(f"File uploaded: {file_name}, size: {len(file_data)} bytes")
 
-        if not user_model_ids:
-            # 사용자가 만든 모델이 없는 경우 빈 리스트 반환
-            return []
-
-        # 2. Surro API에서 전체 모델 목록 조회
-        all_surro_models = await model_service.get_models(
-            skip=0,  # 전체 조회 후 필터링
-            limit=1000,  # 충분히 큰 값으로 설정
+        # 모델 생성 요청 데이터 구성
+        model_data = ModelCreateRequest(
+            name=name,
+            repo_id=repo_id,
+            description=description,
             provider_id=provider_id,
             type_id=type_id,
             format_id=format_id,
-            search=search,
+            parent_model_id=parent_model_id,
+            task=task,
+            parameter=parameter,
+            sample_code=sample_code,
+            model_registry_schema=model_registry_schema
+        )
+
+        # 1. Surro API를 통해 모델 생성
+        created_model = await model_service.create_model(
+            model_data=model_data,
+            file_data=file_data,
+            file_name=file_name,
             user_info={
                 'member_id': current_user.member_id,
                 'role': current_user.role,
@@ -75,81 +109,421 @@ async def get_models(
             }
         )
 
-        # 3. 사용자가 소유한 모델만 필터링
-        user_surro_models = []
-        for surro_model in all_surro_models:
-            if surro_model.id in user_model_ids:
-                user_surro_models.append(surro_model)
+        # 2. Inno DB에 사용자-모델 매핑 저장
+        try:
+            # 관리자(admin)가 생성한 모델은 카탈로그 모델로 설정
+            is_catalog = current_user.role.lower() == 'admin'
 
-        # 4. Inno 사용자 정보 생성
-        inno_user_info = _create_inno_user_info(current_user)
-
-        # 5. 통합 응답 생성
-        enhanced_models = []
-        for surro_model in user_surro_models:
-            enhanced_model = EnhancedModelResponse(
-                surro_data=surro_model,
-                inno_data=inno_user_info
+            model_crud.create_model_mapping(
+                db=db,
+                surro_model_id=created_model.id,
+                member_id=current_user.member_id,
+                model_name=created_model.name,
+                is_catalog=is_catalog
             )
-            enhanced_models.append(enhanced_model)
+            logger.info(
+                f"Created model mapping: surro_id={created_model.id}, "
+                f"member_id={current_user.member_id}, is_catalog={is_catalog}"
+            )
+        except Exception as mapping_error:
+            logger.error(f"Failed to create model mapping: {str(mapping_error)}")
+            # 매핑 저장에 실패해도 Surro API에는 이미 생성되었으므로, 경고만 로그
+            logger.warning(f"Model {created_model.id} created in Surro API but mapping failed")
 
-        logger.info(f"Retrieved {len(enhanced_models)} models for user {current_user.member_id}")
-        return enhanced_models
+        return created_model
 
     except Exception as e:
-        logger.error(f"Error getting user models for {current_user.member_id}: {str(e)}")
+        logger.error(f"Error creating model for user {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create model: {str(e)}"
+        )
+
+
+@router.get("")
+async def get_all_models(
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
+        search: Optional[str] = Query(None, description="검색어"),
+        model_type_id: Optional[int] = Query(None, description="모델 타입 ID로 필터링"),
+        model_provider_id: Optional[int] = Query(None, description="모델 제공자 ID로 필터링"),
+        model_format_id: Optional[int] = Query(None, description="모델 포맷 ID로 필터링"),
+        filter_type: Optional[str] = Query(None, description="필터 타입: 'custom'(내 모델만), 'catalog'(카탈로그만), None(전체)"),
+        db: Session = Depends(get_db),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    전체 모델 조회 (커스텀 모델 + 카탈로그 모델, 페이지네이션 포함)
+    filter_type으로 특정 타입만 조회 가능
+    """
+    try:
+        # 1. Surro API에서 전체 모델 조회
+        all_surro_models = await model_service.get_models(
+            skip=0,
+            limit=1000,
+            search=None,
+            user_info={
+                'member_id': current_user.member_id,
+                'role': current_user.role,
+                'name': current_user.name
+            }
+        )
+
+        # 2. 로컬 DB에서 모델 정보 조회
+        user_model_ids = []
+        catalog_model_ids = []
+
+        if filter_type != 'catalog':  # catalog만 조회하는 경우가 아니면 user 모델도 조회
+            user_models = db.query(Model).filter(
+                Model.created_by == current_user.member_id,
+                Model.deleted_at.is_(None)
+            ).all()
+            user_model_ids = [model.surro_model_id for model in user_models if model.surro_model_id]
+
+        if filter_type != 'custom':  # custom만 조회하는 경우가 아니면 catalog 모델도 조회
+            catalog_models = db.query(Model).filter(
+                Model.is_catalog == True,
+                Model.deleted_at.is_(None)
+            ).all()
+            catalog_model_ids = [model.surro_model_id for model in catalog_models if model.surro_model_id]
+
+        # 3. filter_type에 따라 모델 필터링
+        if filter_type == 'custom':
+            # 내 모델만
+            filtered_models = [m for m in all_surro_models if m.id in user_model_ids]
+        elif filter_type == 'catalog':
+            # 카탈로그 모델만
+            filtered_models = [m for m in all_surro_models if m.id in catalog_model_ids]
+        else:
+            # 전체 (중복 제거)
+            all_model_ids = set(user_model_ids) | set(catalog_model_ids)
+            filtered_models = [m for m in all_surro_models if m.id in all_model_ids]
+
+        # 4. 검색어 필터링
+        if search:
+            search_lower = search.lower()
+            filtered_models = [
+                m for m in filtered_models
+                if search_lower in m.name.lower() or
+                   (m.description and search_lower in m.description.lower())
+            ]
+
+        # 5. 모델 타입, 제공자, 포맷 필터링
+        if model_type_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'type_info') and m.type_info and
+                   hasattr(m.type_info, 'id') and m.type_info.id == model_type_id
+            ]
+
+        if model_provider_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'provider_info') and m.provider_info and
+                   hasattr(m.provider_info, 'id') and m.provider_info.id == model_provider_id
+            ]
+
+        if model_format_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'format_info') and m.format_info and
+                   hasattr(m.format_info, 'id') and m.format_info.id == model_format_id
+            ]
+
+        # 6. 페이지네이션 적용
+        total = len(filtered_models)
+        skip = (page - 1) * size
+        paginated_models = filtered_models[skip:skip + size]
+
+        # 7. ModelResponse로 변환
+        wrapped_models = [ModelResponse(**m.model_dump()) for m in paginated_models]
+
+        return _create_pagination_response(wrapped_models, total, page, size)
+
+    except Exception as e:
+        logger.error(f"Error getting all models for {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get models: {str(e)}"
         )
 
-
-@router.get("/providers")
-async def get_providers(
+@router.get("/custom-models")
+async def get_user_models(
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
+        search: Optional[str] = Query(None, description="검색어"),
+        model_type_id: Optional[int] = Query(None, description="모델 타입 ID로 필터링"),
+        model_provider_id: Optional[int] = Query(None, description="모델 제공자 ID로 필터링"),
+        model_format_id: Optional[int] = Query(None, description="모델 포맷 ID로 필터링"),
         db: Session = Depends(get_db),
-        provider_name: str = Query(None),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    사용 가능한 프로바이더 목록 조회
+    현재 로그인한 사용자가 생성한 모델만 조회 (페이지네이션 포함)
     """
     try:
-        providers = await model_service.get_model_providers(
+        # 1. 사용자 커스텀 모델 ID 목록 조회 (전체)
+        user_models = db.query(Model).filter(
+            Model.created_by == current_user.member_id,
+            Model.deleted_at.is_(None)
+        ).all()
+
+        user_model_ids = [model.surro_model_id for model in user_models if model.surro_model_id]
+
+        if not user_model_ids:
+            return _create_pagination_response([], 0, page, size)
+
+        # 2. Surro API에서 전체 모델 조회 (필터 없이)
+        all_surro_models = await model_service.get_models(
+            skip=0,
+            limit=1000,
+            search=None,
+            user_info={
+                'member_id': current_user.member_id,
+                'role': current_user.role,
+                'name': current_user.name
+            }
+        )
+
+        # 3. 사용자 커스텀 모델만 필터링
+        filtered_models = [m for m in all_surro_models if m.id in user_model_ids]
+
+        # 4. 로컬에서 검색어 필터링 적용
+        if search:
+            search_lower = search.lower()
+            filtered_models = [
+                m for m in filtered_models
+                if search_lower in m.name.lower() or
+                   (m.description and search_lower in m.description.lower())
+            ]
+
+        # 5. 모델 타입, 제공자, 포맷 필터링 (중첩 객체 구조)
+        if model_type_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'type_info') and m.type_info and
+                   hasattr(m.type_info, 'id') and m.type_info.id == model_type_id
+            ]
+
+        if model_provider_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'provider_info') and m.provider_info and
+                   hasattr(m.provider_info, 'id') and m.provider_info.id == model_provider_id
+            ]
+
+        if model_format_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'format_info') and m.format_info and
+                   hasattr(m.format_info, 'id') and m.format_info.id == model_format_id
+            ]
+
+        # 6. 필터링된 결과에 페이지네이션 적용
+        total = len(filtered_models)
+        skip = (page - 1) * size
+        paginated_models = filtered_models[skip:skip + size]
+
+        # 7. ModelResponse로 변환
+        wrapped_models = [ModelResponse(**m.model_dump()) for m in paginated_models]
+
+        return _create_pagination_response(wrapped_models, total, page, size)
+
+    except Exception as e:
+        logger.error(f"Error getting user models for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get user models: {str(e)}"
+        )
+
+
+@router.get("/model-catalog")
+async def get_catalog_models(
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
+        search: Optional[str] = Query(None, description="검색어"),
+        model_type_id: Optional[int] = Query(None, description="모델 타입 ID로 필터링"),
+        model_provider_id: Optional[int] = Query(None, description="모델 제공자 ID로 필터링"),
+        model_format_id: Optional[int] = Query(None, description="모델 포맷 ID로 필터링"),
+        db: Session = Depends(get_db),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    모델 카탈로그 조회 (is_catalog가 true인 모델만, 페이지네이션 포함)
+    """
+    try:
+        # 1. 카탈로그 모델 ID 목록 조회 (전체)
+        catalog_models = db.query(Model).filter(
+            Model.is_catalog == True,
+            Model.deleted_at.is_(None)
+        ).all()
+
+        catalog_model_ids = [model.surro_model_id for model in catalog_models if model.surro_model_id]
+
+        if not catalog_model_ids:
+            return _create_pagination_response([], 0, page, size)
+
+        # 2. Surro API에서 전체 모델 조회 (필터 없이)
+        all_surro_models = await model_service.get_models(
+            skip=0,
+            limit=1000,
+            search=None,
+            user_info={
+                'member_id': current_user.member_id,
+                'role': current_user.role,
+                'name': current_user.name
+            }
+        )
+
+        # 3. 카탈로그 모델만 필터링
+        filtered_models = [m for m in all_surro_models if m.id in catalog_model_ids]
+
+        # 4. 로컬에서 검색어 필터링 적용
+        if search:
+            search_lower = search.lower()
+            filtered_models = [
+                m for m in filtered_models
+                if search_lower in m.name.lower() or
+                   (m.description and search_lower in m.description.lower())
+            ]
+
+        # 5. 모델 타입, 제공자, 포맷 필터링 (중첩 객체 구조)
+        if model_type_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'type_info') and m.type_info and
+                   hasattr(m.type_info, 'id') and m.type_info.id == model_type_id
+            ]
+
+        if model_provider_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'provider_info') and m.provider_info and
+                   hasattr(m.provider_info, 'id') and m.provider_info.id == model_provider_id
+            ]
+
+        if model_format_id is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if hasattr(m, 'format_info') and m.format_info and
+                   hasattr(m.format_info, 'id') and m.format_info.id == model_format_id
+            ]
+
+        # 6. 필터링된 결과에 페이지네이션 적용
+        total = len(filtered_models)
+        skip = (page - 1) * size
+        paginated_models = filtered_models[skip:skip + size]
+
+        # 7. ModelResponse로 변환
+        wrapped_models = [ModelResponse(**m.model_dump()) for m in paginated_models]
+
+        return _create_pagination_response(wrapped_models, total, page, size)
+
+    except Exception as e:
+        logger.error(f"Error getting catalog models: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get catalog models: {str(e)}"
+        )
+
+@router.get("/providers")
+async def get_providers(
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
+        provider_name: Optional[str] = Query(None, description="프로바이더 이름으로 필터링"),
+        db: Session = Depends(get_db),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    사용 가능한 프로바이더 목록 조회 (페이지네이션 포함)
+    """
+    try:
+        all_providers_data = await model_service.get_model_providers(
             user_info={
                 'member_id': current_user.member_id,
                 'role': current_user.role,
                 'name': current_user.name
             },
-            provider_name=provider_name
+            provider_name=None
         )
-        return providers
+
+        # 데이터 추출
+        if isinstance(all_providers_data, list):
+            data = all_providers_data
+        elif isinstance(all_providers_data, dict) and 'data' in all_providers_data:
+            data = all_providers_data.get('data', [])
+        else:
+            data = []
+
+        # 로컬에서 provider_name 필터링
+        if provider_name and data:
+            data = [
+                fmt for fmt in data
+                if provider_name.lower() in fmt.get('name', '').lower()
+            ]
+
+        # 페이지네이션 적용
+        total = len(data)
+        skip = (page - 1) * size
+        paginated_data = data[skip:skip + size]
+
+        return _create_pagination_response(paginated_data, total, page, size)
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error getting providers: {str(e)}")
+        logger.error(f"Error getting model providers: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get providers: {str(e)}"
+            detail=f"Failed to get model providers: {str(e)}"
         )
 
 
 @router.get("/types")
 async def get_model_types(
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
+        type_name: Optional[str] = Query(None, description="모델 타입 이름으로 필터링"),
         db: Session = Depends(get_db),
-        type_name: str = Query(None),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    사용 가능한 모델 타입 목록 조회
+    사용 가능한 모델 타입 목록 조회 (페이지네이션 포함)
     """
     try:
-        types = await model_service.get_model_types(
+        all_types_data = await model_service.get_model_types(
             user_info={
                 'member_id': current_user.member_id,
                 'role': current_user.role,
                 'name': current_user.name
             },
-            type_name=type_name
+            type_name=None
         )
-        return types
+
+        # 데이터 추출
+        if isinstance(all_types_data, list):
+            data = all_types_data
+        elif isinstance(all_types_data, dict) and 'data' in all_types_data:
+            data = all_types_data.get('data', [])
+        else:
+            data = []
+
+        # 로컬에서 type_name 필터링
+        if type_name and data:
+            data = [
+                fmt for fmt in data
+                if type_name.lower() in fmt.get('name', '').lower()
+            ]
+
+        # 페이지네이션 적용
+        total = len(data)
+        skip = (page - 1) * size
+        paginated_data = data[skip:skip + size]
+
+        return _create_pagination_response(paginated_data, total, page, size)
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting model types: {str(e)}")
         raise HTTPException(
@@ -160,30 +534,56 @@ async def get_model_types(
 
 @router.get("/formats")
 async def get_model_formats(
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
+        format_name: Optional[str] = Query(None, description="모델 포맷 이름으로 필터링"),
         db: Session = Depends(get_db),
-        format_name: str = Query(None),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    사용 가능한 모델 포맷 목록 조회
+    사용 가능한 모델 포맷 목록 조회 (페이지네이션 포함)
     """
     try:
-        formats = await model_service.get_model_formats(
+        # format_name 없이 전체 데이터 가져오기
+        all_formats_data = await model_service.get_model_formats(
             user_info={
                 'member_id': current_user.member_id,
                 'role': current_user.role,
                 'name': current_user.name
             },
-            format_name=format_name
+            format_name=None  # API 파라미터로 전달하지 않음
         )
-        return formats
+
+        # 데이터 추출
+        if isinstance(all_formats_data, list):
+            data = all_formats_data
+        elif isinstance(all_formats_data, dict) and 'data' in all_formats_data:
+            data = all_formats_data.get('data', [])
+        else:
+            data = []
+
+        # 로컬에서 format_name 필터링
+        if format_name and data:
+            data = [
+                fmt for fmt in data
+                if format_name.lower() in fmt.get('name', '').lower()
+            ]
+
+        # 페이지네이션 적용
+        total = len(data)
+        skip = (page - 1) * size
+        paginated_data = data[skip:skip + size]
+
+        return _create_pagination_response(paginated_data, total, page, size)
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting model formats: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get model formats: {str(e)}"
         )
-
 
 @router.get("/{model_id}", response_model=ModelResponse)
 async def get_model(
@@ -198,7 +598,17 @@ async def get_model(
     """
     try:
         # 1. 사용자가 해당 모델을 소유하고 있는지 확인
-        if not model_crud.check_model_ownership(db, model_id, current_user.member_id):
+        is_owner = model_crud.check_model_ownership(db, model_id, current_user.member_id)
+
+        # 2. 소유하지 않았다면, 카탈로그 모델인지 확인
+        catalog_model = db.query(Model).filter(
+            Model.is_catalog == True,
+            Model.deleted_at.is_(None),
+            Model.surro_model_id == model_id
+        ).first()
+
+        # 3. 사용자 소유 모델도 아니고, 카탈로그 모델도 아닐 경우 접근 불가
+        if not is_owner and not catalog_model:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Model {model_id} not found or access denied"
@@ -230,80 +640,6 @@ async def get_model(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get model: {str(e)}"
         )
-
-
-@router.post("", response_model=ModelResponse)
-async def create_model(
-        name: str = Form(..., description="모델 이름"),
-        description: str = Form(..., description="모델 설명"),
-        provider_id: int = Form(..., description="프로바이더 ID"),
-        type_id: int = Form(..., description="모델 타입 ID"),
-        format_id: int = Form(..., description="모델 포맷 ID"),
-        parent_model_id: Optional[int] = Form(None, description="부모 모델 ID"),
-        registry_schema: Optional[str] = Form(None, description="모델 레지스트리 스키마"),
-        file: Optional[UploadFile] = File(None, description="모델 파일"),
-        db: Session = Depends(get_db),
-        current_user: Member = Depends(get_current_user)
-):
-    """
-    새 모델 생성
-
-    - Surro API에 모델을 생성한 후, Inno DB에 사용자-모델 매핑을 저장합니다.
-    """
-    try:
-        # 파일 처리
-        file_data = None
-        file_name = None
-        if file:
-            file_data = await file.read()
-            file_name = file.filename
-
-        # 모델 생성 요청 데이터 구성
-        model_data = ModelCreateRequest(
-            name=name,
-            description=description,
-            provider_id=provider_id,
-            type_id=type_id,
-            format_id=format_id,
-            parent_model_id=parent_model_id,
-            registry_schema=registry_schema
-        )
-
-        # 1. Surro API를 통해 모델 생성
-        created_model = await model_service.create_model(
-            model_data=model_data,
-            file_data=file_data,
-            file_name=file_name,
-            user_info={
-                'member_id': current_user.member_id,
-                'role': current_user.role,
-                'name': current_user.name
-            }
-        )
-
-        # 2. Inno DB에 사용자-모델 매핑 저장
-        try:
-            model_crud.create_model_mapping(
-                db=db,
-                surro_model_id=created_model.id,
-                member_id=current_user.member_id,
-                model_name=created_model.name
-            )
-            logger.info(f"Created model mapping: surro_id={created_model.id}, member_id={current_user.member_id}")
-        except Exception as mapping_error:
-            logger.error(f"Failed to create model mapping: {str(mapping_error)}")
-            # 매핑 저장에 실패해도 Surro API에는 이미 생성되었으므로, 경고만 로그
-            logger.warning(f"Model {created_model.id} created in Surro API but mapping failed")
-
-        return created_model
-
-    except Exception as e:
-        logger.error(f"Error creating model for user {current_user.member_id}: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create model: {str(e)}"
-        )
-
 
 @router.delete("/{model_id}")
 async def delete_model(
@@ -354,48 +690,4 @@ async def delete_model(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete model: {str(e)}"
-        )
-
-
-@router.post("/{model_id}/test", response_model=ModelTestResponse)
-async def test_model(
-        model_id: int = Path(..., description="모델 ID (Surro API 모델 ID)"),
-        test_request: ModelTestRequest = ...,
-        db: Session = Depends(get_db),
-        current_user: Member = Depends(get_current_user)
-):
-    """
-    모델 테스트 실행
-
-    - 현재 사용자가 소유한 모델만 테스트할 수 있습니다.
-    """
-    try:
-        # 1. 사용자가 해당 모델을 소유하고 있는지 확인
-        if not model_crud.check_model_ownership(db, model_id, current_user.member_id):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Model {model_id} not found or access denied"
-            )
-
-        # 2. Surro API를 통해 모델 테스트
-        test_result = await model_service.test_model(
-            model_id=model_id,
-            input_data=test_request.input_data,
-            parameters=test_request.parameters,
-            user_info={
-                'member_id': current_user.member_id,
-                'role': current_user.role,
-                'name': current_user.name
-            }
-        )
-
-        return ModelTestResponse(**test_result)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error testing model {model_id} for user {current_user.member_id}: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to test model: {str(e)}"
         )

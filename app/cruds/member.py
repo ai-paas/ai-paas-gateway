@@ -31,11 +31,11 @@ class MemberCRUD:
         db.refresh(db_member)
         return db_member
 
-    def get_member(self, db: Session, member_id: str) -> Optional[Member]:
-        """member_id(아이디)로 멤버 조회"""
-        return db.query(Member).filter(
-            and_(Member.member_id == member_id, Member.is_active == True)
-        ).first()
+    def get_member(self, db: Session, member_id: str, include_inactive: bool = False) -> Optional[Member]:
+        query = db.query(Member).filter(Member.member_id == member_id)
+        if not include_inactive:
+            query = query.filter(Member.is_active == True)
+        return query.first()
 
     def get_member_by_email(self, db: Session, email: str) -> Optional[Member]:
         return db.query(Member).filter(
@@ -48,15 +48,17 @@ class MemberCRUD:
         ).first()
 
     def get_members(
-            self,
-            db: Session,
-            skip: int = 0,
-            limit: int = 100,
-            search: Optional[str] = None,
-            role: Optional[str] = None
+        self,
+        db: Session,
+        skip: int = 0,
+        limit: int = 100,
+        search: Optional[str] = None,
+        role: Optional[str] = None,
     ) -> tuple[List[Member], int]:
-        query = db.query(Member).filter(Member.is_active == True)
+        """전체 멤버 목록 조회 (활성/비활성 필터링 가능)"""
+        query = db.query(Member)
 
+        # 검색어 필터
         if search:
             search_filter = f"%{search}%"
             query = query.filter(
@@ -67,6 +69,7 @@ class MemberCRUD:
                 )
             )
 
+        # 역할(role) 필터
         if role:
             query = query.filter(Member.role == role)
 
@@ -75,11 +78,11 @@ class MemberCRUD:
         return members, total
 
     def update_member(self, db: Session, member_id: str, member_update: MemberUpdate) -> Optional[Member]:
-        db_member = self.get_member(db, member_id)
+        db_member = self.get_member(db, member_id, include_inactive=True)
         if db_member:
             update_data = member_update.dict(exclude_unset=True)
 
-            # 비밀번호가 포함된 경우 해싱
+            # 비밀번호 수정 시 해싱
             if 'password' in update_data:
                 password = update_data.pop('password')
                 update_data['password_hash'] = self.get_password_hash(password)
@@ -101,10 +104,10 @@ class MemberCRUD:
         return db_member
 
     def delete_member(self, db: Session, member_id: str) -> bool:
-        db_member = self.get_member(db, member_id)
+        # 비활성화된 멤버도 포함해서 조회
+        db_member = self.get_member(db, member_id, include_inactive=True)
         if db_member:
-            db_member.is_active = False
-            db_member.updated_at = datetime.utcnow()
+            db.delete(db_member)
             db.commit()
             return True
         return False

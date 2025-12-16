@@ -104,6 +104,45 @@ class ModelCRUD:
         # Surro API의 모델 ID만 반환
         return [model.surro_model_id for model in models if model.surro_model_id]
 
+    def count_models_by_member_id(self, db: Session, member_id: str) -> int:
+        """사용자가 소유한 모델 총 개수 반환"""
+        return db.query(Model).filter(
+            Model.created_by == member_id,
+            Model.deleted_at.is_(None)
+        ).count()
+
+    def count_catalog_models(self, db: Session) -> int:
+        """카탈로그 모델 총 개수 반환"""
+        return db.query(Model).filter(
+            Model.is_catalog == True,
+            Model.deleted_at.is_(None)
+        ).count()
+
+    def get_catalog_models_paginated(
+            self,
+            db: Session,
+            skip: int = 0,
+            limit: int = 20
+    ) -> List[Model]:
+        """카탈로그 모델을 페이지네이션으로 조회"""
+        return db.query(Model).filter(
+            Model.is_catalog == True,
+            Model.deleted_at.is_(None)
+        ).offset(skip).limit(limit).all()
+
+    def get_user_models_paginated(
+            self,
+            db: Session,
+            member_id: str,
+            skip: int = 0,
+            limit: int = 20
+    ) -> List[Model]:
+        """사용자 모델을 페이지네이션으로 조회"""
+        return db.query(Model).filter(
+            Model.created_by == member_id,
+            Model.deleted_at.is_(None)
+        ).offset(skip).limit(limit).all()
+
     def get_model_by_surro_id(self, db: Session, surro_model_id: int, member_id: str) -> Optional[Model]:
         """Surro 모델 ID와 멤버 ID로 모델 조회"""
         return db.query(Model).filter(
@@ -119,12 +158,25 @@ class ModelCRUD:
             db: Session,
             surro_model_id: int,
             member_id: str,
-            model_name: str = None
+            model_name: str = None,
+            is_catalog: bool = False  # 새로운 파라미터 추가
     ) -> Model:
-        """Surro 모델과 Inno 사용자 매핑 생성 (간소화된 버전)"""
+        """Surro 모델과 Inno 사용자 매핑 생성 (간소화된 버전)
+
+        Args:
+            db: 데이터베이스 세션
+            surro_model_id: Surro API의 모델 ID
+            member_id: 생성한 사용자 ID
+            model_name: 모델 이름 (선택)
+            is_catalog: 카탈로그 모델 여부 (admin이 생성한 경우 True)
+
+        Returns:
+            생성된 Model 객체
+        """
         db_model = Model(
             surro_model_id=surro_model_id,  # Surro API의 모델 ID
             name=model_name or f"Model_{surro_model_id}",
+            is_catalog=is_catalog,  # 카탈로그 플래그 설정
             created_by=member_id,
             updated_by=member_id
         )
@@ -285,6 +337,86 @@ class ModelCRUD:
         db.commit()
         db.refresh(db_model)
         return db_model
+
+    # 검색 및 필터링을 위한 추가 메서드들
+    def search_models_by_member(
+            self,
+            db: Session,
+            member_id: str,
+            search: Optional[str] = None,
+            provider_id: Optional[int] = None,
+            type_id: Optional[int] = None,
+            format_id: Optional[int] = None,
+            skip: int = 0,
+            limit: int = 20
+    ) -> tuple[List[Model], int]:
+        """사용자 모델 검색 (데이터와 총 개수 함께 반환)"""
+        query = db.query(Model).filter(
+            Model.created_by == member_id,
+            Model.deleted_at.is_(None)
+        )
+
+        # 필터링 조건 추가
+        if provider_id:
+            query = query.filter(Model.provider_id == provider_id)
+        if type_id:
+            query = query.filter(Model.type_id == type_id)
+        if format_id:
+            query = query.filter(Model.format_id == format_id)
+
+        # 검색 조건 추가
+        if search:
+            search_term = f"%{search}%"
+            query = query.filter(
+                or_(
+                    Model.name.ilike(search_term),
+                    Model.description.ilike(search_term)
+                )
+            )
+
+        total = query.count()
+        models = query.offset(skip).limit(limit).all()
+
+        return models, total
+
+    def search_catalog_models(
+            self,
+            db: Session,
+            search: Optional[str] = None,
+            provider_id: Optional[int] = None,
+            type_id: Optional[int] = None,
+            format_id: Optional[int] = None,
+            skip: int = 0,
+            limit: int = 20
+    ) -> tuple[List[Model], int]:
+        """카탈로그 모델 검색 (데이터와 총 개수 함께 반환)"""
+        query = db.query(Model).filter(
+            Model.is_catalog == True,
+            Model.deleted_at.is_(None)
+        )
+
+        # 필터링 조건 추가
+        if provider_id:
+            query = query.filter(Model.provider_id == provider_id)
+        if type_id:
+            query = query.filter(Model.type_id == type_id)
+        if format_id:
+            query = query.filter(Model.format_id == format_id)
+
+        # 검색 조건 추가
+        if search:
+            search_term = f"%{search}%"
+            query = query.filter(
+                or_(
+                    Model.name.ilike(search_term),
+                    Model.description.ilike(search_term)
+                )
+            )
+
+        total = query.count()
+        models = query.offset(skip).limit(limit).all()
+
+        return models, total
 
 
 # 싱글톤 인스턴스
