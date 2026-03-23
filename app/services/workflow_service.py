@@ -1,15 +1,23 @@
 import httpx
 import logging
-from typing import Dict, Any, Optional
-from fastapi import HTTPException, status
+import asyncio
+from datetime import datetime, timedelta
+from typing import Dict, Any, Optional, List
+from fastapi import HTTPException, status, UploadFile
 from app.config import settings
-from app.schemas.workflow import ExternalWorkflowResponse
+from app.schemas.workflow import (
+    ExternalWorkflowDetailResponse,
+    ExternalWorkflowBriefResponse,
+    WorkflowDefinition,
+    WorkflowExecuteResponse,
+    WorkflowTestResponse
+)
 
 logger = logging.getLogger(__name__)
 
 
-class ExternalWorkflowService:
-    """외부 워크플로우 API 연동 서비스"""
+class WorkflowService:
+    """워크플로우 관련 외부 API 서비스"""
 
     def __init__(self):
         self.client = httpx.AsyncClient(
@@ -21,44 +29,48 @@ class ExternalWorkflowService:
                 max_keepalive_connections=settings.PROXY_MAX_KEEPALIVE_CONNECTIONS,
                 max_connections=settings.PROXY_MAX_CONNECTIONS
             ),
-            follow_redirects=True,
-            headers={
-                'Accept': 'application/json',
-                'Content-Type': 'application/json',
-                'User-Agent': 'AIPaaS-Gateway/1.0'
-            }
+            follow_redirects=True
         )
+        self.base_url = f"{settings.PROXY_TARGET_BASE_URL}{settings.PROXY_TARGET_PATH_PREFIX}"
+        self.auth_username = settings.EXTERNAL_API_USERNAME
+        self.auth_password = settings.EXTERNAL_API_PASSWORD
+        self.access_token = None
+        self.token_expires_at = None
+        self._auth_lock = asyncio.Lock()
 
     async def close(self):
-        """HTTP 클라이언트 종료"""
         await self.client.aclose()
 
-    async def create_workflow(
-            self,
-            parameters: Dict[str, Any],
-            user_info: Optional[Dict[str, str]] = None
-    ) -> ExternalWorkflowResponse:
-        """
-        S업체에 워크플로우 생성 요청
-
-        Args:
-            parameters: 워크플로우 생성에 필요한 파라미터
-            user_info: 사용자 정보 (member_id, name, role 등)
-
-        Returns:
-            ExternalWorkflowResponse: S업체에서 반환된 워크플로우 정보
-        """
-        if not settings.PROXY_ENABLED:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="External workflow service is disabled"
+    async def _authenticate(self) -> str:
+        """인증 토큰 획득"""
+        try:
+            auth_url = f"{settings.PROXY_TARGET_BASE_URL}/api/v1/authentications/token"
+            response = await self.client.post(
+                auth_url,
+                data={"username": self.auth_username, "password": self.auth_password},
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
             )
 
-        # API 엔드포인트 설정 (S업체의 실제 워크플로우 생성 엔드포인트로 변경 필요)
-        workflow_create_url = f"{settings.PROXY_TARGET_BASE_URL}{settings.PROXY_TARGET_PATH_PREFIX}/workflows"
+            if response.status_code == 200:
+                token_data = response.json()
+                access_token = token_data.get("access_token")
+                expires_in = token_data.get("expires_in", 1800)
+                if access_token:
+                    self.token_expires_at = datetime.now() + timedelta(seconds=expires_in - 300)
+                    return access_token
+            raise HTTPException(status_code=response.status_code, detail="Authentication failed")
+        except Exception as e:
+            logger.error(f"Authentication error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Authentication failed: {str(e)}")
 
-        # 요청 헤더에 사용자 정보 추가
-        headers = {}
+    async def _get_valid_token(self) -> str:
+        async with self._auth_lock:
+            if not self.access_token or not self.token_expires_at or datetime.now() >= self.token_expires_at:
+                self.access_token = await self._authenticate()
+            return self.access_token
+
+    def _get_headers(self, user_info: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        headers = {'Accept': 'application/json'}
         if user_info:
             if user_info.get('member_id'):
                 headers['X-User-ID'] = str(user_info['member_id'])
@@ -66,364 +78,526 @@ class ExternalWorkflowService:
                 headers['X-User-Role'] = str(user_info['role'])
             if user_info.get('name'):
                 import base64
-                name_b64 = base64.b64encode(str(user_info['name']).encode('utf-8')).decode('ascii')
-                headers['X-User-Name-B64'] = name_b64
+                headers['X-User-Name-B64'] = base64.b64encode(str(user_info['name']).encode()).decode()
+        return headers
 
+    async def _make_authenticated_request(self, method: str, url: str, user_info: Optional[Dict] = None,
+                                          **kwargs) -> httpx.Response:
+        token = await self._get_valid_token()
+        headers = self._get_headers(user_info)
+        headers['Authorization'] = f"Bearer {token}"
+
+        if 'headers' in kwargs:
+            kwargs['headers'].update(headers)
+        else:
+            kwargs['headers'] = headers
+
+        response = await getattr(self.client, method.lower())(url, **kwargs)
+
+        if response.status_code == 401:
+            self.access_token = None
+            token = await self._get_valid_token()
+            kwargs['headers']['Authorization'] = f"Bearer {token}"
+            response = await getattr(self.client, method.lower())(url, **kwargs)
+
+        return response
+
+    # ===== Workflow CRUD =====
+
+    async def create_workflow(
+            self, name: str, description: Optional[str] = None, category: Optional[str] = None,
+            service_id: Optional[str] = None, workflow_definition: Optional[Dict] = None,
+            user_info: Optional[Dict] = None
+    ) -> ExternalWorkflowDetailResponse:
+        """워크플로우 생성"""
         try:
-            logger.info(f"[EXTERNAL_API] === Creating workflow ===")
-            logger.info(f"[EXTERNAL_API] Parameters: {parameters}")
-            logger.info(f"[EXTERNAL_API] User info: {user_info}")
-            logger.info(f"[EXTERNAL_API] Target URL: {workflow_create_url}")
-            logger.info(f"[EXTERNAL_API] Headers: {headers}")
+            url = f"{self.base_url}/workflows"
 
-            response = await self.client.post(
-                workflow_create_url,
-                json=parameters,
-                headers=headers
-            )
+            payload = {
+                'name': name
+            }
+            if description:
+                payload['description'] = description
+            if category:
+                payload['category'] = category
+            if service_id:
+                payload['service_id'] = service_id
+            if workflow_definition:
+                payload['workflow_definition'] = workflow_definition
 
-            logger.info(f"[EXTERNAL_API] Response status: {response.status_code}")
-            logger.info(f"[EXTERNAL_API] Response headers: {dict(response.headers)}")
-            logger.info(f"[EXTERNAL_API] Response body: {response.text}")
+            logger.info(f"Creating workflow: {name}")
 
-            if response.status_code == 201 or response.status_code == 200:
-                response_data = response.json()
+            response = await self._make_authenticated_request("POST", url, user_info=user_info, json=payload)
 
-                # S업체 응답 형태에 따라 조정 필요
-                # 예시 응답 구조를 가정:
-                # {
-                #   "workflow_id": "wf_12345",
-                #   "status": "created",
-                #   "message": "Workflow created successfully",
-                #   "created_at": "2024-01-01T00:00:00Z"
-                # }
-
-                return ExternalWorkflowResponse(
-                    workflow_id=response_data.get('workflow_id') or response_data.get('id'),
-                    status=response_data.get('status', 'created'),
-                    message=response_data.get('message'),
-                    created_at=response_data.get('created_at')
-                )
-            else:
-                logger.error(f"External API error: {response.status_code} - {response.text}")
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"External workflow creation failed: {response.text}"
-                )
-
-        except httpx.TimeoutException as e:
-            logger.error(f"External API timeout: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail="External workflow service timeout"
-            )
-        except httpx.ConnectError as e:
-            logger.error(f"External API connection error: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Cannot connect to external workflow service"
-            )
+            if response.status_code in [200, 201]:
+                workflow_data = response.json()
+                return ExternalWorkflowDetailResponse(**workflow_data)
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.error(f"Unexpected error calling external API: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"External workflow service error: {str(e)}"
-            )
+            logger.error(f"Error creating workflow: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
 
-    async def get_workflow(self, external_workflow_id: str) -> Optional[Dict[str, Any]]:
-        """
-        S업체에서 워크플로우 정보 조회
-
-        Args:
-            external_workflow_id: S업체의 워크플로우 ID
-
-        Returns:
-            Dict: 워크플로우 정보 또는 None
-        """
-        if not settings.PROXY_ENABLED:
-            return None
-
+    async def get_workflows(
+            self, page: Optional[int] = None, page_size: Optional[int] = None,
+            creator_id: Optional[int] = None, service_id: Optional[int] = None,
+            status: Optional[str] = None, user_info: Optional[Dict] = None
+    ) -> List[ExternalWorkflowBriefResponse]:
+        """워크플로우 목록 조회"""
         try:
-            workflow_get_url = f"{settings.PROXY_TARGET_BASE_URL}{settings.PROXY_TARGET_PATH_PREFIX}/workflows/{external_workflow_id}"
+            url = f"{self.base_url}/workflows"
+            params = {}
+            if page is not None and page_size is not None:
+                params["page"] = page
+                params["page_size"] = page_size
+            if creator_id is not None:
+                params["creator_id"] = creator_id
+            if service_id is not None:
+                params["service_id"] = service_id
+            if status:
+                params["status"] = status
 
-            logger.info(f"[EXTERNAL_API] === Getting workflow ===")
-            logger.info(f"[EXTERNAL_API] External workflow ID: {external_workflow_id}")
-            logger.info(f"[EXTERNAL_API] Target URL: {workflow_get_url}")
+            response = await self._make_authenticated_request("GET", url, user_info=user_info, params=params)
 
-            response = await self.client.get(workflow_get_url)
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict) and 'items' in data:
+                    return [ExternalWorkflowBriefResponse(**item) for item in data['items']]
+                elif isinstance(data, list):
+                    return [ExternalWorkflowBriefResponse(**item) for item in data]
+                return []
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting workflows: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
 
-            logger.info(f"[EXTERNAL_API] Response status: {response.status_code}")
-            logger.info(f"[EXTERNAL_API] Response headers: {dict(response.headers)}")
-            logger.info(f"[EXTERNAL_API] Response body: {response.text}")
+    async def get_workflow(
+            self, workflow_id: str, user_info: Optional[Dict] = None
+    ) -> Optional[ExternalWorkflowDetailResponse]:
+        """워크플로우 상세 조회"""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}"
+            response = await self._make_authenticated_request("GET", url, user_info=user_info)
+
+            if response.status_code == 200:
+                return ExternalWorkflowDetailResponse(**response.json())
+            elif response.status_code == 404:
+                return None
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting workflow: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def update_workflow(
+            self, workflow_id: str, name: Optional[str] = None, description: Optional[str] = None,
+            category: Optional[str] = None, status: Optional[str] = None,
+            service_id: Optional[str] = None, workflow_definition: Optional[Dict] = None,
+            user_info: Optional[Dict] = None
+    ) -> Optional[ExternalWorkflowDetailResponse]:
+        """워크플로우 수정"""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}"
+            payload = {}
+            if name:
+                payload['name'] = name
+            if description is not None:
+                payload['description'] = description
+            if category:
+                payload['category'] = category
+            if status:
+                payload['status'] = status
+            if service_id is not None:
+                payload['service_id'] = service_id
+            if workflow_definition:
+                payload['workflow_definition'] = workflow_definition
+
+            response = await self._make_authenticated_request("PUT", url, user_info=user_info, json=payload)
+
+            if response.status_code == 200:
+                return ExternalWorkflowDetailResponse(**response.json())
+            elif response.status_code == 404:
+                return None
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating workflow: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def delete_workflow(
+            self, workflow_id: str, user_info: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """워크플로우 삭제 시작 (2단계 프로세스)"""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}"
+            response = await self._make_authenticated_request("DELETE", url, user_info=user_info)
+
+            if response.status_code in [200, 202]:
+                return response.json()
+            elif response.status_code == 404:
+                raise HTTPException(status_code=404, detail="Workflow not found")
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error deleting workflow: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def finalize_deletion(
+            self, workflow_id: str, run_id: str, user_info: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """워크플로우 삭제 완료 처리"""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}/finalize-deletion"
+            params = {"run_id": run_id}
+            response = await self._make_authenticated_request("POST", url, user_info=user_info, params=params)
+
+            if response.status_code == 200:
+                return response.json()
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error finalizing deletion: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ===== Workflow 실행 =====
+
+    async def execute_workflow(
+            self, workflow_id: str, parameters: Optional[Dict[str, Any]] = None,
+            user_info: Optional[Dict] = None
+    ) -> WorkflowExecuteResponse:
+        """워크플로우 실행"""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}/execute"
+            payload = {}
+            if parameters:
+                payload['parameters'] = parameters
+
+            response = await self._make_authenticated_request("POST", url, user_info=user_info, json=payload)
+
+            if response.status_code == 200:
+                return WorkflowExecuteResponse(**response.json())
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error executing workflow: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ===== Workflow 상태 및 모델 조회 =====
+
+    async def get_workflow_status(
+            self, workflow_id: str, user_info: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """워크플로우 실행 상태 조회"""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}/status"
+            response = await self._make_authenticated_request("GET", url, user_info=user_info)
+
+            if response.status_code == 200:
+                return response.json()
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting workflow status: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def get_workflow_models(
+            self, workflow_id: str, user_info: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """워크플로우에 배포된 모델 목록 조회"""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}/models"
+            response = await self._make_authenticated_request("GET", url, user_info=user_info)
+
+            if response.status_code == 200:
+                return response.json()
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting workflow models: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ===== Workflow 정리 =====
+
+    async def cleanup_workflow(
+            self, workflow_id: str, user_info: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """워크플로우 리소스 정리 시작"""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}/cleanup"
+            response = await self._make_authenticated_request("POST", url, user_info=user_info)
+
+            if response.status_code in [200, 202]:
+                return response.json()
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error starting workflow cleanup: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def finalize_cleanup(
+            self, workflow_id: str, run_id: str, user_info: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """워크플로우 정리 완료 처리"""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}/finalize-cleanup"
+            params = {"run_id": run_id}
+            response = await self._make_authenticated_request("POST", url, user_info=user_info, params=params)
+
+            if response.status_code == 200:
+                return response.json()
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error finalizing cleanup: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ===== Workflow 테스트 =====
+
+    async def test_rag_workflow(
+            self, workflow_id: str, text: str, user_info: Optional[Dict] = None
+    ) -> WorkflowTestResponse:
+        """RAG 워크플로우 테스트"""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}/test/rag"
+            data = {"text": text}
+
+            response = await self._make_authenticated_request("POST", url, user_info=user_info, data=data)
+
+            if response.status_code == 200:
+                return WorkflowTestResponse(**response.json())
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error testing RAG workflow: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def test_ml_workflow(
+            self, workflow_id: str, image: UploadFile, user_info: Optional[Dict] = None
+    ) -> WorkflowTestResponse:
+        """ML 워크플로우 테스트"""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}/test/ml"
+            files = {'image': (image.filename, await image.read(), image.content_type)}
+
+            response = await self._make_authenticated_request("POST", url, user_info=user_info, files=files)
+
+            if response.status_code == 200:
+                return WorkflowTestResponse(**response.json())
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error testing ML workflow: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ===== Template 관련 =====
+
+    async def get_templates(
+            self, page: Optional[int] = None, page_size: Optional[int] = None,
+            category: Optional[str] = None, user_info: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """워크플로우 템플릿 목록 조회"""
+        try:
+            url = f"{self.base_url}/workflows/templates"
+            params = {}
+            if page is not None and page_size is not None:
+                params["page"] = page
+                params["page_size"] = page_size
+            if category:
+                params["category"] = category
+
+            response = await self._make_authenticated_request("GET", url, user_info=user_info, params=params)
+
+            if response.status_code == 200:
+                return response.json()
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting templates: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def get_template(
+            self, template_id: str, user_info: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """워크플로우 템플릿 상세 조회"""
+        try:
+            url = f"{self.base_url}/workflows/templates/{template_id}"
+            response = await self._make_authenticated_request("GET", url, user_info=user_info)
 
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 404:
                 return None
-            else:
-                logger.error(f"Error getting workflow {external_workflow_id}: {response.status_code}")
-                return None
-
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.error(f"Error getting workflow {external_workflow_id}: {str(e)}")
-            return None
+            logger.error(f"Error getting template: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
 
-    async def update_workflow(
-            self,
-            external_workflow_id: str,
-            parameters: Dict[str, Any],
-            user_info: Optional[Dict[str, str]] = None
-    ) -> bool:
-        """
-        S업체 워크플로우 업데이트
-
-        Args:
-            external_workflow_id: S업체의 워크플로우 ID
-            parameters: 업데이트할 파라미터
-            user_info: 사용자 정보
-
-        Returns:
-            bool: 업데이트 성공 여부
-        """
-        if not settings.PROXY_ENABLED:
-            return True  # 외부 서비스가 비활성화된 경우 성공으로 처리
-
-        try:
-            workflow_update_url = f"{settings.PROXY_TARGET_BASE_URL}{settings.PROXY_TARGET_PATH_PREFIX}/workflows/{external_workflow_id}"
-
-            # 사용자 정보를 헤더에 추가
-            headers = {}
-            if user_info:
-                if user_info.get('member_id'):
-                    headers['X-User-ID'] = str(user_info['member_id'])
-                if user_info.get('role'):
-                    headers['X-User-Role'] = str(user_info['role'])
-
-            logger.info(f"[EXTERNAL_API] === Updating workflow ===")
-            logger.info(f"[EXTERNAL_API] External workflow ID: {external_workflow_id}")
-            logger.info(f"[EXTERNAL_API] Parameters: {parameters}")
-            logger.info(f"[EXTERNAL_API] User info: {user_info}")
-            logger.info(f"[EXTERNAL_API] Target URL: {workflow_update_url}")
-            logger.info(f"[EXTERNAL_API] Headers: {headers}")
-
-            response = await self.client.put(
-                workflow_update_url,
-                json=parameters,
-                headers=headers
-            )
-
-            logger.info(f"[EXTERNAL_API] Response status: {response.status_code}")
-            logger.info(f"[EXTERNAL_API] Response headers: {dict(response.headers)}")
-            logger.info(f"[EXTERNAL_API] Response body: {response.text}")
-
-            return response.status_code in [200, 204]
-
-        except Exception as e:
-            logger.error(f"Error updating external workflow {external_workflow_id}: {str(e)}")
-            return False
-
-    async def delete_workflow(
-            self,
-            external_workflow_id: str,
-            user_info: Optional[Dict[str, str]] = None
-    ) -> bool:
-        """
-        S업체 워크플로우 삭제
-
-        Args:
-            external_workflow_id: S업체의 워크플로우 ID
-            user_info: 사용자 정보
-
-        Returns:
-            bool: 삭제 성공 여부
-        """
-        if not settings.PROXY_ENABLED:
-            return True  # 외부 서비스가 비활성화된 경우 성공으로 처리
-
-        try:
-            workflow_delete_url = f"{settings.PROXY_TARGET_BASE_URL}{settings.PROXY_TARGET_PATH_PREFIX}/workflows/{external_workflow_id}"
-
-            # 사용자 정보를 헤더에 추가
-            headers = {}
-            if user_info:
-                if user_info.get('member_id'):
-                    headers['X-User-ID'] = str(user_info['member_id'])
-                if user_info.get('role'):
-                    headers['X-User-Role'] = str(user_info['role'])
-
-            logger.info(f"[EXTERNAL_API] === Deleting workflow ===")
-            logger.info(f"[EXTERNAL_API] External workflow ID: {external_workflow_id}")
-            logger.info(f"[EXTERNAL_API] User info: {user_info}")
-            logger.info(f"[EXTERNAL_API] Target URL: {workflow_delete_url}")
-            logger.info(f"[EXTERNAL_API] Headers: {headers}")
-
-            response = await self.client.delete(
-                workflow_delete_url,
-                headers=headers
-            )
-
-            logger.info(f"[EXTERNAL_API] Response status: {response.status_code}")
-            logger.info(f"[EXTERNAL_API] Response headers: {dict(response.headers)}")
-            logger.info(f"[EXTERNAL_API] Response body: {response.text}")
-
-            return response.status_code in [200, 204, 404]  # 404도 성공으로 처리 (이미 삭제됨)
-
-        except Exception as e:
-            logger.error(f"Error deleting external workflow {external_workflow_id}: {str(e)}")
-            return False
-
-    async def test_task_endpoint(
-            self,
-            path: Optional[str] = None,
-            parameters: Optional[Dict[str, Any]] = None,
-            user_info: Optional[Dict[str, str]] = None
+    async def create_template(
+            self, name: str, description: Optional[str] = None, category: Optional[str] = None,
+            workflow_definition: Optional[Dict] = None, user_info: Optional[Dict] = None
     ) -> Dict[str, Any]:
-        """
-        테스트용 task 엔드포인트 호출
-
-        Args:
-            path: 추가 경로 (예: "tasks", "tasks/list" 등)
-            parameters: 요청 파라미터
-            user_info: 사용자 정보
-
-        Returns:
-            Dict: API 응답 정보
-        """
-        if not settings.PROXY_ENABLED:
-            return {
-                "status": "disabled",
-                "message": "External service is disabled"
-            }
-
+        """워크플로우 템플릿 생성"""
         try:
-            # URL 구성
-            target_path = f"{settings.PROXY_TARGET_PATH_PREFIX}/{path}" if path else settings.PROXY_TARGET_PATH_PREFIX
-            target_url = f"{settings.PROXY_TARGET_BASE_URL}{target_path}"
+            url = f"{self.base_url}/workflows/templates"
+            payload = {"name": name}
+            if description:
+                payload["description"] = description
+            if category:
+                payload["category"] = category
+            if workflow_definition:
+                payload["workflow_definition"] = workflow_definition
 
-            logger.info(f"Testing task endpoint - Target URL: {target_url}")
-            logger.info(f"Testing task endpoint - Parameters: {parameters}")
+            response = await self._make_authenticated_request("POST", url, user_info=user_info, json=payload)
 
-            # 헤더 설정
-            headers = {}
-            if user_info:
-                if user_info.get('member_id'):
-                    headers['X-User-ID'] = str(user_info['member_id'])
-                if user_info.get('role'):
-                    headers['X-User-Role'] = str(user_info['role'])
-                if user_info.get('name'):
-                    import base64
-                    name_b64 = base64.b64encode(str(user_info['name']).encode('utf-8')).decode('ascii')
-                    headers['X-User-Name-B64'] = name_b64
-
-            logger.info(f"Testing task endpoint - Headers: {headers}")
-
-            # GET 요청 테스트
-            if not parameters:
-                response = await self.client.get(target_url, headers=headers)
-            else:
-                # POST 요청 테스트
-                response = await self.client.post(
-                    target_url,
-                    json=parameters,
-                    headers=headers
-                )
-
-            logger.info(f"Test response status: {response.status_code}")
-            logger.info(f"Test response headers: {dict(response.headers)}")
-            logger.info(f"Test response body: {response.text}")
-
-            return {
-                "target_url": target_url,
-                "status_code": response.status_code,
-                "headers": dict(response.headers),
-                "response_text": response.text[:1000],  # 첫 1000자만
-                "success": response.status_code < 400
-            }
-
-        except httpx.TimeoutException as e:
-            logger.error(f"Test API timeout: {str(e)}")
-            return {
-                "target_url": target_url,
-                "status": "timeout",
-                "error": str(e),
-                "success": False
-            }
-        except httpx.ConnectError as e:
-            logger.error(f"Test API connection error: {str(e)}")
-            return {
-                "target_url": target_url,
-                "status": "connection_error",
-                "error": str(e),
-                "success": False
-            }
+            if response.status_code in [200, 201]:
+                return response.json()
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.error(f"Test API error: {str(e)}")
-            return {
-                "target_url": target_url,
-                "status": "error",
-                "error": str(e),
-                "success": False
-            }
+            logger.error(f"Error creating template: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
 
-    async def debug_connection(self) -> Dict[str, Any]:
-        """
-        외부 서비스 연결 테스트
-
-        Returns:
-            Dict: 연결 상태 정보
-        """
-        if not settings.PROXY_ENABLED:
-            return {
-                "status": "disabled",
-                "message": "External service is disabled"
-            }
-
+    async def update_template(
+            self, template_id: str, name: Optional[str] = None, description: Optional[str] = None,
+            category: Optional[str] = None, status: Optional[str] = None,
+            workflow_definition: Optional[Dict] = None, user_info: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """워크플로우 템플릿 수정"""
         try:
-            # 기본 URL로 연결 테스트
-            base_url = settings.PROXY_TARGET_BASE_URL
+            url = f"{self.base_url}/workflows/templates/{template_id}"
+            payload = {}
+            if name:
+                payload["name"] = name
+            if description is not None:
+                payload["description"] = description
+            if category:
+                payload["category"] = category
+            if status:
+                payload["status"] = status
+            if workflow_definition:
+                payload["workflow_definition"] = workflow_definition
 
-            logger.info(f"[EXTERNAL_API] === Testing connection ===")
-            logger.info(f"[EXTERNAL_API] Base URL: {base_url}")
+            response = await self._make_authenticated_request("PUT", url, user_info=user_info, json=payload)
 
-            response = await self.client.get(base_url)
-
-            logger.info(f"[EXTERNAL_API] Connection response status: {response.status_code}")
-            logger.info(f"[EXTERNAL_API] Connection response headers: {dict(response.headers)}")
-            logger.info(f"[EXTERNAL_API] Connection response body: {response.text[:500]}")
-
-            return {
-                "base_url": base_url,
-                "status_code": response.status_code,
-                "headers": dict(response.headers),
-                "response_text": response.text[:500],  # 첫 500자만
-                "connection_success": True
-            }
-
-        except httpx.TimeoutException as e:
-            logger.error(f"Connection timeout: {str(e)}")
-            return {
-                "base_url": base_url,
-                "status": "timeout",
-                "error": str(e),
-                "connection_success": False
-            }
-        except httpx.ConnectError as e:
-            logger.error(f"Connection error: {str(e)}")
-            return {
-                "base_url": base_url,
-                "status": "connection_error",
-                "error": str(e),
-                "connection_success": False
-            }
+            if response.status_code == 200:
+                return response.json()
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.error(f"Debug connection error: {str(e)}")
-            return {
-                "base_url": base_url,
-                "status": "error",
-                "error": str(e),
-                "connection_success": False
+            logger.error(f"Error updating template: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def delete_template(
+            self, template_id: str, user_info: Optional[Dict] = None
+    ) -> bool:
+        """워크플로우 템플릿 삭제"""
+        try:
+            url = f"{self.base_url}/workflows/templates/{template_id}"
+            response = await self._make_authenticated_request("DELETE", url, user_info=user_info)
+
+            if response.status_code in [200, 204]:
+                return True
+            elif response.status_code == 404:
+                return False
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error deleting template: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def clone_template(
+            self, template_id: str, workflow_name: str, service_id: Optional[int] = None,
+            user_info: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """템플릿으로부터 워크플로우 생성"""
+        try:
+            url = f"{self.base_url}/workflows/templates/{template_id}/clone"
+            params = {"workflow_name": workflow_name}
+            if service_id is not None:
+                params["service_id"] = service_id
+
+            response = await self._make_authenticated_request("POST", url, user_info=user_info, params=params)
+
+            if response.status_code in [200, 201]:
+                return response.json()
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error cloning template: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ===== Component Types =====
+
+    async def get_component_types(
+            self, user_info: Optional[Dict] = None
+    ) -> List[Dict[str, Any]]:
+        """사용 가능한 컴포넌트 타입 조회"""
+        try:
+            url = f"{self.base_url}/workflows/component-types"
+            response = await self._make_authenticated_request("GET", url, user_info=user_info)
+
+            if response.status_code == 200:
+                return response.json()
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting component types: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ===== Component Deployment Status (내부 API) =====
+
+    async def update_component_deployment_status(
+            self, workflow_id: str, component_id: str,
+            service_name: str, service_hostname: str, model_name: str,
+            status: str, internal_url: Optional[str] = None,
+            error_message: Optional[str] = None, user_info: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """컴포넌트 KServe 배포 상태 업데이트 (내부 API - Pipeline에서만 호출)"""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}/components/{component_id}/deployment-status"
+            payload = {
+                "service_name": service_name,
+                "service_hostname": service_hostname,
+                "model_name": model_name,
+                "status": status
             }
+            if internal_url:
+                payload["internal_url"] = internal_url
+            if error_message:
+                payload["error_message"] = error_message
+
+            response = await self._make_authenticated_request("POST", url, user_info=user_info, json=payload)
+
+            if response.status_code == 200:
+                return response.json()
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating component deployment status: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
 
 
-# 전역 외부 워크플로우 서비스 인스턴스
-external_workflow_service = ExternalWorkflowService()
+workflow_service = WorkflowService()

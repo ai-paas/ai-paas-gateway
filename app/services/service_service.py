@@ -1,20 +1,21 @@
 import httpx
 import logging
+import json
 import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
-from fastapi import HTTPException, status, UploadFile
+from fastapi import HTTPException, status
 from app.config import settings
-from app.schemas.dataset import (
-    DatasetCreateRequest, DatasetReadSchema, DatasetListResponse,
-    DatasetValidationResponse
+from app.schemas.service import (
+    ExternalServiceResponse,
+    ExternalServiceDetailResponse
 )
 
 logger = logging.getLogger(__name__)
 
 
-class DatasetService:
-    """데이터셋 관련 외부 API 서비스 (인증 포함)"""
+class ServiceService:
+    """서비스 관련 외부 API 서비스 (인증 포함)"""
 
     def __init__(self):
         self.client = httpx.AsyncClient(
@@ -154,23 +155,78 @@ class DatasetService:
 
         return response
 
-    async def get_datasets(
+    async def create_service(
+            self,
+            name: str,
+            description: Optional[str] = None,
+            tags: Optional[List[str]] = None,
+            user_info: Optional[Dict[str, str]] = None
+    ) -> ExternalServiceResponse:
+        """서비스 생성"""
+        try:
+            url = f"{self.base_url}/services"
+
+            payload = {
+                "name": name
+            }
+            if description:
+                payload["description"] = description
+            if tags:
+                payload["tags"] = tags
+
+            logger.info(f"Creating service at: {url}")
+            logger.info(f"Payload: {payload}")
+
+            response = await self._make_authenticated_request(
+                "POST", url, user_info=user_info, json=payload
+            )
+
+            if response.status_code in [200, 201]:
+                service_data = response.json()
+                return ExternalServiceResponse(**service_data)
+            else:
+                error_detail = response.text
+                logger.error(f"Service creation failed: {error_detail}")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Failed to create service: {error_detail}"
+                )
+
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout creating service: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="External service timeout"
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error creating service: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
+    async def get_services(
             self,
             page: Optional[int] = None,
             page_size: Optional[int] = None,
+            creator_id: Optional[int] = None,
             user_info: Optional[Dict[str, str]] = None
-    ) -> DatasetListResponse:
-        """데이터셋 목록 조회"""
+    ) -> Dict[str, Any]:
+        """서비스 목록 조회"""
         try:
-            url = f"{self.base_url}/datasets"
+            url = f"{self.base_url}/services"
             params = {}
 
-            # 페이지네이션 파라미터 추가 (둘 다 있거나 둘 다 없어야 함)
-            if page is not None and page_size is not None:
+            if page is not None:
                 params["page"] = page
+            if page_size is not None:
                 params["page_size"] = page_size
+            if creator_id is not None:
+                params["creator_id"] = creator_id
 
-            logger.info(f"Getting datasets from: {url}")
+            logger.info(f"Getting services from: {url}")
             logger.info(f"Parameters: {params}")
 
             response = await self._make_authenticated_request(
@@ -179,27 +235,21 @@ class DatasetService:
 
             if response.status_code == 200:
                 data = response.json()
-
-                # 응답이 {"data": [...]} 형식인지 확인
-                if isinstance(data, dict) and 'data' in data:
-                    return DatasetListResponse(**data)
-                else:
-                    # 레거시 형식 지원
-                    return DatasetListResponse(data=data if isinstance(data, list) else [])
+                return data
             else:
                 raise HTTPException(
                     status_code=response.status_code,
-                    detail=f"Failed to get datasets: {response.text}"
+                    detail=f"Failed to get services: {response.text}"
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout getting datasets: {str(e)}")
+            logger.error(f"Timeout getting services: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
             )
         except httpx.ConnectError as e:
-            logger.error(f"Connection error getting datasets: {str(e)}")
+            logger.error(f"Connection error getting services: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="External service unavailable"
@@ -207,40 +257,98 @@ class DatasetService:
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Error getting datasets: {str(e)}")
+            logger.error(f"Error getting services: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal error: {str(e)}"
             )
 
-    async def get_dataset(
+    async def get_service(
             self,
-            dataset_id: int,
+            service_id: str,
             user_info: Optional[Dict[str, str]] = None
-    ) -> Optional[DatasetReadSchema]:
-        """특정 데이터셋 조회"""
+    ) -> Optional[ExternalServiceDetailResponse]:
+        """서비스 상세 조회"""
         try:
-            url = f"{self.base_url}/datasets/{dataset_id}"
+            url = f"{self.base_url}/services/{service_id}"
 
-            logger.info(f"Getting dataset from: {url}")
+            logger.info(f"Getting service from: {url}")
 
             response = await self._make_authenticated_request(
                 "GET", url, user_info=user_info
             )
 
+            logger.info(f"Response status: {response.status_code}")
+            logger.info(f"Response body: {response.text[:500]}")  # 처음 500자만
+
             if response.status_code == 200:
-                dataset_data = response.json()
-                return DatasetReadSchema(**dataset_data)
+                service_data = response.json()
+                return ExternalServiceDetailResponse(**service_data)
+            elif response.status_code == 404:
+                logger.warning(f"Service {service_id} not found in external API")
+                return None
+            else:
+                logger.error(f"Unexpected status code: {response.status_code}, body: {response.text}")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Failed to get service: {response.text}"
+                )
+
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout getting service {service_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="External service timeout"
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting service {service_id}: {str(e)}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
+    async def update_service(
+            self,
+            service_id: str,
+            name: Optional[str] = None,
+            description: Optional[str] = None,
+            tags: Optional[List[str]] = None,
+            user_info: Optional[Dict[str, str]] = None
+    ) -> Optional[ExternalServiceResponse]:
+        """서비스 수정"""
+        try:
+            url = f"{self.base_url}/services/{service_id}"
+
+            payload = {}
+            if name is not None:
+                payload["name"] = name
+            if description is not None:
+                payload["description"] = description
+            if tags is not None:
+                payload["tags"] = tags
+
+            logger.info(f"Updating service at: {url}")
+            logger.info(f"Update data: {payload}")
+
+            response = await self._make_authenticated_request(
+                "PUT", url, user_info=user_info, json=payload
+            )
+
+            if response.status_code == 200:
+                service_data = response.json()
+                return ExternalServiceResponse(**service_data)
             elif response.status_code == 404:
                 return None
             else:
                 raise HTTPException(
                     status_code=response.status_code,
-                    detail=f"Failed to get dataset: {response.text}"
+                    detail=f"Failed to update service: {response.text}"
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout getting dataset {dataset_id}: {str(e)}")
+            logger.error(f"Timeout updating service {service_id}: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -248,48 +356,39 @@ class DatasetService:
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Error getting dataset {dataset_id}: {str(e)}")
+            logger.error(f"Error updating service {service_id}: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal error: {str(e)}"
             )
 
-    async def validate_dataset(
+    async def delete_service(
             self,
-            file: UploadFile,
+            service_id: str,
             user_info: Optional[Dict[str, str]] = None
-    ) -> DatasetValidationResponse:
-        """데이터셋 파일 유효성 검증"""
+    ) -> bool:
+        """서비스 삭제"""
         try:
-            url = f"{self.base_url}/datasets/validate"
+            url = f"{self.base_url}/services/{service_id}"
 
-            # 파일 데이터 읽기
-            file_data = await file.read()
-
-            # 파일 포인터 리셋 (이후 재사용을 위해)
-            await file.seek(0)
-
-            files = {
-                "file": (file.filename, file_data, file.content_type or "application/zip")
-            }
-
-            logger.info(f"Validating dataset file at: {url}")
+            logger.info(f"Deleting service at: {url}")
 
             response = await self._make_authenticated_request(
-                "POST", url, user_info=user_info, files=files
+                "DELETE", url, user_info=user_info
             )
 
-            if response.status_code == 200:
-                validation_data = response.json()
-                return DatasetValidationResponse(**validation_data)
+            if response.status_code in [200, 204]:
+                return True
+            elif response.status_code == 404:
+                return False
             else:
                 raise HTTPException(
                     status_code=response.status_code,
-                    detail=f"Failed to validate dataset: {response.text}"
+                    detail=f"Failed to delete service: {response.text}"
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout validating dataset: {str(e)}")
+            logger.error(f"Timeout deleting service {service_id}: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -297,98 +396,7 @@ class DatasetService:
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Error validating dataset: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Internal error: {str(e)}"
-            )
-
-    async def create_dataset(
-            self,
-            dataset_data: DatasetCreateRequest,
-            file: UploadFile,
-            user_info: Optional[Dict[str, str]] = None
-    ) -> DatasetReadSchema:
-        """데이터셋 생성"""
-        try:
-            url = f"{self.base_url}/datasets"
-
-            # 파일 데이터 읽기
-            file_data = await file.read()
-
-            # multipart/form-data로 전송
-            files = {
-                "file": (file.filename, file_data, file.content_type or "application/zip")
-            }
-
-            data = {
-                "name": dataset_data.name,
-                "description": dataset_data.description
-            }
-
-            logger.info(f"Creating dataset at: {url}")
-            logger.info(f"Dataset data: {data}")
-
-            response = await self._make_authenticated_request(
-                "POST", url, user_info=user_info, data=data, files=files
-            )
-
-            if response.status_code in [200, 201]:
-                dataset_response = response.json()
-                return DatasetReadSchema(**dataset_response)
-            else:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Failed to create dataset: {response.text}"
-                )
-
-        except httpx.TimeoutException as e:
-            logger.error(f"Timeout creating dataset: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail="External service timeout"
-            )
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Error creating dataset: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Internal error: {str(e)}"
-            )
-
-    async def get_datasets_by_ids(
-            self,
-            dataset_ids: List[int],
-            user_info: Optional[Dict[str, str]] = None
-    ) -> List[DatasetReadSchema]:
-        """특정 ID 목록으로 데이터셋들 조회 (병렬 조회)"""
-        try:
-            if not dataset_ids:
-                return []
-
-            # 개별 데이터셋을 병렬로 조회
-            tasks = [
-                self.get_dataset(dataset_id, user_info)
-                for dataset_id in dataset_ids
-            ]
-
-            # 병렬 실행
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            # 성공한 결과만 필터링
-            datasets = []
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    logger.warning(f"Failed to get dataset {dataset_ids[i]}: {result}")
-                    continue
-                if result is not None:
-                    datasets.append(result)
-
-            return datasets
-
-        except Exception as e:
-            logger.error(f"Error getting datasets by IDs {dataset_ids}: {str(e)}")
+            logger.error(f"Error deleting service {service_id}: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal error: {str(e)}"
@@ -396,4 +404,4 @@ class DatasetService:
 
 
 # 싱글톤 인스턴스
-dataset_service = DatasetService()
+service_service = ServiceService()
