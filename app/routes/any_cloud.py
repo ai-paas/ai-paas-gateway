@@ -5,7 +5,7 @@ import json
 
 from app.auth import get_current_user
 from app.schemas.any_cloud import AnyCloudResponse, AnyCloudDataResponse, GenericRequest, ClusterCreateRequest, \
-    ClusterDeleteResponse, HelmRepoCreateRequest, FilterModel, ClusterUpdateRequest
+    ClusterDeleteResponse, HelmRepoCreateRequest, FilterModel, ClusterUpdateRequest, AnyCloudPagedResponse
 from app.services.any_cloud_service import any_cloud_service
 from app.models import Member
 
@@ -27,8 +27,11 @@ def _create_user_info_dict(user: Member) -> Dict[str, str]:
     }
 
 # 클러스터 목록 조회 API
-@router_cluster.get("/clusters", response_model=AnyCloudDataResponse)
+@router_cluster.get("/clusters", response_model=AnyCloudPagedResponse)
 async def get_clusters(
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
+        search: Optional[str] = Query(None, description="검색어 (클러스터 이름, ID 등)"),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -38,11 +41,13 @@ async def get_clusters(
         user_info = _create_user_info_dict(current_user)
 
         response = await any_cloud_service.get_clusters(
-            user_info=user_info
+            user_info=user_info,
+            page=page,
+            size=size,
+            search=search
         )
 
-        # 목록 조회는 data로 래핑하여 반환
-        return AnyCloudDataResponse(data=response["data"])
+        return response
 
     except HTTPException:
         raise
@@ -283,8 +288,11 @@ async def cluster_delete_api(
         )
 
 # 헬름 저장소 목록 조회 API
-@router_helm.get("/helm-repos", response_model=AnyCloudDataResponse)
+@router_helm.get("/helm-repos", response_model=AnyCloudPagedResponse)
 async def get_helms(
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
+        search: Optional[str] = Query(None, description="검색어 (저장소 이름, URL 등)"),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -294,11 +302,13 @@ async def get_helms(
         user_info = _create_user_info_dict(current_user)
 
         response = await any_cloud_service.get_helm_repos(
-            user_info=user_info
+            user_info=user_info,
+            page=page,
+            size=size,
+            search=search
         )
 
-        # 목록 조회는 data로 래핑하여 반환
-        return AnyCloudDataResponse(data=response["data"])
+        return response
 
     except HTTPException:
         raise
@@ -523,11 +533,14 @@ async def get_monitoring_metric(
         )
 
 # 클러스터 특정 리소스 목록 조회 API
-@router_package.get("/kubernetes/{resource_type}", response_model=AnyCloudDataResponse)
+@router_package.get("/kubernetes/{resource_type}", response_model=AnyCloudPagedResponse)
 async def get_kubernetes_resource(
-        resource_type: str = Path(..., description="조회할 Resource 타입 (예 : daemonSets. deployments, replicaSets, statefulSets, jobs, cronJobs, endpoints, namespaces, nodes, persistentVolumes, persistentVolumeClaims, pods, secrets,servies, serviceAccounts, configMaps, events, roles, roleBindings, clusterRoles, clusterRoleBindings, horizontalPodAuoscalers, ingresses, storageClasses)", example="nodes"),
+        resource_type: str = Path(..., description="조회할 Resource 타입"),
         clusterName: str = Query(..., description="조회할 cluster 이름", example="aws-kubernetes-001"),
         namespace: str = Query("", description="조회할 namespace 이름", example="default"),
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
+        search: Optional[str] = Query(None, description="검색어 (리소스 이름 등)"),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -540,10 +553,13 @@ async def get_kubernetes_resource(
             resource_type=resource_type,
             clusterName=clusterName,
             namespace=namespace,
-            user_info=user_info
+            user_info=user_info,
+            page=page,
+            size=size,
+            search=search
         )
 
-        return AnyCloudResponse(data=response["data"])
+        return response
 
     except HTTPException:
         raise
@@ -651,10 +667,13 @@ async def test_cluster(
         )
 
 # 카탈로그 목록 조회 API
-@router_catalog.get("/catalog/releases", response_model=AnyCloudDataResponse)
+@router_catalog.get("/catalog/releases", response_model=AnyCloudPagedResponse)
 async def get_helm_releases(
         clusterId: str = Query(..., description="조회할 cluster ID", example="aws-kubernetes-001"),
         namespace: str = Query("", description="조회할 namespace 이름", example="default"),
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
+        search: Optional[str] = Query(None, description="검색어 (릴리즈 이름 등)"),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -666,10 +685,13 @@ async def get_helm_releases(
         response = await any_cloud_service.get_catalog_releases(
             clusterId=clusterId,
             namespace=namespace,
-            user_info=user_info
+            user_info=user_info,
+            page=page,
+            size=size,
+            search=search
         )
 
-        return AnyCloudDataResponse(data=response["data"])
+        return response
 
     except HTTPException:
         raise
@@ -681,23 +703,29 @@ async def get_helm_releases(
         )
 
 # 카탈로그 목록 조회 API
-@router_catalog.get("/catalog/{repoName}", response_model=AnyCloudDataResponse)
+@router_catalog.get("/catalog/{repoName}", response_model=AnyCloudPagedResponse)
 async def get_catalog_list(
         repoName: str = Path(..., description="Helm repository 이름", example="chart-museum-external"),
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+        size: int = Query(20, ge=1, le=100, description="페이지 크기"),
+        search: Optional[str] = Query(None, description="검색어 (차트 이름 등)"),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    DB에서 repoName로 RepositoryEntity 조회 후 해당 url에서 index.yaml을 다운로드하여 차트 목록을 반환합니다.
+    DB에서 repoName으로 RepositoryEntity 조회 후 해당 url에서 index.yaml을 다운로드하여 차트 목록을 반환합니다.
     """
     try:
         user_info = _create_user_info_dict(current_user)
 
         response = await any_cloud_service.get_catalog_list(
             repoName=repoName,
-            user_info=user_info
+            user_info=user_info,
+            page=page,
+            size=size,
+            search=search
         )
 
-        return AnyCloudDataResponse(data=response["data"])
+        return response
 
     except HTTPException:
         raise
@@ -713,6 +741,7 @@ async def get_catalog_list(
 async def get_catalog_detail(
         repoName: str = Path(..., description="Helm repository 이름", example="chart-museum-external"),
         chartName: str = Path(..., description="조회할 차트 이름", example="nginx"),
+        version: str = Query("", description="차트 버전 (선택사항, 없으면 최신 버전)", example="22.1.1"),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -724,6 +753,7 @@ async def get_catalog_detail(
         response = await any_cloud_service.get_catalog_chart(
             repoName=repoName,
             chartName=chartName,
+            version=version,
             user_info=user_info
         )
 
@@ -837,6 +867,39 @@ async def get_catalog_values(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve values"
         )
+
+# 차트 resources.yaml 조회 API
+@router_catalog.get("/catalog/releases/{releaseName}/resources")
+async def get_catalog_resources(
+        clusterId: str = Query(..., description="클러스터 ID", example="cluster-001"),
+        namespace: str = Query(..., description="네임스페이스", example="default"),
+        releaseName: str = Path(..., description="릴리즈 이름", example="nginx-test-release"),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    Helm CLI를 사용하여 특정 릴리즈의 리소스 목록을 조회합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.get_catalog_resources(
+            clusterId=clusterId,
+            namespace=namespace,
+            releaseName=releaseName,
+            user_info=user_info
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting resources for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve resource"
+        )
+
 
 @router_catalog.post("/catalog/{repoName}/{chartName}/deploy")
 async def post_catalog_deploy(

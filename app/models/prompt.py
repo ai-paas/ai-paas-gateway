@@ -5,14 +5,18 @@ from . import Base
 from datetime import datetime
 
 
-class Service(Base):
-    __tablename__ = "services"
+class Prompt(Base):
+    __tablename__ = "prompts"
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+
+    # 실제 데이터 컬럼
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
-    tags = Column(JSON, nullable=True)
+    content = Column(Text, nullable=False)
+    prompt_variable = Column(JSON, nullable=True)
 
+    # 메타 정보
     created_at = Column(
         DateTime(timezone=True),
         default=datetime.utcnow,
@@ -28,11 +32,11 @@ class Service(Base):
     )
 
     created_by = Column(String(100), ForeignKey("members.member_id"), nullable=False)
-    surro_service_id = Column(String(255), nullable=False, index=True)
+    surro_prompt_id = Column(Integer, nullable=False, index=True)
 
-    creator = relationship("Member", backref="created_services")
+    creator = relationship("Member", backref="created_prompts")
 
     __table_args__ = (
-        Index('idx_services_surro_service_id', 'surro_service_id', unique=True),
+        Index('idx_prompts_surro_prompt_id', 'surro_prompt_id', unique=True),
         {'extend_existing': True}
     )
