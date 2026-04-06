@@ -236,7 +236,7 @@ class WorkflowExecuteRequest(BaseModel):
     parameters: Optional[Dict[str, Any]] = Field(
         default_factory=dict,
         description="실행 파라미터 (커스텀 설정 값들을 전달)",
-        example={"gpu_enabled": True, "replicas": 2}
+        json_schema_extra={"example": {"gpu_enabled": True, "replicas": 2}}
     )
 
 

@@ -1,10 +1,11 @@
 services:
-  # AI PaaS Gateway Application  
+  # AI PaaS Gateway Application
   app:
     build:
       context: .
       dockerfile: Dockerfile
-    network_mode: host
+    ports:
+      - "8000:8000"  # 외부포트:컨테이너포트
     environment:
       - DATABASE_URL=${DATABASE_URL}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}

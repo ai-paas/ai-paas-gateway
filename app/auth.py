@@ -1,24 +1,13 @@
-import os
 from datetime import datetime, timedelta
 from typing import Optional
 from jose import JWTError, jwt
-from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status, Path
+import bcrypt
+from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.cruds import member_crud
 from app.config import settings
-
-# 비밀번호 해싱 설정
-HASH_SCHEMES = os.getenv("PASSWORD_HASH_SCHEMES", "bcrypt").split(",")
-pwd_context = CryptContext(
-    schemes=["bcrypt"],
-    deprecated="auto",
-    bcrypt__default_ident="2b",
-    bcrypt__min_rounds=12,
-    bcrypt__max_rounds=12,
-)
 
 # Bearer 토큰 스키마
 security = HTTPBearer()
@@ -50,20 +39,15 @@ class AuthService:
     @staticmethod
     def verify_password(plain_password: str, hashed_password: str) -> bool:
         """비밀번호 검증"""
-        # bcrypt 72바이트 제한 처리
+        # bcrypt는 72바이트를 초과하는 입력을 내부적으로 잘라냄
         pwd_bytes = plain_password.encode('utf-8')
-        if len(pwd_bytes) > 72:
-            plain_password = pwd_bytes[:72].decode('utf-8', errors='ignore')
-        return pwd_context.verify(plain_password, hashed_password)
+        return bcrypt.checkpw(pwd_bytes, hashed_password.encode('utf-8'))
 
     @staticmethod
     def get_password_hash(password: str) -> str:
-        """비밀번호 해싱"""
-        # bcrypt 72바이트 제한 처리
+        """비밀번호 해싱 (rounds=12)"""
         pwd_bytes = password.encode('utf-8')
-        if len(pwd_bytes) > 72:
-            password = pwd_bytes[:72].decode('utf-8', errors='ignore')
-        return pwd_context.hash(password)
+        return bcrypt.hashpw(pwd_bytes, bcrypt.gensalt(rounds=12)).decode('utf-8')
 
     @staticmethod
     def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
