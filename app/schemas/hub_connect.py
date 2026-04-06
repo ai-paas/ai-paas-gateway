@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, ConfigDict, model_validator, validator
+from pydantic import BaseModel, Field, ConfigDict, model_validator, field_validator
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 
@@ -56,14 +56,16 @@ class HubModelResponse(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    @validator('modelId', pre=True, always=True)
-    def set_model_id_from_id(cls, v, values):
+    @field_validator('modelId', mode='before')
+    @classmethod
+    def set_model_id_from_id(cls, v, info):
         """modelId가 없으면 id 값으로 설정"""
-        if v is None and 'id' in values:
-            return values.get('id')
+        if v is None and 'id' in info.data:
+            return info.data.get('id')
         return v
 
-    @validator('gated', pre=True)
+    @field_validator('gated', mode='before')
+    @classmethod
     def normalize_gated(cls, v):
         """gated 필드를 정규화"""
         if v is None:
@@ -74,11 +76,12 @@ class HubModelResponse(BaseModel):
             return v.lower() == "true"
         return bool(v)
 
-    @validator('task', pre=True, always=True)
-    def set_task_from_pipeline_tag(cls, v, values):
+    @field_validator('task', mode='before')
+    @classmethod
+    def set_task_from_pipeline_tag(cls, v, info):
         """task가 없으면 pipeline_tag 값으로 설정"""
-        if v is None and 'pipeline_tag' in values:
-            return values.get('pipeline_tag')
+        if v is None and 'pipeline_tag' in info.data:
+            return info.data.get('pipeline_tag')
         return v
 
 

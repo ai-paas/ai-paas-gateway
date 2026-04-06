@@ -2,22 +2,19 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
 from typing import List, Optional
 from datetime import datetime
-from passlib.context import CryptContext
+import bcrypt
 from app.models import Member
 from app.schemas.member import MemberCreate, MemberUpdate
-
-# 비밀번호 해싱을 위한 설정
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class MemberCRUD:
     def get_password_hash(self, password: str) -> str:
-        """비밀번호 해싱"""
-        return pwd_context.hash(password)
+        """비밀번호 해싱 (rounds=12)"""
+        return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt(rounds=12)).decode('utf-8')
 
     def verify_password(self, plain_password: str, hashed_password: str) -> bool:
         """비밀번호 검증"""
-        return pwd_context.verify(plain_password, hashed_password)
+        return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
 
     def create_member(self, db: Session, member: MemberCreate) -> Member:
         # 비밀번호 해싱
