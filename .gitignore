@@ -36,6 +36,9 @@ env.bak/
 venv.bak/
 .venv/
 
+# 라잉브러리
+node_modules
+
 # IDE
 .idea/
 .vscode/
@@ -103,3 +106,6 @@ coverage.xml
 /GEMINI.md
 /.kiro/
 /.claude/
+
+# 보고서 (로컬 전용)
+docs/reports/
