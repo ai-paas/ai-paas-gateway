@@ -106,6 +106,7 @@ coverage.xml
 /GEMINI.md
 /.kiro/
 /.claude/
+/AGENTS.md
 
 # 보고서 (로컬 전용)
 docs/reports/
