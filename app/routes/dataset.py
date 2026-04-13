@@ -7,8 +7,9 @@ from app.database import get_db
 from app.auth import get_current_user
 from app.cruds import dataset_crud
 from app.schemas.dataset import (
-    DatasetCreateRequest, DatasetReadSchema, DatasetListWrapper,
-    DatasetWithMemberInfo, InnoUserInfo, DatasetValidationResponse
+    DatasetCreateRequest, DatasetUpdateRequest, DatasetReadSchema,
+    DatasetListWrapper, DatasetWithMemberInfo, InnoUserInfo,
+    DatasetValidationResponse
 )
 from app.services.dataset_service import dataset_service
 from app.models import Member
@@ -67,15 +68,15 @@ async def get_datasets(
         if total_datasets == 0:
             return _create_pagination_response([], 0, page, size)
 
-        # 2. 사용자 데이터셋 ID 목록 조회 (페이지네이션 적용)
-        user_dataset_ids = dataset_crud.get_datasets_by_member_id(
+        # 2. 사용자 데이터셋 매핑 조회 (페이지네이션 적용, {surro_dataset_id: created_by})
+        dataset_mappings = dataset_crud.get_dataset_mappings_by_member_id(
             db,
             current_user.member_id,
             skip=skip,
             limit=size
         )
 
-        if not user_dataset_ids:
+        if not dataset_mappings:
             return _create_pagination_response([], total_datasets, page, size)
 
         # 3. 외부 API에서 전체 데이터셋 조회 (페이지네이션 없이)
@@ -90,14 +91,15 @@ async def get_datasets(
         )
 
         # 4. 사용자 소유 데이터셋만 필터링
-        filtered = [d for d in all_datasets_response.data if d.id in user_dataset_ids]
+        filtered = [d for d in all_datasets_response.data if d.id in dataset_mappings]
 
-        # 5. 사용자 정보 추가
+        # 5. 사용자 정보 추가 + 로컬 DB의 created_by 매핑
         member_info = _create_inno_user_info(current_user)
         wrapped = []
         for dataset in filtered:
             dataset_dict = dataset.model_dump()
             dataset_dict["member_info"] = member_info.model_dump()
+            dataset_dict["created_by"] = dataset_mappings.get(dataset.id, "")
             wrapped.append(DatasetWithMemberInfo(**dataset_dict))
 
         return _create_pagination_response(wrapped, total_datasets, page, size)
@@ -146,6 +148,14 @@ async def get_dataset(
                 detail=f"Dataset {dataset_id} not found"
             )
 
+        db_dataset = dataset_crud.get_dataset_by_surro_id(
+            db=db,
+            surro_dataset_id=dataset_id,
+            member_id=current_user.member_id
+        )
+        if db_dataset:
+            dataset.created_by = db_dataset.created_by or ""
+
         return dataset
 
     except HTTPException:
@@ -155,6 +165,128 @@ async def get_dataset(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get dataset: {str(e)}"
+        )
+
+
+@router.put("/{dataset_id}", response_model=DatasetReadSchema)
+async def update_dataset(
+        dataset_id: int = Path(..., description="데이터셋 ID (외부 API 데이터셋 ID)"),
+        dataset_data: DatasetUpdateRequest = None,
+        db: Session = Depends(get_db),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    데이터셋 수정
+
+    - 현재 사용자가 소유한 데이터셋인지 확인 후, 외부 API와 로컬 DB를 동시에 업데이트합니다.
+    """
+    try:
+        # 1. 소유권 확인
+        if not dataset_crud.check_dataset_ownership(db, dataset_id, current_user.member_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Dataset {dataset_id} not found or access denied"
+            )
+
+        # 2. 외부 API에 데이터셋 수정
+        updated_dataset = await dataset_service.update_dataset(
+            dataset_id=dataset_id,
+            dataset_data=dataset_data,
+            user_info={
+                'member_id': current_user.member_id,
+                'role': current_user.role,
+                'name': current_user.name
+            }
+        )
+
+        # 3. 로컬 DB 매핑 이름 동기화
+        if dataset_data and dataset_data.name:
+            try:
+                dataset_crud.update_dataset_cache(
+                    db=db,
+                    surro_dataset_id=dataset_id,
+                    member_id=current_user.member_id,
+                    dataset_name=dataset_data.name
+                )
+                logger.info(
+                    f"Updated dataset mapping name: surro_id={dataset_id}, "
+                    f"new_name={dataset_data.name}"
+                )
+            except Exception as cache_error:
+                logger.error(f"Failed to update dataset cache: {str(cache_error)}")
+
+        # 4. created_by를 로컬 DB 값으로 설정
+        db_dataset = dataset_crud.get_dataset_by_surro_id(
+            db=db, surro_dataset_id=dataset_id, member_id=current_user.member_id
+        )
+        if db_dataset:
+            updated_dataset.created_by = db_dataset.created_by or ""
+
+        return updated_dataset
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating dataset {dataset_id} for user {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update dataset: {str(e)}"
+        )
+
+
+@router.delete("/{dataset_id}")
+async def delete_dataset(
+        dataset_id: int = Path(..., description="데이터셋 ID (외부 API 데이터셋 ID)"),
+        db: Session = Depends(get_db),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    데이터셋 삭제
+
+    - 현재 사용자가 소유한 데이터셋인지 확인 후, 외부 API와 로컬 DB 매핑을 모두 삭제합니다.
+    - 로컬 DB는 소프트 삭제 처리됩니다.
+    """
+    try:
+        # 1. 소유권 확인
+        if not dataset_crud.check_dataset_ownership(db, dataset_id, current_user.member_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Dataset {dataset_id} not found or access denied"
+            )
+
+        # 2. 외부 API에서 데이터셋 삭제
+        await dataset_service.delete_dataset(
+            dataset_id=dataset_id,
+            user_info={
+                'member_id': current_user.member_id,
+                'role': current_user.role,
+                'name': current_user.name
+            }
+        )
+
+        # 3. 로컬 DB 매핑 소프트 삭제
+        try:
+            dataset_crud.delete_dataset_mapping(
+                db=db,
+                surro_dataset_id=dataset_id,
+                member_id=current_user.member_id
+            )
+            logger.info(
+                f"Deleted dataset mapping: surro_id={dataset_id}, "
+                f"member_id={current_user.member_id}"
+            )
+        except Exception as mapping_error:
+            logger.error(f"Failed to delete dataset mapping: {str(mapping_error)}")
+
+        return {"message": f"Dataset {dataset_id} deleted successfully"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting dataset {dataset_id} for user {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete dataset: {str(e)}"
         )
 
 

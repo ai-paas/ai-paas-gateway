@@ -1,7 +1,10 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
 
 from app.models.dataset import Dataset
 
@@ -103,6 +106,27 @@ class DatasetCRUD:
         # 외부 API의 데이터셋 ID만 반환
         return [dataset.surro_dataset_id for dataset in datasets if dataset.surro_dataset_id]
 
+    def get_dataset_mappings_by_member_id(
+            self,
+            db: Session,
+            member_id: str,
+            skip: int = 0,
+            limit: int = 100
+    ) -> Dict[int, str]:
+        """특정 사용자가 만든 데이터셋의 {surro_dataset_id: created_by} 매핑 조회"""
+        datasets = db.query(Dataset).filter(
+            and_(
+                Dataset.created_by == member_id,
+                Dataset.deleted_at.is_(None),
+                Dataset.is_active == True
+            )
+        ).order_by(Dataset.created_at.desc()).offset(skip).limit(limit).all()
+
+        return {
+            dataset.surro_dataset_id: dataset.created_by
+            for dataset in datasets if dataset.surro_dataset_id
+        }
+
     def get_dataset_by_surro_id(
             self,
             db: Session,
@@ -129,10 +153,22 @@ class DatasetCRUD:
         # 중복 확인
         existing = self.get_dataset_by_surro_id(db, surro_dataset_id, member_id)
         if existing:
-            logger.warning(
-                f"Dataset mapping already exists: surro_id={surro_dataset_id}, "
-                f"member_id={member_id}"
-            )
+            # stale 매핑이면 이름 업데이트 (MLOps 재설치 등으로 ID 재사용 시)
+            if dataset_name and existing.name != dataset_name:
+                logger.info(
+                    f"Updating stale dataset mapping: surro_id={surro_dataset_id}, "
+                    f"old_name={existing.name}, new_name={dataset_name}"
+                )
+                existing.name = dataset_name
+                existing.updated_by = member_id
+                existing.updated_at = datetime.utcnow()
+                db.commit()
+                db.refresh(existing)
+            else:
+                logger.warning(
+                    f"Dataset mapping already exists: surro_id={surro_dataset_id}, "
+                    f"member_id={member_id}"
+                )
             return existing
 
         db_dataset = Dataset(

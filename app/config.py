@@ -83,6 +83,10 @@ class Settings:
     EXTERNAL_API_USERNAME: str = os.getenv("EXTERNAL_API_USERNAME", "")
     EXTERNAL_API_PASSWORD: str = os.getenv("EXTERNAL_API_PASSWORD", "")
 
+    # 대용량 업로드 설정 (Dataset 등)
+    PROXY_UPLOAD_TIMEOUT: float = float(os.getenv("PROXY_UPLOAD_TIMEOUT", "300.0"))
+    MAX_DATASET_FILE_SIZE: int = int(os.getenv("MAX_DATASET_FILE_SIZE", "1073741824"))  # 1GB
+
     HUB_CONNECT_ENABLED: bool = _get_bool("HUB_CONNECT_ENABLED", False)
     HUB_CONNECT_TARGET_BASE_URL: str = os.getenv("HUB_CONNECT_TARGET_BASE_URL", "")
     HUB_CONNECT_TARGET_PATH_PREFIX: str = os.getenv("HUB_CONNECT_TARGET_PATH_PREFIX", "/api/v1")

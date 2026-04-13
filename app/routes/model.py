@@ -157,11 +157,15 @@ async def get_all_models(
     filter_type으로 특정 타입만 조회 가능
     """
     try:
-        # 1. Surro API에서 전체 모델 조회
+        # 1. Surro API에서 모델 조회 (MLOps 파라미터 변환은 서비스 내부에서 처리)
         all_surro_models = await model_service.get_models(
             skip=0,
             limit=1000,
-            search=None,
+            search=search,
+            provider_id=model_provider_id,
+            type_id=model_type_id,
+            format_id=model_format_id,
+            filter_type=filter_type,
             user_info={
                 'member_id': current_user.member_id,
                 'role': current_user.role,
