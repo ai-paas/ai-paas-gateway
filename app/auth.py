@@ -3,7 +3,7 @@ from typing import Optional
 
 import bcrypt
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer, OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,7 @@ from app.database import get_db
 
 security = HTTPBearer()
 optional_security = HTTPBearer(auto_error=False)
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl=f"{settings.API_V1_STR}/auth/token")
 
 TOKEN_BLACKLIST = set()
 
@@ -103,10 +104,9 @@ class AuthService:
 
 
 def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
 ):
-    token = credentials.credentials
     token_data = AuthService.verify_token(token)
 
     if token_data["type"] != "access":
