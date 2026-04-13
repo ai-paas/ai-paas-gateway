@@ -37,9 +37,10 @@ class ModelRegistry(BaseModel):
     id: int
     artifact_path: str
     uri: str
+    run_id: Optional[str] = None
     reference_model_id: int
-    created_at: datetime
-    updated_at: datetime
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
     created_by: Optional[str] = None
     updated_by: Optional[str] = None
 
@@ -114,6 +115,11 @@ class ModelResponse(BaseModel):
     created_by: Optional[str] = None
     updated_by: Optional[str] = None
     deleted_by: Optional[str] = None
+    learning_enable_yn: Optional[bool] = None
+    opt_enable_yn: Optional[bool] = None
+    visibility: Optional[str] = None
+    parent_model: Optional[Dict[str, Any]] = None
+    child_models: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
 
 
 class ModelCreateResponse(BaseModel):

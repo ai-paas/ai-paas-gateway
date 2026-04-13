@@ -15,6 +15,12 @@ class DatasetCreateRequest(BaseModel):
     description: str = Field(..., description="데이터셋 설명")
 
 
+class DatasetUpdateRequest(BaseModel):
+    """API 요청용 데이터셋 수정 스키마"""
+    name: Optional[str] = Field(None, description="데이터셋 이름")
+    description: Optional[str] = Field(None, description="데이터셋 설명")
+
+
 class DatasetRegistryReadSchema(BaseModel):
     """데이터셋 레지스트리 정보"""
     model_config = ConfigDict(from_attributes=True, protected_namespaces=())
@@ -37,6 +43,7 @@ class DatasetReadSchema(BaseModel):
 
     id: int
     name: str
+    description: Optional[str] = None
     dataset_registry: DatasetRegistryReadSchema
     created_at: datetime
     updated_at: datetime

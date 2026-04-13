@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Index, Sequence
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Index, Sequence
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from app.models import Base  # 이 import가 중요!
@@ -38,7 +38,30 @@ class KnowledgeBase(Base):  # Base를 상속받아야 함!
     )
 
     created_by = Column(String(100), ForeignKey("members.member_id"), nullable=False)
+    updated_by = Column(
+        String(100),
+        nullable=True,
+        comment="수정자 member_id"
+    )
     surro_knowledge_id = Column(Integer, nullable=False, index=True)
+
+    # 소프트 삭제
+    deleted_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="삭제 시간"
+    )
+    deleted_by = Column(
+        String(100),
+        nullable=True,
+        comment="삭제자 member_id"
+    )
+    is_active = Column(
+        Boolean,
+        default=True,
+        nullable=False,
+        comment="활성화 상태"
+    )
 
     # Relationship
     creator = relationship("Member", backref="created_knowledge_bases")
