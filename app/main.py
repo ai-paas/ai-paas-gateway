@@ -12,11 +12,14 @@ from app.routes import (
     any_cloud,
     auth,
     dataset,
+    experiment,
     hub_connect,
     knowledge_base,
     lite_model,
     member,
     model,
+    model_improvement,
+    pipeline,
     prompt,
     service,
     workflow,
@@ -55,8 +58,11 @@ app.include_router(auth.router, prefix=settings.API_V1_STR)
 app.include_router(service.router, prefix=settings.API_V1_STR)
 app.include_router(member.router, prefix=settings.API_V1_STR)
 app.include_router(workflow.router, prefix=settings.API_V1_STR)
-app.include_router(model.router, prefix=settings.API_V1_STR)
 app.include_router(dataset.router, prefix=settings.API_V1_STR)
+app.include_router(pipeline.router, prefix=settings.API_V1_STR)
+app.include_router(experiment.router, prefix=settings.API_V1_STR)
+app.include_router(model_improvement.router, prefix=settings.API_V1_STR)
+app.include_router(model.router, prefix=settings.API_V1_STR)
 app.include_router(prompt.router, prefix=settings.API_V1_STR)
 app.include_router(knowledge_base.router, prefix=settings.API_V1_STR)
 app.include_router(hub_connect.router, prefix=settings.API_V1_STR)

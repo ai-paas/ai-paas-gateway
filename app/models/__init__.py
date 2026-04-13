@@ -9,3 +9,5 @@ from .model import Model
 from .prompt import Prompt
 from .service import Service
 from .workflow import Workflow
+from .experiment import Experiment
+from .model_improvement import ModelImprovement

@@ -6,8 +6,8 @@ from typing import Dict, Any, Optional, List
 from fastapi import HTTPException, status, UploadFile
 from app.config import settings
 from app.schemas.dataset import (
-    DatasetCreateRequest, DatasetReadSchema, DatasetListResponse,
-    DatasetValidationResponse
+    DatasetCreateRequest, DatasetUpdateRequest, DatasetReadSchema,
+    DatasetListResponse, DatasetValidationResponse
 )
 
 logger = logging.getLogger(__name__)
@@ -309,16 +309,16 @@ class DatasetService:
             file: UploadFile,
             user_info: Optional[Dict[str, str]] = None
     ) -> DatasetReadSchema:
-        """데이터셋 생성"""
+        """데이터셋 생성 (스트리밍 방식, 대용량 업로드 지원)"""
         try:
             url = f"{self.base_url}/datasets"
 
-            # 파일 데이터 읽기
-            file_data = await file.read()
+            # 대용량 업로드를 위한 별도 타임아웃 클라이언트
+            upload_timeout = getattr(settings, 'PROXY_UPLOAD_TIMEOUT', 300.0)
 
-            # multipart/form-data로 전송
+            # 스트리밍: file.file (SpooledTemporaryFile)을 직접 전달하여 메모리 절약
             files = {
-                "file": (file.filename, file_data, file.content_type or "application/zip")
+                "file": (file.filename, file.file, file.content_type or "application/zip")
             }
 
             data = {
@@ -326,16 +326,40 @@ class DatasetService:
                 "description": dataset_data.description
             }
 
-            logger.info(f"Creating dataset at: {url}")
+            logger.info(f"Creating dataset at: {url}, timeout={upload_timeout}s")
             logger.info(f"Dataset data: {data}")
 
-            response = await self._make_authenticated_request(
-                "POST", url, user_info=user_info, data=data, files=files
+            # 업로드용 긴 타임아웃으로 요청
+            token = await self._get_valid_token()
+            headers = self._get_headers(user_info)
+            headers['Authorization'] = f"Bearer {token}"
+
+            response = await self.client.post(
+                url, data=data, files=files, headers=headers,
+                timeout=httpx.Timeout(timeout=upload_timeout, connect=settings.PROXY_CONNECT_TIMEOUT)
             )
+
+            # 토큰 만료 시 재시도
+            if response.status_code == 401:
+                self.access_token = None
+                token = await self._get_valid_token()
+                headers['Authorization'] = f"Bearer {token}"
+                await file.seek(0)  # 파일 포인터 초기화
+                files = {"file": (file.filename, file.file, file.content_type or "application/zip")}
+                response = await self.client.post(
+                    url, data=data, files=files, headers=headers,
+                    timeout=httpx.Timeout(timeout=upload_timeout, connect=settings.PROXY_CONNECT_TIMEOUT)
+                )
 
             if response.status_code in [200, 201]:
                 dataset_response = response.json()
                 return DatasetReadSchema(**dataset_response)
+            elif response.status_code == 413:
+                max_size = getattr(settings, 'MAX_DATASET_FILE_SIZE', 1073741824)
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"Upload file size exceeds maximum allowed limit ({max_size} bytes)"
+                )
             else:
                 raise HTTPException(
                     status_code=response.status_code,
@@ -346,12 +370,103 @@ class DatasetService:
             logger.error(f"Timeout creating dataset: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail="External service timeout"
+                detail="Dataset upload timeout (file may be too large)"
             )
         except HTTPException:
             raise
         except Exception as e:
             logger.error(f"Error creating dataset: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
+    async def update_dataset(
+            self,
+            dataset_id: int,
+            dataset_data: DatasetUpdateRequest,
+            user_info: Optional[Dict[str, str]] = None
+    ) -> DatasetReadSchema:
+        """데이터셋 수정"""
+        try:
+            url = f"{self.base_url}/datasets/{dataset_id}"
+
+            # None이 아닌 필드만 전송
+            update_payload = {k: v for k, v in dataset_data.model_dump().items() if v is not None}
+
+            logger.info(f"Updating dataset at: {url}")
+            logger.info(f"Update payload: {update_payload}")
+
+            response = await self._make_authenticated_request(
+                "PUT", url, user_info=user_info, json=update_payload
+            )
+
+            if response.status_code == 200:
+                return DatasetReadSchema(**response.json())
+            elif response.status_code == 404:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Dataset {dataset_id} not found"
+                )
+            else:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Failed to update dataset: {response.text}"
+                )
+
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout updating dataset {dataset_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="External service timeout"
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating dataset {dataset_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
+    async def delete_dataset(
+            self,
+            dataset_id: int,
+            user_info: Optional[Dict[str, str]] = None
+    ) -> bool:
+        """데이터셋 삭제"""
+        try:
+            url = f"{self.base_url}/datasets/{dataset_id}"
+
+            logger.info(f"Deleting dataset at: {url}")
+
+            response = await self._make_authenticated_request(
+                "DELETE", url, user_info=user_info
+            )
+
+            if response.status_code in [200, 204]:
+                return True
+            elif response.status_code == 404:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Dataset {dataset_id} not found"
+                )
+            else:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Failed to delete dataset: {response.text}"
+                )
+
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout deleting dataset {dataset_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="External service timeout"
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error deleting dataset {dataset_id}: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal error: {str(e)}"

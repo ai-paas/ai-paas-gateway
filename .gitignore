@@ -108,5 +108,6 @@ coverage.xml
 /.claude/
 /AGENTS.md
 
-# 보고서 (로컬 전용)
+# 로컬 전용 테스트
 docs/reports/
+/backups/
