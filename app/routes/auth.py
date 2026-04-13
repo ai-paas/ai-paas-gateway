@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from fastapi.security import HTTPAuthorizationCredentials
+from fastapi.security import HTTPAuthorizationCredentials, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
 from app.auth import AuthService, get_current_user, optional_security
@@ -54,6 +54,46 @@ def login(
     """로그인"""
     member = AuthService.authenticate_member(
         db, login_data.member_id, login_data.password
+    )
+
+    if not member:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect member_id or password"
+        )
+
+    if not member.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Account is deactivated"
+        )
+
+    access_token = AuthService.create_access_token(
+        data={"sub": member.member_id, "role": member.role}
+    )
+    refresh_token = AuthService.create_refresh_token(
+        data={"sub": member.member_id}
+    )
+
+    _set_refresh_token_cookie(response, refresh_token)
+    member_crud.update_last_login(db=db, member_id=member.member_id)
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "expires_in": settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    }
+
+
+@router.post("/token", response_model=TokenResponse)
+def login_for_swagger(
+        response: Response,
+        form_data: OAuth2PasswordRequestForm = Depends(),
+        db: Session = Depends(get_db)
+):
+    """Swagger OAuth2 password flow login. `username` 필드에 member_id를 입력."""
+    member = AuthService.authenticate_member(
+        db, form_data.username, form_data.password
     )
 
     if not member:
