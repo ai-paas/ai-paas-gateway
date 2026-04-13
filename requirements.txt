@@ -11,3 +11,4 @@ python-jose[cryptography]==3.5.0
 python-multipart==0.0.24
 starlette>=1.0.0
 httpx==0.28.1
+pytest==8.3.5
