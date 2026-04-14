@@ -58,6 +58,22 @@ class ExperimentCRUD:
         db.commit()
         return True
 
+    def update_mapping(self, db: Session, surro_experiment_id: int, member_id: str,
+                       update_data: dict) -> Optional[Experiment]:
+        """실험 매핑 로컬 캐시 업데이트"""
+        db_experiment = self.get_experiment_by_surro_id(db, surro_experiment_id, member_id)
+        if not db_experiment:
+            return None
+        if "name" in update_data:
+            db_experiment.name = update_data["name"]
+        if "description" in update_data:
+            db_experiment.description = update_data["description"]
+        db_experiment.updated_by = member_id
+        db_experiment.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(db_experiment)
+        return db_experiment
+
     def check_ownership(self, db: Session, surro_experiment_id: int, member_id: str) -> bool:
         """사용자가 해당 실험의 소유자인지 확인"""
         return self.get_experiment_by_surro_id(db, surro_experiment_id, member_id) is not None
