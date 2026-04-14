@@ -146,5 +146,81 @@ class ExperimentService:
             logger.error(f"Error getting experiment {experiment_id}: {str(e)}")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal error: {str(e)}")
 
+    async def update_experiment(self, experiment_id: int, update_data: Dict[str, Any],
+                                user_info: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """실험 수정 (name, description)"""
+        try:
+            url = f"{self.base_url}/experiments/{experiment_id}"
+            logger.info(f"Updating experiment {experiment_id}: {update_data}")
+
+            response = await self._make_authenticated_request(
+                "PATCH", url, user_info=user_info, json=update_data
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Experiment not found")
+            else:
+                raise HTTPException(status_code=response.status_code,
+                                    detail=f"Failed to update experiment: {response.text}")
+        except HTTPException:
+            raise
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="Experiment service timeout")
+        except Exception as e:
+            logger.error(f"Error updating experiment {experiment_id}: {str(e)}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal error: {str(e)}")
+
+    async def delete_experiment(self, experiment_id: int,
+                                user_info: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """실험 삭제 (MLflow artifact + S3 포함)"""
+        try:
+            url = f"{self.base_url}/experiments/{experiment_id}"
+            logger.info(f"Deleting experiment {experiment_id}")
+
+            response = await self._make_authenticated_request("DELETE", url, user_info=user_info)
+
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Experiment not found")
+            else:
+                raise HTTPException(status_code=response.status_code,
+                                    detail=f"Failed to delete experiment: {response.text}")
+        except HTTPException:
+            raise
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="Experiment service timeout")
+        except Exception as e:
+            logger.error(f"Error deleting experiment {experiment_id}: {str(e)}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal error: {str(e)}")
+
+    async def update_experiment_internal(self, experiment_id: int, update_data: Dict[str, Any],
+                                         user_info: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """실험 내부 상태 업데이트 (status, mlflow_run_id, kubeflow_run_id 등)"""
+        try:
+            url = f"{self.base_url}/experiments/{experiment_id}/internal-access"
+            logger.info(f"Updating experiment internal {experiment_id}: {update_data}")
+
+            response = await self._make_authenticated_request(
+                "PATCH", url, user_info=user_info, json=update_data
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Experiment not found")
+            else:
+                raise HTTPException(status_code=response.status_code,
+                                    detail=f"Failed to update experiment internal: {response.text}")
+        except HTTPException:
+            raise
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="Experiment service timeout")
+        except Exception as e:
+            logger.error(f"Error updating experiment internal {experiment_id}: {str(e)}")
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal error: {str(e)}")
+
 
 experiment_service = ExperimentService()
