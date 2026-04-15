@@ -229,9 +229,14 @@ async def get_knowledge_bases(
         external_kbs = await knowledge_base_service.get_knowledge_bases(user_info=user_info)
         # surro_knowledge_id를 키로 하는 딕셔너리 생성
         external_kb_map = {kb.id: kb for kb in external_kbs}
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.warning(f"Failed to fetch external knowledge bases: {str(e)}")
-        external_kb_map = {}
+        logger.error(f"Failed to fetch external knowledge bases: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to fetch knowledge base data from external API: {str(e)}"
+        )
 
     # 응답 데이터 구성 (DB 메타 정보 + 외부 API 데이터 병합)
     response_data = []

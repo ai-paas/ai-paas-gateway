@@ -25,7 +25,21 @@ router = APIRouter(prefix="/prompts", tags=["prompts"])
 async def get_variable_types(
         current_user=Depends(get_current_user)
 ):
-    """프롬프트 변수 가능한 타입 목록 조회"""
+    """
+    프롬프트 변수 가능한 타입 목록 조회
+
+    프롬프트에서 사용할 수 있는 변수 타입 목록을 조회합니다.
+
+    ## Response (200) — `PromptVariableTypeListSchema`
+
+    | 필드 | 타입 | 설명 |
+    |------|------|------|
+    | `available_types` | List[string] | 사용 가능한 변수 타입 목록 (현재는 "context"만 사용 가능) |
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 500: 서버 내부 오류
+    """
     user_info = {
         'member_id': current_user.member_id,
         'role': current_user.role,
@@ -42,7 +56,46 @@ async def create_prompt(
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
-    """프롬프트 생성"""
+    """
+    프롬프트 생성
+
+    새로운 프롬프트와 프롬프트 변수를 생성합니다.
+
+    ## Request Body (application/json) — `PromptCreateSchema`
+
+    - **prompt** (PromptBaseSchema, required): 프롬프트 기본 정보
+        - **name** (str, required): 프롬프트 이름
+        - **description** (str, optional): 프롬프트 설명
+        - **content** (str, required): 프롬프트 내용
+    - **prompt_variable** (List[str], optional): 프롬프트 변수 이름 목록
+
+    ## Response (200) — `PromptResponse`
+
+    | 필드 | 타입 | 설명 |
+    |------|------|------|
+    | `id` | integer | 게이트웨이 내부 프롬프트 ID |
+    | `surro_prompt_id` | integer | 외부 프롬프트 ID |
+    | `created_at` | datetime | 생성 시각 |
+    | `updated_at` | datetime | 최종 수정 시각 |
+    | `created_by` | string | 생성자 식별자 |
+    | `name` | string | 프롬프트 이름 |
+    | `description` | string \\| null | 프롬프트 설명 |
+    | `content` | string | 프롬프트 내용 |
+    | `prompt_variable` | List[PromptVariableReadSchema] \\| null | 프롬프트 변수 목록 |
+
+    ### PromptVariableReadSchema
+
+    | 필드 | 타입 | 설명 |
+    |------|------|------|
+    | `id` | integer | 변수 ID |
+    | `name` | string | 변수 이름 |
+    | `prompt_id` | integer | 프롬프트 ID |
+
+    ## Errors
+    - 400: 유효하지 않은 요청
+    - 401: 인증되지 않은 사용자
+    - 500: 서버 내부 오류
+    """
     user_info = {
         'member_id': current_user.member_id,
         'role': current_user.role,
@@ -100,14 +153,36 @@ async def get_prompts(
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
-    """프롬프트 목록 조회 (우리 DB 기준)
+    """
+    프롬프트 목록 조회
 
-    - **page**: 페이지 번호 (선택)
-    - **size**: 페이지당 항목 수 (선택)
-    - **search**: 검색어 (선택)
+    등록된 프롬프트 목록을 페이지네이션하여 조회합니다.
 
-    페이지네이션을 사용하려면 page와 size를 모두 제공해야 합니다.
-    생략 시 전체 데이터를 조회합니다 (최대 10000개).
+    ## Query Parameters
+
+    | 필드 | 타입 | 필수 | 설명 |
+    |------|------|------|------|
+    | `page` | integer | — | 페이지 번호 (1부터 시작, 생략 시 전체 데이터 조회) |
+    | `size` | integer | — | 페이지당 항목 수 (1-1000, 생략 시 전체 데이터 조회) |
+    | `search` | string | — | 검색어 (이름, 설명, 내용) |
+
+    ## Response (200) — `PromptListResponse`
+
+    | 필드 | 타입 | 설명 |
+    |------|------|------|
+    | `data` | List[PromptResponse] | 프롬프트 목록 |
+    | `total` | integer | 전체 프롬프트 수 |
+    | `page` | integer \\| null | 현재 페이지 번호 |
+    | `size` | integer \\| null | 페이지당 항목 수 |
+
+    ## Notes
+    - page와 size를 모두 생략하면 전체 데이터를 조회 (최대 10000개)
+    - page와 size 중 하나라도 생략하면 전체 데이터를 조회합니다
+    - 페이지네이션 사용 시 page와 size를 모두 제공해야 합니다
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 500: 서버 내부 오류
     """
     skip = None
     limit = None
@@ -126,21 +201,16 @@ async def get_prompts(
     )
 
     # prompt_variable 정규화
+    from app.schemas.prompt import PromptVariableReadSchema
     response_data = []
     for db_prompt in prompts:
         # prompt_variable 처리
         prompt_vars = None
-        if db_prompt.prompt_variable:
-            # JSON 데이터가 문자열 리스트인 경우
-            if isinstance(db_prompt.prompt_variable, list):
-                # 문자열 리스트는 None으로 처리하거나 빈 리스트로 처리
-                # (PromptVariableReadSchema는 id, name, prompt_id가 필요하므로)
-                prompt_vars = None
-            # 딕셔너리 리스트인 경우 (외부 API 응답 형식)
-            elif isinstance(db_prompt.prompt_variable, list) and len(db_prompt.prompt_variable) > 0:
-                if isinstance(db_prompt.prompt_variable[0], dict):
-                    from app.schemas.prompt import PromptVariableReadSchema
-                    prompt_vars = [PromptVariableReadSchema(**var) for var in db_prompt.prompt_variable]
+        if db_prompt.prompt_variable and isinstance(db_prompt.prompt_variable, list) and len(db_prompt.prompt_variable) > 0:
+            # 딕셔너리 리스트인 경우 (외부 API 응답 형식) → PromptVariableReadSchema로 변환
+            if isinstance(db_prompt.prompt_variable[0], dict):
+                prompt_vars = [PromptVariableReadSchema(**var) for var in db_prompt.prompt_variable]
+            # 문자열 리스트인 경우 → 스키마 변환 불가, None 유지
 
         response_data.append(PromptResponse(
             id=db_prompt.id,
@@ -168,7 +238,36 @@ async def get_prompt(
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
-    """프롬프트 상세 정보 조회 (우리 DB 기준)"""
+    """
+    프롬프트 조회
+
+    특정 프롬프트의 상세 정보를 조회합니다.
+
+    ## Path Parameters
+
+    | 필드 | 타입 | 설명 |
+    |------|------|------|
+    | `surro_prompt_id` | integer | 조회할 프롬프트 ID |
+
+    ## Response (200) — `PromptDetailResponse`
+
+    | 필드 | 타입 | 설명 |
+    |------|------|------|
+    | `id` | integer | 게이트웨이 내부 프롬프트 ID |
+    | `surro_prompt_id` | integer | 외부 프롬프트 ID |
+    | `created_at` | datetime | 생성 시각 |
+    | `updated_at` | datetime | 최종 수정 시각 |
+    | `created_by` | string | 생성자 식별자 |
+    | `name` | string | 프롬프트 이름 |
+    | `description` | string \\| null | 프롬프트 설명 |
+    | `content` | string | 프롬프트 내용 |
+    | `prompt_variable` | List[PromptVariableReadSchema] \\| null | 프롬프트 변수 목록 |
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 404: 프롬프트를 찾을 수 없음
+    - 500: 서버 내부 오류
+    """
     # DB에서 조회
     db_prompt = prompt_crud.get_prompt_by_surro_id(db=db, surro_prompt_id=surro_prompt_id)
     if not db_prompt:
@@ -206,9 +305,46 @@ async def update_prompt(
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
-    """프롬프트 정보 수정 (외부 API만 수정)
+    """
+    프롬프트 수정
 
-    - **surro_prompt_id**: 외부 API의 프롬프트 ID
+    기존 프롬프트의 정보를 수정합니다.
+
+    ## Path Parameters
+
+    | 필드 | 타입 | 설명 |
+    |------|------|------|
+    | `surro_prompt_id` | integer | 수정할 프롬프트 ID |
+
+    ## Request Body (application/json) — `PromptUpdateSchema`
+
+    | 필드 | 타입 | 필수 | 설명 |
+    |------|------|------|------|
+    | `name` | string | — | 프롬프트 이름 |
+    | `description` | string | — | 프롬프트 설명 |
+    | `content` | string | — | 프롬프트 내용 |
+    | `prompt_variable` | List[string] | — | 프롬프트 변수 이름 목록 |
+
+    ## Response (200) — `PromptResponse`
+
+    | 필드 | 타입 | 설명 |
+    |------|------|------|
+    | `id` | integer | 게이트웨이 내부 프롬프트 ID |
+    | `surro_prompt_id` | integer | 외부 프롬프트 ID |
+    | `created_at` | datetime | 생성 시각 |
+    | `updated_at` | datetime | 최종 수정 시각 |
+    | `created_by` | string | 생성자 식별자 |
+    | `name` | string | 프롬프트 이름 |
+    | `description` | string \\| null | 프롬프트 설명 |
+    | `content` | string | 프롬프트 내용 |
+    | `prompt_variable` | List[PromptVariableReadSchema] \\| null | 프롬프트 변수 목록 |
+
+    ## Errors
+    - 400: 유효하지 않은 요청
+    - 401: 인증되지 않은 사용자
+    - 403: 권한 없음
+    - 404: 프롬프트를 찾을 수 없음
+    - 500: 서버 내부 오류
     """
     # UUID로 우리 DB에서 기존 프롬프트 조회 (권한 확인용)
     existing_prompt = prompt_crud.get_prompt_by_surro_id(db=db, surro_prompt_id=surro_prompt_id)
@@ -313,9 +449,25 @@ async def delete_prompt(
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
-    """프롬프트 삭제
+    """
+    프롬프트 삭제
 
-    - **surro_prompt_id**: 외부 API의 프롬프트 ID
+    프롬프트와 관련된 모든 변수를 삭제합니다.
+
+    ## Path Parameters
+
+    | 필드 | 타입 | 설명 |
+    |------|------|------|
+    | `surro_prompt_id` | integer | 삭제할 프롬프트 ID |
+
+    ## Response
+    - 204: 삭제 성공 (응답 본문 없음)
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 403: 권한 없음
+    - 404: 프롬프트를 찾을 수 없음
+    - 500: 서버 내부 오류
     """
     # 외부 ID로 우리 DB에서 기존 프롬프트 조회
     existing_prompt = prompt_crud.get_prompt_by_surro_id(db=db, surro_prompt_id=surro_prompt_id)
