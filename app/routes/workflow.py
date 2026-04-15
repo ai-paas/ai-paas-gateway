@@ -229,24 +229,16 @@ async def get_workflows(
                         template_id=external_wf.template_id
                     )
                 )
+            else:
+                # 외부 API에서 해당 워크플로우를 찾지 못한 경우 (404)
+                logger.warning(f"Workflow {wf.surro_workflow_id} not found in external API, skipping")
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error fetching workflow {wf.surro_workflow_id}: {str(e)}")
-            # 외부 API 조회 실패시에도 DB 정보라도 표시
-            response_data.append(
-                WorkflowResponse(
-                    id=wf.id,
-                    surro_workflow_id=wf.surro_workflow_id,
-                    created_at=wf.created_at,
-                    updated_at=wf.updated_at,
-                    created_by=wf.created_by,
-                    name=wf.name,
-                    description=wf.description,
-                    category=None,
-                    status="UNKNOWN",
-                    service_id=None,
-                    is_template=False,
-                    template_id=None
-                )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to fetch workflow data from external API: {str(e)}"
             )
 
     return WorkflowListResponse(
