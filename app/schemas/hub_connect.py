@@ -120,6 +120,15 @@ class HubModelFilesWrapper(BaseModel):
     """허브 모델 파일 목록 래퍼"""
     data: List[ModelFileInfo] = Field(..., description="파일 목록")
 
+
+class ModelDownloadResponse(BaseModel):
+    """모델 파일 다운로드 결과 응답"""
+    download_type: str = Field(..., description="다운로드 처리 방식")
+    file_path: str = Field(..., description="서버에 저장된 파일 경로")
+    file_size: int = Field(..., description="저장된 파일 크기(byte)")
+    filename: str = Field(..., description="다운로드한 파일명")
+    model_id: str = Field(..., description="대상 모델 ID")
+
 class ExtendedHubModelResponse(BaseModel):
     # 외부 API 필드들
     id: str = Field(..., description="모델 ID")
@@ -196,6 +205,11 @@ class TagGroupResponse(BaseModel):
     """특정 그룹의 태그 리스트 응답"""
     data: List[TagItem] = Field(..., description="태그 목록")
     remaining_count: int = Field(0, description="남은 태그 개수")
+
+
+class TagGroupAllResponse(BaseModel):
+    """특정 태그 그룹 전체 조회 응답"""
+    data: List[TagItem] = Field(..., description="태그 전체 목록")
 
 class TagsParams(BaseModel):
     """태그 조회 파라미터"""
