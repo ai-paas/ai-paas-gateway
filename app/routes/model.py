@@ -153,15 +153,36 @@ async def get_all_models(
         current_user: Member = Depends(get_current_user)
 ):
     """
-    전체 모델 조회 (커스텀 모델 + 카탈로그 모델, 페이지네이션 포함)
-    filter_type으로 특정 타입만 조회 가능
+    모델 목록 조회
+
+    현재 사용자가 등록한 모델 목록을 조회합니다.
+    페이지네이션을 지원하며, 모델 타입/프로바이더/포맷/공개 범위 기준으로 필터링할 수 있습니다.
+
+    ## Query Parameters
+
+    - **page**: 페이지 번호 (기본값: 1)
+    - **page_size**: 페이지당 항목 수 (기본값: 20, 최대값은 외부 API 정책에 따름)
+    - **model_type_id**: 모델 타입 ID로 필터링
+    - **model_provider_id**: 모델 프로바이더 ID로 필터링
+    - **model_format_id**: 모델 포맷 ID로 필터링
+    - **visibility**: 공개 범위 필터 (`catalog`, `custom`)
+
+    ## Notes
+
+    - `catalog`는 시스템에서 제공하는 카탈로그 모델을 의미합니다.
+    - `custom`은 사용자가 직접 등록한 커스텀 모델을 의미합니다.
+    - 필터를 지정하지 않으면 전체 모델을 조회합니다.
     """
     try:
-        # 1. Surro API에서 전체 모델 조회
+        # 1. Surro API에서 모델 조회 (MLOps 파라미터 변환은 서비스 내부에서 처리)
         all_surro_models = await model_service.get_models(
             skip=0,
             limit=1000,
-            search=None,
+            search=search,
+            provider_id=model_provider_id,
+            type_id=model_type_id,
+            format_id=model_format_id,
+            filter_type=filter_type,
             user_info={
                 'member_id': current_user.member_id,
                 'role': current_user.role,
@@ -435,7 +456,10 @@ async def get_providers(
         current_user: Member = Depends(get_current_user)
 ):
     """
-    사용 가능한 프로바이더 목록 조회 (페이지네이션 포함)
+    모델 프로바이더 목록 조회
+
+    등록 가능한 모델 프로바이더 목록을 조회합니다.
+    페이지네이션을 지원합니다.
     """
     try:
         all_providers_data = await model_service.get_model_providers(
@@ -488,7 +512,10 @@ async def get_model_types(
         current_user: Member = Depends(get_current_user)
 ):
     """
-    사용 가능한 모델 타입 목록 조회 (페이지네이션 포함)
+    모델 타입 목록 조회
+
+    등록 가능한 모델 타입 목록을 조회합니다.
+    페이지네이션을 지원합니다.
     """
     try:
         all_types_data = await model_service.get_model_types(
@@ -541,7 +568,10 @@ async def get_model_formats(
         current_user: Member = Depends(get_current_user)
 ):
     """
-    사용 가능한 모델 포맷 목록 조회 (페이지네이션 포함)
+    모델 포맷 목록 조회
+
+    등록 가능한 모델 포맷 목록을 조회합니다.
+    페이지네이션을 지원합니다.
     """
     try:
         # format_name 없이 전체 데이터 가져오기
@@ -587,14 +617,22 @@ async def get_model_formats(
 
 @router.get("/{model_id}", response_model=ModelResponse)
 async def get_model(
-        model_id: int = Path(..., description="모델 ID (Surro API 모델 ID)"),
+    model_id: int = Path(..., description="조회할 모델 ID"),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    특정 모델 상세 정보 조회
+    모델 상세 조회
 
-    - 현재 사용자가 소유한 모델인지 확인 후 상세 정보를 반환합니다.
+    특정 모델의 상세 정보를 조회합니다.
+
+    ## Path Parameters
+
+    - **model_id**: 조회할 모델 ID
+
+    ## Notes
+
+    - 모델이 존재하지 않으면 404 오류를 반환합니다.
     """
     try:
         # 1. 사용자가 해당 모델을 소유하고 있는지 확인
@@ -643,15 +681,22 @@ async def get_model(
 
 @router.delete("/{model_id}")
 async def delete_model(
-        model_id: int = Path(..., description="모델 ID (Surro API 모델 ID)"),
+    model_id: int = Path(..., description="삭제할 모델 ID"),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
     """
     모델 삭제
 
-    - 현재 사용자가 소유한 모델만 삭제할 수 있습니다.
-    - Surro API에서 모델을 삭제한 후, Inno DB의 매핑도 삭제합니다.
+    특정 모델을 삭제합니다.
+
+    ## Path Parameters
+
+    - **model_id**: 삭제할 모델 ID
+
+    ## Notes
+
+    - 모델이 존재하지 않으면 404 오류를 반환합니다.
     """
     try:
         # 1. 사용자가 해당 모델을 소유하고 있는지 확인

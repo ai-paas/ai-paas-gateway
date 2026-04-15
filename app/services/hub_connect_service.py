@@ -8,7 +8,7 @@ from app.config import settings
 from app.schemas.hub_connect import (
     HubModelResponse, ModelListParams, ModelListResponse,
     ModelFileInfo, ModelFilesResponse, ExtendedHubModelResponse,
-    TagListParams, TagListResponse, TagGroupResponse, TagItem
+    TagListParams, TagListResponse, TagGroupResponse, TagGroupAllResponse, TagItem
 )
 
 logger = logging.getLogger(__name__)
@@ -385,6 +385,56 @@ class HubConnectService:
                 detail=f"Internal error: {str(e)}"
             )
 
+    async def download_model_file(
+            self,
+            model_id: str,
+            filename: str,
+            market: str,
+            download_dir: Optional[str] = None,
+            user_info: Optional[Dict[str, str]] = None
+    ) -> Any:
+        """모델 파일 다운로드"""
+        try:
+            url = f"{self.base_url}/models/{model_id}/download"
+            params = {
+                "filename": filename,
+                "market": market
+            }
+            if download_dir:
+                params["download_dir"] = download_dir
+
+            logger.info(f"Downloading model file from: {url}")
+
+            response = await self._make_authenticated_request(
+                "GET", url, user_info=user_info, params=params
+            )
+
+            if response.status_code == 200:
+                content_type = response.headers.get("content-type", "")
+                if "application/json" in content_type:
+                    return response.json()
+                return response
+
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Failed to download model file: {response.text}"
+            )
+
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout downloading model file {model_id}/{filename}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Hub service timeout"
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error downloading model file {model_id}/{filename}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
     async def get_all_tags(self, market: str, user_info: Optional[Dict[str, str]] = None) -> TagListResponse:
         """전체 태그 목록 조회"""
         try:
@@ -439,6 +489,69 @@ class HubConnectService:
             raise
         except Exception as e:
             logger.error(f"Error getting tags: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
+    async def get_all_tags_by_group(
+            self,
+            group: str,
+            market: str,
+            user_info: Optional[Dict[str, str]] = None
+    ) -> TagGroupAllResponse:
+        """특정 그룹의 전체 태그 목록 조회"""
+        try:
+            external_group = "pipeline_tag" if group == "task" else group
+            url = f"{self.base_url}/tags/{external_group}/all"
+            params = {"market": market}
+
+            logger.info(
+                f"Getting all tags for group '{group}' (external: '{external_group}') from: {url} with market: {market}"
+            )
+
+            response = await self._make_authenticated_request(
+                "GET", url, user_info=user_info, params=params
+            )
+
+            if response.status_code == 200:
+                group_data = response.json()
+                data_list = group_data.get('data', []) if isinstance(group_data, dict) else group_data
+
+                tag_items = []
+                for item_dict in data_list:
+                    try:
+                        if item_dict.get("type") == "pipeline_tag":
+                            item_dict["type"] = "task"
+                        tag_item = TagItem(**item_dict)
+                        tag_items.append(tag_item)
+                    except Exception as e:
+                        logger.warning(f"Failed to parse tag item: {e}")
+                        continue
+
+                return TagGroupAllResponse(data=tag_items)
+
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Failed to get all tags for group '{group}': {response.text}"
+            )
+
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout getting all tags for group '{group}': {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Tag service timeout"
+            )
+        except httpx.ConnectError as e:
+            logger.error(f"Connection error getting all tags for group '{group}': {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Tag service unavailable"
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting all tags for group '{group}': {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal error: {str(e)}"

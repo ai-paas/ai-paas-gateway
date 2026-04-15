@@ -50,7 +50,7 @@ class AnyCloudCRUD:
             cache_key=cache_key,
             tags=tags,
             category=category,
-            metadata=metadata
+            metadata_json=metadata
         )
         db.add(db_data)
         db.commit()

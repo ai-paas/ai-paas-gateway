@@ -164,37 +164,74 @@ class ModelService:
 
         return response
 
+    @staticmethod
+    def _normalize_list_response(payload) -> list:
+        """MLOps API 응답을 리스트로 정규화 (신형: [...], 구형: {data:[...]}, {items:[...]})"""
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            if "items" in payload and isinstance(payload["items"], list):
+                return payload["items"]
+            if "data" in payload and isinstance(payload["data"], list):
+                return payload["data"]
+        logger.warning(f"Unexpected model list response format: {type(payload)}")
+        return payload if isinstance(payload, list) else []
+
     async def get_models(
             self,
             skip: int = 0,
             limit: int = 100,
             search: Optional[str] = None,
+            provider_id: Optional[int] = None,
+            type_id: Optional[int] = None,
+            format_id: Optional[int] = None,
+            filter_type: Optional[str] = None,
             user_info: Optional[Dict[str, str]] = None
     ) -> List[ModelResponse]:
-        """모든 모델 목록 조회 (필터링용)"""
+        """모든 모델 목록 조회 (필터링용) - 프론트 파라미터를 MLOps 파라미터로 변환"""
         try:
             url = f"{self.base_url}/models"
+
+            # 프론트 파라미터 → MLOps 파라미터 변환
+            # skip/limit → page/page_size
+            page = (skip // limit) + 1 if limit > 0 else 1
             params = {
-                "skip": skip,
-                "limit": limit
+                "page": page,
+                "page_size": limit
             }
 
-            # 필터 파라미터 추가
+            # 필터 파라미터 변환 (0도 유효한 값이므로 is not None)
+            if provider_id is not None:
+                params["model_provider_id"] = provider_id
+            if type_id is not None:
+                params["model_type_id"] = type_id
+            if format_id is not None:
+                params["model_format_id"] = format_id
+            # filter_type → visibility 변환
+            if filter_type:
+                params["visibility"] = filter_type
+            # search 파라미터
             if search:
                 params["search"] = search
 
             logger.info(f"Getting models from: {url}")
-            logger.info(f"Parameters: {params}")
+            logger.info(f"Parameters (converted): {params}")
 
             response = await self._make_authenticated_request(
                 "GET", url, user_info=user_info, params=params
             )
 
             if response.status_code == 200:
-                models_data = response.json()
-                # 리스트가 아닌 경우 처리
-                if isinstance(models_data, dict) and 'items' in models_data:
-                    models_data = models_data['items']
+                models_data = self._normalize_list_response(response.json())
+
+                # backend가 search를 지원하지 않는 경우 대비 후처리 필터
+                if search and models_data:
+                    q = search.lower()
+                    models_data = [
+                        m for m in models_data
+                        if q in (m.get("name") or "").lower()
+                        or q in (m.get("description") or "").lower()
+                    ]
 
                 # ModelResponse 객체 리스트로 변환
                 models = []

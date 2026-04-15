@@ -1,57 +1,71 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
-from contextlib import asynccontextmanager
-from app.config import settings
-from app.routes import service, member, auth, workflow, model, dataset, hub_connect, any_cloud, lite_model, prompt, knowledge_base
-import uvicorn
 import logging
+from contextlib import asynccontextmanager
 
-# 로깅 설정
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL.upper()),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+import uvicorn
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.config import settings
+from app.logging_config import configure_logging
+from app.middleware import RequestLoggingMiddleware
+from app.routes import (
+    any_cloud,
+    auth,
+    dataset,
+    experiment,
+    hub_connect,
+    knowledge_base,
+    lite_model,
+    member,
+    model,
+    model_improvement,
+    pipeline,
+    prompt,
+    service,
+    workflow,
 )
+
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """애플리케이션 라이프사이클 관리"""
-    # 시작 시
     logger.info("Starting AIPaaS Gateway API")
-
     yield
-
-    # 종료 시
     logger.info("Shutting down AIPaaS Gateway API")
 
 
-# FastAPI 앱 초기화
 app = FastAPI(
     title=settings.PROJECT_NAME,
     description="AI PaaS Gateway API with Proxy Support",
     version="1.0.0",
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    lifespan=lifespan
+    lifespan=lifespan,
+    swagger_ui_parameters={
+        "docExpansion": "none",
+    },
 )
 
-# CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=settings.CORS_ALLOW_ORIGINS,
+    allow_origin_regex=settings.CORS_ALLOW_ORIGIN_REGEX or None,
+    allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
+    allow_methods=settings.CORS_ALLOW_METHODS,
+    allow_headers=settings.CORS_ALLOW_HEADERS,
 )
+app.add_middleware(RequestLoggingMiddleware)
 
-# 라우터 등록
 app.include_router(auth.router, prefix=settings.API_V1_STR)
 app.include_router(service.router, prefix=settings.API_V1_STR)
 app.include_router(member.router, prefix=settings.API_V1_STR)
 app.include_router(workflow.router, prefix=settings.API_V1_STR)
-app.include_router(model.router, prefix=settings.API_V1_STR)
 app.include_router(dataset.router, prefix=settings.API_V1_STR)
+app.include_router(pipeline.router, prefix=settings.API_V1_STR)
+app.include_router(experiment.router, prefix=settings.API_V1_STR)
+app.include_router(model_improvement.router, prefix=settings.API_V1_STR)
+app.include_router(model.router, prefix=settings.API_V1_STR)
 app.include_router(prompt.router, prefix=settings.API_V1_STR)
 app.include_router(knowledge_base.router, prefix=settings.API_V1_STR)
 app.include_router(hub_connect.router, prefix=settings.API_V1_STR)
@@ -65,7 +79,7 @@ app.include_router(lite_model.router_optimize, prefix=settings.API_V1_STR)
 app.include_router(lite_model.router_task, prefix=settings.API_V1_STR)
 app.include_router(lite_model.router_model, prefix=settings.API_V1_STR)
 
-# 기본 엔드포인트
+
 @app.get("/")
 def read_root():
     return {
@@ -76,12 +90,11 @@ def read_root():
     }
 
 
-# 헬스체크 엔드포인트
 @app.get("/health")
 def health_check():
     return {
         "status": "healthy",
-        "database_configured": bool(settings.DATABASE_URL)
+        "database_configured": bool(settings.DATABASE_URL),
     }
 
 
@@ -91,5 +104,6 @@ if __name__ == "__main__":
         host=settings.HOST,
         port=settings.PORT,
         reload=settings.DEBUG,
-        log_level=settings.LOG_LEVEL
+        log_level=settings.LOG_LEVEL,
+        access_log=settings.LOG_UVICORN_ACCESS_ENABLED,
     )

@@ -448,7 +448,7 @@ async def helm_repo_delete_api(
 # 클러스터 내 노드별 상태 조회 API
 @router_monit.get("/monit/nodeStatus/{cluster_name}")
 async def get_monitoring_cluster_node(
-        cluster_name: str = Path(..., description="조회할 cluster 이름", example="openstack"),
+        cluster_name: str = Path(..., description="조회할 cluster 이름", examples=["openstack"]),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -499,9 +499,9 @@ async def get_monitoring_cluster_node(
 )
 async def get_monitoring_metric(
         request: Request,
-        cluster_name: str = Path(..., description="조회할 cluster 이름", example="openstack"),
-        type: str = Path(..., description="메트릭 타입", example="cpu"),
-        key: str = Path(..., description="조회할 메트릭 key", example="usage_namespace"),
+        cluster_name: str = Path(..., description="조회할 cluster 이름", examples=["openstack"]),
+        type: str = Path(..., description="메트릭 타입", examples=["cpu"]),
+        key: str = Path(..., description="조회할 메트릭 key", examples=["usage_namespace"]),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -536,8 +536,8 @@ async def get_monitoring_metric(
 @router_package.get("/kubernetes/{resource_type}", response_model=AnyCloudPagedResponse)
 async def get_kubernetes_resource(
         resource_type: str = Path(..., description="조회할 Resource 타입"),
-        clusterName: str = Query(..., description="조회할 cluster 이름", example="aws-kubernetes-001"),
-        namespace: str = Query("", description="조회할 namespace 이름", example="default"),
+        clusterName: str = Query(..., description="조회할 cluster 이름", examples=["aws-kubernetes-001"]),
+        namespace: str = Query("", description="조회할 namespace 이름", examples=["default"]),
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
         search: Optional[str] = Query(None, description="검색어 (리소스 이름 등)"),
@@ -573,10 +573,10 @@ async def get_kubernetes_resource(
 # 클러스터 특정 리소스 목록 조회 API
 @router_package.get("/kubernetes/{resource_type}/{resource_name}", response_model=AnyCloudResponse)
 async def get_kubernetes_resource_name(
-        resource_type: str = Path(..., description="조회할 Resource 타입 (예 : daemonSets. deployments, replicaSets, statefulSets, jobs, cronJobs, endpoints, namespaces, nodes, persistentVolumes, persistentVolumeClaims, pods, secrets,servies, serviceAccounts, configMaps, events, roles, roleBindings, clusterRoles, clusterRoleBindings, horizontalPodAuoscalers, ingresses, storageClasses)", example="nodes"),
-        resource_name: str = Path(..., description="조회할 Resource 이름", example="master"),
-        clusterName: str = Query(..., description="조회할 cluster 이름", example="aws-kubernetes-001"),
-        namespace: str = Query("", description="조회할 namespace 이름", example="default"),
+        resource_type: str = Path(..., description="조회할 Resource 타입 (예 : daemonSets. deployments, replicaSets, statefulSets, jobs, cronJobs, endpoints, namespaces, nodes, persistentVolumes, persistentVolumeClaims, pods, secrets,servies, serviceAccounts, configMaps, events, roles, roleBindings, clusterRoles, clusterRoleBindings, horizontalPodAuoscalers, ingresses, storageClasses)", examples=["nodes"]),
+        resource_name: str = Path(..., description="조회할 Resource 이름", examples=["master"]),
+        clusterName: str = Query(..., description="조회할 cluster 이름", examples=["aws-kubernetes-001"]),
+        namespace: str = Query("", description="조회할 namespace 이름", examples=["default"]),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -607,10 +607,10 @@ async def get_kubernetes_resource_name(
 # 클러스터 특정 리소스 삭제 API
 @router_package.delete("/kubernetes/{resource_type}/{resource_name}", response_model=AnyCloudResponse)
 async def delete_kubernetes_resource_name(
-        resource_type: str = Path(..., description="조회할 Resource 타입 (예 : daemonSets. deployments, replicaSets, statefulSets, jobs, cronJobs, endpoints, namespaces, nodes, persistentVolumes, persistentVolumeClaims, pods, secrets,servies, serviceAccounts, configMaps, events, roles, roleBindings, clusterRoles, clusterRoleBindings, horizontalPodAuoscalers, ingresses, storageClasses)", example="nodes"),
-        resource_name: str = Path(..., description="조회할 Resource 이름", example="master"),
-        clusterName: str = Query(..., description="조회할 cluster 이름", example="aws-kubernetes-001"),
-        namespace: str = Query("", description="조회할 namespace 이름", example="default"),
+        resource_type: str = Path(..., description="조회할 Resource 타입 (예 : daemonSets. deployments, replicaSets, statefulSets, jobs, cronJobs, endpoints, namespaces, nodes, persistentVolumes, persistentVolumeClaims, pods, secrets,servies, serviceAccounts, configMaps, events, roles, roleBindings, clusterRoles, clusterRoleBindings, horizontalPodAuoscalers, ingresses, storageClasses)", examples=["nodes"]),
+        resource_name: str = Path(..., description="조회할 Resource 이름", examples=["master"]),
+        clusterName: str = Query(..., description="조회할 cluster 이름", examples=["aws-kubernetes-001"]),
+        namespace: str = Query("", description="조회할 namespace 이름", examples=["default"]),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -641,7 +641,7 @@ async def delete_kubernetes_resource_name(
 # 클러스터 연결 테스트 API
 @router_package.get("/kubernetes/test-connection", response_model=AnyCloudResponse)
 async def test_cluster(
-        clusterName: str = Query(..., description="조회할 cluster 이름", example="openstack"),
+        clusterName: str = Query(..., description="조회할 cluster 이름", examples=["openstack"]),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -669,8 +669,8 @@ async def test_cluster(
 # 카탈로그 목록 조회 API
 @router_catalog.get("/catalog/releases", response_model=AnyCloudPagedResponse)
 async def get_helm_releases(
-        clusterId: str = Query(..., description="조회할 cluster ID", example="aws-kubernetes-001"),
-        namespace: str = Query("", description="조회할 namespace 이름", example="default"),
+        clusterId: str = Query(..., description="조회할 cluster ID", examples=["aws-kubernetes-001"]),
+        namespace: str = Query("", description="조회할 namespace 이름", examples=["default"]),
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
         search: Optional[str] = Query(None, description="검색어 (릴리즈 이름 등)"),
@@ -705,7 +705,7 @@ async def get_helm_releases(
 # 카탈로그 목록 조회 API
 @router_catalog.get("/catalog/{repoName}", response_model=AnyCloudPagedResponse)
 async def get_catalog_list(
-        repoName: str = Path(..., description="Helm repository 이름", example="chart-museum-external"),
+        repoName: str = Path(..., description="Helm repository 이름", examples=["chart-museum-external"]),
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
         search: Optional[str] = Query(None, description="검색어 (차트 이름 등)"),
@@ -739,9 +739,9 @@ async def get_catalog_list(
 # 차트 상세 조회 API
 @router_catalog.get("/catalog/{repoName}/{chartName}/detail")
 async def get_catalog_detail(
-        repoName: str = Path(..., description="Helm repository 이름", example="chart-museum-external"),
-        chartName: str = Path(..., description="조회할 차트 이름", example="nginx"),
-        version: str = Query("", description="차트 버전 (선택사항, 없으면 최신 버전)", example="22.1.1"),
+        repoName: str = Path(..., description="Helm repository 이름", examples=["chart-museum-external"]),
+        chartName: str = Path(..., description="조회할 차트 이름", examples=["nginx"]),
+        version: str = Query("", description="차트 버전 (선택사항, 없으면 최신 버전)", examples=["22.1.1"]),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -771,9 +771,9 @@ async def get_catalog_detail(
 # 차트 README.md 조회 API
 @router_catalog.get("/catalog/{repoName}/{chartName}/readme")
 async def get_catalog_readme(
-        repoName: str = Path(..., description="Helm repository 이름", example="chart-museum-external"),
-        chartName: str = Path(..., description="조회할 차트 이름", example="nginx"),
-        version: str = Query("", description="차트 버전 (선택사항)", example="15.4.4"),
+        repoName: str = Path(..., description="Helm repository 이름", examples=["chart-museum-external"]),
+        chartName: str = Path(..., description="조회할 차트 이름", examples=["nginx"]),
+        version: str = Query("", description="차트 버전 (선택사항)", examples=["15.4.4"]),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -803,11 +803,11 @@ async def get_catalog_readme(
 # 차트 배포 상태 조회 API
 @router_catalog.get("/catalog/{repoName}/{chartName}/status")
 async def get_catalog_status(
-        repoName: str = Path(..., description="Helm repository 이름", example="chart-museum-external"),
-        chartName: str = Path(..., description="조회할 차트 이름", example="nginx"),
-        releaseName: str = Query(..., description="릴리즈 이름", example="nginx-test-release"),
-        clusterId: str = Query(..., description="클러스터 ID", example="cluster-001"),
-        namespace: str = Query("", description="네임스페이스", example="default"),
+        repoName: str = Path(..., description="Helm repository 이름", examples=["chart-museum-external"]),
+        chartName: str = Path(..., description="조회할 차트 이름", examples=["nginx"]),
+        releaseName: str = Query(..., description="릴리즈 이름", examples=["nginx-test-release"]),
+        clusterId: str = Query(..., description="클러스터 ID", examples=["cluster-001"]),
+        namespace: str = Query("", description="네임스페이스", examples=["default"]),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -839,9 +839,9 @@ async def get_catalog_status(
 # 차트 values.yaml 조회 API
 @router_catalog.get("/catalog/{repoName}/{chartName}/values")
 async def get_catalog_values(
-        repoName: str = Path(..., description="Helm repository 이름", example="chart-museum-external"),
-        chartName: str = Path(..., description="조회할 차트 이름", example="nginx"),
-        version: str = Query("", description="차트 버전 (선택사항)", example="15.4.4"),
+        repoName: str = Path(..., description="Helm repository 이름", examples=["chart-museum-external"]),
+        chartName: str = Path(..., description="조회할 차트 이름", examples=["nginx"]),
+        version: str = Query("", description="차트 버전 (선택사항)", examples=["15.4.4"]),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -871,9 +871,9 @@ async def get_catalog_values(
 # 차트 resources.yaml 조회 API
 @router_catalog.get("/catalog/releases/{releaseName}/resources")
 async def get_catalog_resources(
-        clusterId: str = Query(..., description="클러스터 ID", example="cluster-001"),
-        namespace: str = Query(..., description="네임스페이스", example="default"),
-        releaseName: str = Path(..., description="릴리즈 이름", example="nginx-test-release"),
+        clusterId: str = Query(..., description="클러스터 ID", examples=["cluster-001"]),
+        namespace: str = Query(..., description="네임스페이스", examples=["default"]),
+        releaseName: str = Path(..., description="릴리즈 이름", examples=["nginx-test-release"]),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -903,12 +903,12 @@ async def get_catalog_resources(
 
 @router_catalog.post("/catalog/{repoName}/{chartName}/deploy")
 async def post_catalog_deploy(
-        repoName: str = Path(..., description="Helm repository 이름", example="my-repo"),
-        chartName: str = Path(..., description="차트 이름", example="nginx"),
-        releaseName: str = Form(..., description="Helm 릴리즈 이름", example="my-nginx"),
-        clusterId: str = Form(..., description="배포할 클러스터 ID", example="cluster-001"),
-        namespace: str = Form(default="default", description="배포할 네임스페이스", example="default"),
-        version: Optional[str] = Form(default=None, description="차트 버전 (미지정시 최신 버전)", example="15.4.4"),
+        repoName: str = Path(..., description="Helm repository 이름", examples=["my-repo"]),
+        chartName: str = Path(..., description="차트 이름", examples=["nginx"]),
+        releaseName: str = Form(..., description="Helm 릴리즈 이름", examples=["my-nginx"]),
+        clusterId: str = Form(..., description="배포할 클러스터 ID", examples=["cluster-001"]),
+        namespace: str = Form(default="default", description="배포할 네임스페이스", examples=["default"]),
+        version: Optional[str] = Form(default=None, description="차트 버전 (미지정시 최신 버전)", examples=["15.4.4"]),
         valuesFile: Optional[UploadFile] = File(default=None, description="파일 선택"),
         current_user: Member = Depends(get_current_user)
 ):

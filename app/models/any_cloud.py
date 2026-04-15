@@ -45,7 +45,7 @@ class AnyCloudData(Base):
     category = Column(String(100), nullable=True, comment="데이터 카테고리")
 
     # 추가 메타데이터
-    metadata = Column(JSON, nullable=True, comment="추가 메타데이터 (JSON)")
+    metadata_json = Column("metadata", JSON, nullable=True, comment="추가 메타데이터 (JSON)")
 
     # 인덱스 정의
     __table_args__ = (

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, EmailStr, validator
+from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
 from datetime import datetime
 import re
@@ -24,14 +24,16 @@ class MemberCreate(MemberBase):
     password: str  # 비밀번호 (생성시에만 필요)
     password_confirm: str  # 비밀번호 확인 추가
 
-    @validator("member_id")
+    @field_validator("member_id")
+    @classmethod
     def validate_member_id(cls, v):
         # 알파벳 소문자 + 숫자 + '-' 조합, 5~45자
         if not re.match(r"^[a-z0-9-]{5,45}$", v):
             raise ValueError("아이디는 알파벳 소문자, 숫자, '-' 조합으로 5~45자여야 합니다.")
         return v
 
-    @validator("password")
+    @field_validator("password")
+    @classmethod
     def validate_password(cls, v):
         # 8~16자, 영문 대소문자 + 숫자 + 특수문자 조합
         if not re.match(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{8,16}$", v):
@@ -43,13 +45,15 @@ class MemberCreate(MemberBase):
 
         return v
 
-    @validator("password_confirm")
-    def passwords_match(cls, v, values):
-        if "password" in values and v != values["password"]:
+    @field_validator("password_confirm")
+    @classmethod
+    def passwords_match(cls, v, info):
+        if "password" in info.data and v != info.data["password"]:
             raise ValueError("비밀번호와 비밀번호 확인이 일치하지 않습니다.")
         return v
 
-    @validator("phone")
+    @field_validator("phone")
+    @classmethod
     def validate_phone(cls, v):
         if v and not re.match(r"^\d+$", v):
             raise ValueError("연락처는 숫자만 입력해야 합니다.")
@@ -102,13 +106,8 @@ class LoginRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
-    refresh_token: str
     token_type: str = "bearer"
     expires_in: int = ACCESS_TOKEN_EXPIRE_MINUTES * 60  # 초 단위
-
-
-class RefreshTokenRequest(BaseModel):
-    refresh_token: str
 
 
 class ChangePasswordRequest(BaseModel):

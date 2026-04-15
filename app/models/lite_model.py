@@ -1,26 +1,37 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Index, JSON
+from sqlalchemy import Boolean, Column, DateTime, Index, Integer, JSON, String
 from sqlalchemy.sql import func
+
 from . import Base
 
 
 class LiteModelData(Base):
-    """
-    Lite Model 범용 데이터 저장 테이블
-    - 외부 Lite Model API로부터 받은 모든 데이터를 유연하게 저장
-    - 데이터 구조에 관계없이 JSON 형태로 저장하여 범용성 확보
-    """
     __tablename__ = "lite_model_data"
 
-    # 기본 키
-    id = Column(Integer, primary_key=True, index=True, autoincrement=True, comment="데이터 ID")
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True, comment="Lite model data ID")
+    request_path = Column(String(500), nullable=True, comment="Upstream API path")
+    request_method = Column(String(10), nullable=True, comment="HTTP method")
+    payload = Column(JSON, nullable=True, comment="Cached lite-model payload")
+    member_id = Column(String(50), nullable=True, comment="Requester member_id")
+    cache_key = Column(String(255), nullable=True, comment="Cache key")
+    hit_count = Column(Integer, default=0, nullable=False, comment="Cache hit count")
+    expires_at = Column(DateTime(timezone=True), nullable=True, comment="Cache expiration")
+    is_active = Column(Boolean, default=True, nullable=False, comment="Active flag")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, comment="Created at")
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+        comment="Updated at",
+    )
 
-    # 인덱스 정의
     __table_args__ = (
-        Index('idx_any_cloud_cache_expires', 'expires_at'),
-        Index('idx_any_cloud_cache_active', 'is_active'),
-        Index('idx_any_cloud_cache_created', 'created_at'),
-        {'comment': 'Any Cloud 응답 캐시 테이블'}
+        Index("idx_lite_model_data_expires", "expires_at"),
+        Index("idx_lite_model_data_active", "is_active"),
+        Index("idx_lite_model_data_created", "created_at"),
+        Index("idx_lite_model_data_member_created", "member_id", "created_at"),
+        {"comment": "Lite Model generic cache/data table"},
     )
 
     def __repr__(self):
-        return f"<LiteModelCache(id={self.id}, cache_key={self.cache_key}, hits={self.hit_count})>"
+        return f"<LiteModelData(id={self.id}, cache_key={self.cache_key}, hits={self.hit_count})>"

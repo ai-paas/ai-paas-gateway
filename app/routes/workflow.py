@@ -229,24 +229,16 @@ async def get_workflows(
                         template_id=external_wf.template_id
                     )
                 )
+            else:
+                # 외부 API에서 해당 워크플로우를 찾지 못한 경우 (404)
+                logger.warning(f"Workflow {wf.surro_workflow_id} not found in external API, skipping")
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error fetching workflow {wf.surro_workflow_id}: {str(e)}")
-            # 외부 API 조회 실패시에도 DB 정보라도 표시
-            response_data.append(
-                WorkflowResponse(
-                    id=wf.id,
-                    surro_workflow_id=wf.surro_workflow_id,
-                    created_at=wf.created_at,
-                    updated_at=wf.updated_at,
-                    created_by=wf.created_by,
-                    name=wf.name,
-                    description=wf.description,
-                    category=None,
-                    status="UNKNOWN",
-                    service_id=None,
-                    is_template=False,
-                    template_id=None
-                )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to fetch workflow data from external API: {str(e)}"
             )
 
     return WorkflowListResponse(
@@ -904,6 +896,10 @@ async def execute_workflow(
       }
     }
     ```
+
+    ## Errors
+    - **400**: 워크플로우 상태가 ERROR이거나 실행할 수 없는 경우
+    - **404**: 워크플로우를 찾을 수 없는 경우
     """
     # 권한 확인
     existing_workflow = workflow_crud.get_workflow_by_surro_id(
@@ -948,6 +944,9 @@ async def get_workflow_status(
         - 모든 조회는 DB 기반으로 수행되며, Kubernetes나 Kubeflow를 직접 조회하지 않음
         - 배포 상태는 kserve_deployments 테이블의 정보를 기반으로 함
         - deployed_models 조회 실패 시에도 에러를 발생시키지 않고 빈 리스트로 처리됨
+
+        ## Errors
+        - **404**: 워크플로우를 찾을 수 없는 경우
         """
     # 권한 확인
     existing_workflow = workflow_crud.get_workflow_by_surro_id(
@@ -1044,6 +1043,10 @@ async def test_rag_workflow(
         - 각 컴포넌트의 실행 결과는 results 배열에 순서대로 포함됨
         - final_result는 최종 결과 문자열만 포함 (LLM 응답 또는 검색 결과)
         - 상세 정보 (total, search_method, full_response 등)는 results 배열의 각 컴포넌트 결과에서 확인 가능
+
+        ## Errors
+        - **400**: 워크플로우가 배포되지 않았거나 테스트할 수 없는 구성인 경우
+        - **404**: 워크플로우를 찾을 수 없는 경우
         """
     # 권한 확인
     existing_workflow = workflow_crud.get_workflow_by_surro_id(
@@ -1098,6 +1101,10 @@ async def test_ml_workflow(
         - bbox는 빨간색으로, label은 빨간 배경에 흰색 텍스트로 표시됨
         - 상세 정보 (predictions, image_info 등)는 results 배열의 각 컴포넌트 결과에서 확인 가능
         - 모든 추론 요청은 ServiceMonitoring 테이블에 자동 기록됨 (서비스와 연결된 경우)
+
+        ## Errors
+        - **400**: 워크플로우가 배포되지 않았거나 테스트할 수 없는 구성인 경우
+        - **404**: 워크플로우를 찾을 수 없는 경우
         """
     # 권한 확인
     existing_workflow = workflow_crud.get_workflow_by_surro_id(
@@ -1142,6 +1149,9 @@ async def get_workflow_models(
         - backend_api_url은 첫 번째 배포된 모델 기준으로 생성
         - 각 모델마다 고유한 service_name과 hostname을 가짐
         - 배포 상태가 DEPLOYED인 모델만 추론 가능
+
+        ## Errors
+        - **404**: 워크플로우를 찾을 수 없는 경우
         """
     # 권한 확인
     existing_workflow = workflow_crud.get_workflow_by_surro_id(

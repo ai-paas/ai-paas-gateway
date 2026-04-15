@@ -209,12 +209,13 @@ async def get_knowledge_bases(
     skip = (page - 1) * size
     limit = size
 
-    # DB에서 조회
+    # DB에서 조회 (현재 사용자 소유만)
     knowledge_bases, total = knowledge_base_crud.get_knowledge_bases(
         db=db,
         skip=skip,
         limit=limit,
-        search=search
+        search=search,
+        member_id=current_user.member_id
     )
 
     # 외부 API에서 전체 목록 조회
@@ -228,9 +229,14 @@ async def get_knowledge_bases(
         external_kbs = await knowledge_base_service.get_knowledge_bases(user_info=user_info)
         # surro_knowledge_id를 키로 하는 딕셔너리 생성
         external_kb_map = {kb.id: kb for kb in external_kbs}
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.warning(f"Failed to fetch external knowledge bases: {str(e)}")
-        external_kb_map = {}
+        logger.error(f"Failed to fetch external knowledge bases: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to fetch knowledge base data from external API: {str(e)}"
+        )
 
     # 응답 데이터 구성 (DB 메타 정보 + 외부 API 데이터 병합)
     response_data = []
@@ -270,13 +276,17 @@ async def get_knowledge_base(
         current_user=Depends(get_current_user)
 ):
     """지식베이스 상세 정보 조회"""
-    # DB에서 조회 (우리 메타 정보)
-    db_kb = knowledge_base_crud.get_knowledge_base_by_surro_id(
+    # DB에서 조회 (우리 메타 정보 - 활성 레코드만)
+    db_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id
     )
     if not db_kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+    # 권한 확인
+    if current_user.role != "admin" and db_kb.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
 
     # 외부 API에서 상세 정보 조회
     user_info = {
@@ -326,7 +336,7 @@ async def update_knowledge_base(
         current_user=Depends(get_current_user)
 ):
     """지식베이스 정보 수정"""
-    existing_kb = knowledge_base_crud.get_knowledge_base_by_surro_id(
+    existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id
     )
@@ -369,11 +379,14 @@ async def update_knowledge_base(
 
     # DB 업데이트
     try:
-        existing_kb.name = updated_external.name
-        existing_kb.description = updated_external.description
-        existing_kb.collection_name = updated_external.collection_name
-
-        db.commit()
+        knowledge_base_crud.update_knowledge_base_by_surro_id(
+            db=db,
+            surro_knowledge_id=surro_knowledge_id,
+            name=updated_external.name,
+            description=updated_external.description,
+            collection_name=updated_external.collection_name,
+            updated_by=current_user.member_id
+        )
         db.refresh(existing_kb)
     except Exception as e:
         logger.error(f"Failed to sync DB with external API: {str(e)}")
@@ -402,7 +415,7 @@ async def delete_knowledge_base(
         current_user=Depends(get_current_user)
 ):
     """지식베이스 삭제"""
-    existing_kb = knowledge_base_crud.get_knowledge_base_by_surro_id(
+    existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id
     )
@@ -431,13 +444,19 @@ async def delete_knowledge_base(
             detail=f"Failed to delete external knowledge base: {str(e)}"
         )
 
-    # 우리 DB 삭제
-    success = knowledge_base_crud.delete_knowledge_base_by_surro_id(
-        db=db,
-        surro_knowledge_id=surro_knowledge_id
-    )
-    if not success:
-        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    # 우리 DB 소프트 삭제
+    try:
+        knowledge_base_crud.delete_knowledge_base_by_surro_id(
+            db=db,
+            surro_knowledge_id=surro_knowledge_id,
+            deleted_by=current_user.member_id
+        )
+        logger.info(
+            f"Soft-deleted knowledge base mapping: surro_id={surro_knowledge_id}, "
+            f"member_id={current_user.member_id}"
+        )
+    except Exception as mapping_error:
+        logger.error(f"Failed to soft-delete knowledge base mapping: {str(mapping_error)}")
 
     return None
 
@@ -452,7 +471,7 @@ async def add_file_to_knowledge_base(
         current_user=Depends(get_current_user)
 ):
     """지식베이스에 파일 추가"""
-    existing_kb = knowledge_base_crud.get_knowledge_base_by_surro_id(
+    existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id
     )
@@ -503,7 +522,7 @@ async def delete_file_from_knowledge_base(
         current_user=Depends(get_current_user)
 ):
     """지식베이스에서 파일 삭제"""
-    existing_kb = knowledge_base_crud.get_knowledge_base_by_surro_id(
+    existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id
     )
@@ -556,12 +575,16 @@ async def search_knowledge_base(
         current_user=Depends(get_current_user)
 ):
     """지식베이스 검색"""
-    existing_kb = knowledge_base_crud.get_knowledge_base_by_surro_id(
+    existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id
     )
     if not existing_kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+    # 권한 확인
+    if current_user.role != "admin" and existing_kb.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
 
     user_info = {
         'member_id': current_user.member_id,
@@ -585,12 +608,16 @@ async def get_search_records(
         current_user=Depends(get_current_user)
 ):
     """지식베이스 검색 기록 조회"""
-    existing_kb = knowledge_base_crud.get_knowledge_base_by_surro_id(
+    existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id
     )
     if not existing_kb:
         raise HTTPException(status_code=404, detail="Knowledge base not found")
+
+    # 권한 확인
+    if current_user.role != "admin" and existing_kb.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
 
     user_info = {
         'member_id': current_user.member_id,

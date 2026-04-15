@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, ConfigDict, model_validator, validator
+from pydantic import BaseModel, Field, ConfigDict, model_validator, field_validator
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 
@@ -56,14 +56,16 @@ class HubModelResponse(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    @validator('modelId', pre=True, always=True)
-    def set_model_id_from_id(cls, v, values):
+    @field_validator('modelId', mode='before')
+    @classmethod
+    def set_model_id_from_id(cls, v, info):
         """modelId가 없으면 id 값으로 설정"""
-        if v is None and 'id' in values:
-            return values.get('id')
+        if v is None and 'id' in info.data:
+            return info.data.get('id')
         return v
 
-    @validator('gated', pre=True)
+    @field_validator('gated', mode='before')
+    @classmethod
     def normalize_gated(cls, v):
         """gated 필드를 정규화"""
         if v is None:
@@ -74,11 +76,12 @@ class HubModelResponse(BaseModel):
             return v.lower() == "true"
         return bool(v)
 
-    @validator('task', pre=True, always=True)
-    def set_task_from_pipeline_tag(cls, v, values):
+    @field_validator('task', mode='before')
+    @classmethod
+    def set_task_from_pipeline_tag(cls, v, info):
         """task가 없으면 pipeline_tag 값으로 설정"""
-        if v is None and 'pipeline_tag' in values:
-            return values.get('pipeline_tag')
+        if v is None and 'pipeline_tag' in info.data:
+            return info.data.get('pipeline_tag')
         return v
 
 
@@ -116,6 +119,15 @@ class HubModelListWrapper(BaseModel):
 class HubModelFilesWrapper(BaseModel):
     """허브 모델 파일 목록 래퍼"""
     data: List[ModelFileInfo] = Field(..., description="파일 목록")
+
+
+class ModelDownloadResponse(BaseModel):
+    """모델 파일 다운로드 결과 응답"""
+    download_type: str = Field(..., description="다운로드 처리 방식")
+    file_path: str = Field(..., description="서버에 저장된 파일 경로")
+    file_size: int = Field(..., description="저장된 파일 크기(byte)")
+    filename: str = Field(..., description="다운로드한 파일명")
+    model_id: str = Field(..., description="대상 모델 ID")
 
 class ExtendedHubModelResponse(BaseModel):
     # 외부 API 필드들
@@ -193,6 +205,11 @@ class TagGroupResponse(BaseModel):
     """특정 그룹의 태그 리스트 응답"""
     data: List[TagItem] = Field(..., description="태그 목록")
     remaining_count: int = Field(0, description="남은 태그 개수")
+
+
+class TagGroupAllResponse(BaseModel):
+    """특정 태그 그룹 전체 조회 응답"""
+    data: List[TagItem] = Field(..., description="태그 전체 목록")
 
 class TagsParams(BaseModel):
     """태그 조회 파라미터"""
