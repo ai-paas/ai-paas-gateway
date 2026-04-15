@@ -362,6 +362,49 @@ class ServiceService:
                 detail=f"Internal error: {str(e)}"
             )
 
+    async def get_resource_usages(
+            self,
+            service_id: str,
+            user_info: Optional[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
+        """서비스 리소스 사용량 조회"""
+        try:
+            url = f"{self.base_url}/services/{service_id}/resource-usages"
+
+            logger.info(f"Getting resource usages from: {url}")
+
+            response = await self._make_authenticated_request(
+                "GET", url, user_info=user_info
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 404:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Service not found"
+                )
+            else:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Failed to get resource usages: {response.text}"
+                )
+
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout getting resource usages for {service_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="External service timeout"
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting resource usages for {service_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
     async def delete_service(
             self,
             service_id: str,

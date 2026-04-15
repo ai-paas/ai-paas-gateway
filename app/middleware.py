@@ -1,138 +1,95 @@
-# from fastapi import HTTPException, Request, status
-# from fastapi.responses import JSONResponse
-# from starlette.middleware.base import BaseHTTPMiddleware
-# from starlette.responses import Response
-# from sqlalchemy.orm import Session
-# from app.database import get_db
-# from app.auth import AuthService
-# from app.cruds import member_crud
-# import re
-#
-#
-# class AuthMiddleware(BaseHTTPMiddleware):
-#     """
-#     자동 JWT 인증 미들웨어
-#     특정 경로에 대해 자동으로 JWT 토큰을 확인하고 사용자 정보를 request.state에 저장
-#     """
-#
-#     # 인증이 필요 없는 경로들
-#     PUBLIC_PATHS = [
-#         "/",
-#         "/health",
-#         "/docs",
-#         "/redoc",
-#         "/openapi.json",
-#         "/api/v1/auth/login",
-#         "/api/v1/auth/register",
-#         "/api/v1/auth/refresh",
-#     ]
-#
-#     # 인증이 필요한 경로 패턴들
-#     PROTECTED_PATTERNS = [
-#         r"^/api/v1/members.*",
-#         r"^/api/v1/services.*",
-#     ]
-#
-#     def __init__(self, app):
-#         super().__init__(app)
-#
-#     async def dispatch(self, request: Request, call_next):
-#         """요청 처리 전후로 인증 로직 실행"""
-#
-#         # 인증이 필요한지 확인
-#         if not self._requires_auth(request.url.path):
-#             response = await call_next(request)
-#             return response
-#
-#         try:
-#             # JWT 토큰 추출 및 검증
-#             user = await self._authenticate_request(request)
-#
-#             # 사용자 정보를 request.state에 저장
-#             request.state.current_user = user
-#
-#         except HTTPException as e:
-#             return JSONResponse(
-#                 status_code=e.status_code,
-#                 content={"detail": e.detail}
-#             )
-#         except Exception as e:
-#             return JSONResponse(
-#                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#                 content={"detail": "Internal server error"}
-#             )
-#
-#         response = await call_next(request)
-#         return response
-#
-#     def _requires_auth(self, path: str) -> bool:
-#         """경로가 인증이 필요한지 확인"""
-#         # 공개 경로인 경우 인증 불필요
-#         if path in self.PUBLIC_PATHS:
-#             return False
-#
-#         # 보호된 패턴과 매칭되는지 확인
-#         for pattern in self.PROTECTED_PATTERNS:
-#             if re.match(pattern, path):
-#                 return True
-#
-#         return False
-#
-#     async def _authenticate_request(self, request: Request):
-#         """요청에서 JWT 토큰을 추출하고 사용자 인증"""
-#
-#         # Authorization 헤더에서 토큰 추출
-#         authorization = request.headers.get("Authorization")
-#         if not authorization:
-#             raise HTTPException(
-#                 status_code=status.HTTP_401_UNAUTHORIZED,
-#                 detail="Authorization header missing"
-#             )
-#
-#         if not authorization.startswith("Bearer "):
-#             raise HTTPException(
-#                 status_code=status.HTTP_401_UNAUTHORIZED,
-#                 detail="Invalid authorization header format"
-#             )
-#
-#         token = authorization.split(" ")[1]
-#
-#         # 토큰 검증
-#         token_data = AuthService.verify_token(token)
-#
-#         if token_data["type"] != "access":
-#             raise HTTPException(
-#                 status_code=status.HTTP_401_UNAUTHORIZED,
-#                 detail="Invalid token type"
-#             )
-#
-#         # 데이터베이스에서 사용자 조회
-#         db = next(get_db())
-#         try:
-#             member = member_crud.get_member(db, token_data["member_id"])
-#             if member is None:
-#                 raise HTTPException(
-#                     status_code=status.HTTP_401_UNAUTHORIZED,
-#                     detail="User not found"
-#                 )
-#             return member
-#         finally:
-#             db.close()
-#
-#
-# # Request에서 현재 사용자 가져오는 의존성
-# def get_current_user_from_state(request: Request):
-#     """미들웨어에서 설정한 현재 사용자 정보 반환"""
-#     user = getattr(request.state, 'current_user', None)
-#     if not user:
-#         raise HTTPException(
-#             status_code=status.HTTP_401_UNAUTHORIZED,
-#             detail="User not authenticated"
-#         )
-#     return user
-#
-#
-# # 선택적으로 현재 사용자 가져오기
-# def get_current_user_optional_from_state(request: Request):
-#     """미들웨어에서 설정한 현재 사용자 정보 반환 (선택적)"""
-#     return getattr(request.state, 'current_user', None)
+import logging
+import time
+import uuid
+
+from fastapi import Request
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
+
+from app.auth import AuthService
+from app.config import settings
+from app.logging_config import get_access_logger
+
+_fallback_logger = logging.getLogger(__name__)
+
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        start_time = time.perf_counter()
+        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        request.state.request_id = request_id
+
+        response: Response | None = None
+        status_code = 500
+
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            response.headers["X-Request-ID"] = request_id
+            return response
+        finally:
+            try:
+                log_data = self._build_log_data(request, request_id, status_code, start_time)
+                get_access_logger().info("access", extra={"event_data": log_data})
+            except Exception:
+                _fallback_logger.exception("Failed to write access log")
+
+    def _build_log_data(
+        self,
+        request: Request,
+        request_id: str,
+        status_code: int,
+        start_time: float,
+    ) -> dict:
+        duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        path = request.url.path
+        is_masked_path = path in settings.LOG_ACCESS_MASK_PATHS
+
+        member_id = "masked" if is_masked_path else self._extract_member_id(request)
+        query_string = "-" if is_masked_path else (request.url.query or "-")
+
+        data = {
+            "request_id": request_id,
+            "method": request.method,
+            "path": path,
+            "query": query_string,
+            "status": status_code,
+            "duration_ms": duration_ms,
+            "client_ip": self._extract_client_ip(request),
+            "member_id": member_id,
+            "user_agent": request.headers.get("user-agent", "-"),
+        }
+        if is_masked_path:
+            data["masked"] = True
+        return data
+
+    @staticmethod
+    def _extract_client_ip(request: Request) -> str:
+        forwarded_for = request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            return forwarded_for.split(",")[0].strip()
+
+        if request.client:
+            return request.client.host
+
+        return "-"
+
+    @staticmethod
+    def _extract_member_id(request: Request) -> str:
+        state_member_id = getattr(request.state, "member_id", None)
+        if state_member_id:
+            return state_member_id
+
+        authorization = request.headers.get("authorization")
+        if not authorization or not authorization.lower().startswith("bearer "):
+            return "anonymous"
+
+        token = authorization.split(" ", 1)[1].strip()
+        if not token:
+            return "anonymous"
+
+        try:
+            token_data = AuthService.verify_token(token)
+            return token_data.get("member_id", "anonymous")
+        except Exception:
+            return "anonymous"

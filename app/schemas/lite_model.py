@@ -1,18 +1,17 @@
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Any, Optional, Dict, List
 
 
 class LiteModelResponse(BaseModel):
     """최적화 모델 API 단일 조회 응답 래퍼 - 응답 데이터를 직접 반환"""
-    model_config = ConfigDict(extra="allow", protected_namespaces=())
+    # 이 경우 Any 타입의 필드들이 동적으로 추가됨
+    model_config = ConfigDict(extra="allow")
 
 class LiteModelDataResponse(BaseModel):
     """최적화 모델 API 범용 응답 래퍼 - 응답 내용을 그대로 data에 담음"""
     data: Any = Field(..., description="Any Cloud API 응답 데이터 (원본 그대로)")
 
 class OptimizeRequest(BaseModel):
-    model_config = ConfigDict(protected_namespaces=())
-
     saved_model_run_id: str
     saved_model_path: str
     model_name: str
@@ -24,14 +23,10 @@ class TaskUpdate(BaseModel):
     path_output_model: str = Field(..., description="출력 모델 경로")
 
 class ModelOptimizer(BaseModel):
-    model_config = ConfigDict(protected_namespaces=())
-
     saved_model_run_id: str = Field(..., description="모델 id")
     saved_model_path: str = Field(..., description="모델 경로")
 
 class ModelOptimizerPTQ(BaseModel):
-    model_config = ConfigDict(protected_namespaces=())
-
     saved_model_run_id: str = Field(..., description="모델 id")
     saved_model_path: str = Field(..., description="모델 경로")
     quantization_layers: List[str] = Field(..., description="양자화 레이어 목록")

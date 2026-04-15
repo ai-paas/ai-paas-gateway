@@ -1,17 +1,13 @@
-from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, desc, func
-from typing import Optional, List, Dict, Any, Tuple
-from datetime import datetime, timedelta
-import json
-import hashlib
-
-from app.models.any_cloud import AnyCloudData, AnyCloudCache
+from app.models.lite_model import LiteModelData
 
 
 class LiteModelCRUD:
-    """Lite Model 데이터 관련 CRUD 작업"""
+    """Placeholder CRUD for LiteModelData.
 
-    # === LiteModelData 관련 메서드 ===
+    Lite Model routes currently proxy upstream APIs and do not persist local
+    state yet. Keep this object importable so persistence can be added later
+    without breaking module imports.
+    """
 
-# 싱글톤 인스턴스
-any_cloud_crud = LiteModelCRUD()
+
+lite_model_crud = LiteModelCRUD()

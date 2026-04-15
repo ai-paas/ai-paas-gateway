@@ -1,5 +1,10 @@
 from sqlalchemy.orm import Session
+from sqlalchemy import and_
 from typing import List, Optional, Tuple
+from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
 
 from app.models.knowledge_base import KnowledgeBase
 
@@ -14,12 +19,41 @@ class KnowledgeBaseCRUD:
             surro_knowledge_id: int,
             collection_name: str
     ):
-        """지식베이스 생성 - surro_knowledge_id만 저장"""
+        """지식베이스 생성 - surro_knowledge_id만 저장 (중복 매핑 처리 포함)"""
+        # 중복 확인 (MLOps 재설치 시 ID 재사용 대응)
+        existing = self.get_knowledge_base_by_surro_id(db, surro_knowledge_id)
+        if existing:
+            # stale 매핑이면 새 데이터로 업데이트
+            if name and existing.name != name:
+                logger.info(
+                    f"Updating stale knowledge base mapping: surro_id={surro_knowledge_id}, "
+                    f"old_name={existing.name}, new_name={name}"
+                )
+                existing.name = name
+                existing.description = description
+                existing.collection_name = collection_name
+                existing.updated_by = created_by
+                existing.updated_at = datetime.utcnow()
+                # 소프트 삭제된 상태였으면 복원
+                if existing.deleted_at is not None:
+                    existing.deleted_at = None
+                    existing.deleted_by = None
+                    existing.is_active = True
+                db.commit()
+                db.refresh(existing)
+            else:
+                logger.warning(
+                    f"Knowledge base mapping already exists: surro_id={surro_knowledge_id}, "
+                    f"member_id={created_by}"
+                )
+            return existing
+
         db_knowledge_base = KnowledgeBase(
             name=name,
             description=description,
             collection_name=collection_name,
             created_by=created_by,
+            updated_by=created_by,
             surro_knowledge_id=surro_knowledge_id
         )
         db.add(db_knowledge_base)
@@ -29,7 +63,10 @@ class KnowledgeBaseCRUD:
 
     def get_knowledge_base(self, db: Session, knowledge_base_id: int):
         return db.query(KnowledgeBase).filter(
-            KnowledgeBase.id == knowledge_base_id
+            and_(
+                KnowledgeBase.id == knowledge_base_id,
+                KnowledgeBase.deleted_at.is_(None)
+            )
         ).first()
 
     def get_knowledge_base_by_surro_id(self, db: Session, surro_knowledge_id: int):
@@ -37,14 +74,34 @@ class KnowledgeBaseCRUD:
             KnowledgeBase.surro_knowledge_id == surro_knowledge_id
         ).first()
 
+    def get_active_knowledge_base_by_surro_id(self, db: Session, surro_knowledge_id: int):
+        """삭제되지 않은 활성 지식베이스 조회"""
+        return db.query(KnowledgeBase).filter(
+            and_(
+                KnowledgeBase.surro_knowledge_id == surro_knowledge_id,
+                KnowledgeBase.deleted_at.is_(None),
+                KnowledgeBase.is_active == True
+            )
+        ).first()
+
     def get_knowledge_bases(
             self,
             db: Session,
             skip: Optional[int] = None,
             limit: Optional[int] = None,
-            search: Optional[str] = None
+            search: Optional[str] = None,
+            member_id: Optional[str] = None
     ):
-        query = db.query(KnowledgeBase)
+        query = db.query(KnowledgeBase).filter(
+            and_(
+                KnowledgeBase.deleted_at.is_(None),
+                KnowledgeBase.is_active == True
+            )
+        )
+
+        # 사용자별 필터링
+        if member_id:
+            query = query.filter(KnowledgeBase.created_by == member_id)
 
         if search:
             search_filter = f"%{search}%"
@@ -70,9 +127,10 @@ class KnowledgeBaseCRUD:
             surro_knowledge_id: int,
             name: Optional[str] = None,
             description: Optional[str] = None,
-            collection_name: Optional[str] = None
+            collection_name: Optional[str] = None,
+            updated_by: Optional[str] = None
     ):
-        db_kb = self.get_knowledge_base_by_surro_id(db, surro_knowledge_id)
+        db_kb = self.get_active_knowledge_base_by_surro_id(db, surro_knowledge_id)
         if db_kb:
             if name is not None:
                 db_kb.name = name
@@ -80,14 +138,25 @@ class KnowledgeBaseCRUD:
                 db_kb.description = description
             if collection_name is not None:
                 db_kb.collection_name = collection_name
+            if updated_by is not None:
+                db_kb.updated_by = updated_by
+            db_kb.updated_at = datetime.utcnow()
             db.commit()
             db.refresh(db_kb)
         return db_kb
 
-    def delete_knowledge_base_by_surro_id(self, db: Session, surro_knowledge_id: int):
-        db_kb = self.get_knowledge_base_by_surro_id(db, surro_knowledge_id)
+    def delete_knowledge_base_by_surro_id(
+            self,
+            db: Session,
+            surro_knowledge_id: int,
+            deleted_by: Optional[str] = None
+    ):
+        """지식베이스 매핑 소프트 삭제"""
+        db_kb = self.get_active_knowledge_base_by_surro_id(db, surro_knowledge_id)
         if db_kb:
-            db.delete(db_kb)
+            db_kb.deleted_at = datetime.utcnow()
+            db_kb.deleted_by = deleted_by
+            db_kb.is_active = False
             db.commit()
             return True
         return False

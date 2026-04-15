@@ -5,45 +5,52 @@ from datetime import datetime
 
 class DatasetBase(BaseModel):
     """데이터셋 기본 정보"""
-    name: str = Field(..., description="데이터셋 이름")
-    description: str = Field(..., description="데이터셋 설명")
+    name: str = Field(..., description="데이터셋을 식별하기 위한 이름")
+    description: Optional[str] = Field(None, description="데이터셋에 대한 상세 설명")
 
 
 class DatasetCreateRequest(BaseModel):
     """API 요청용 데이터셋 생성 스키마"""
-    name: str = Field(..., description="데이터셋 이름")
-    description: str = Field(..., description="데이터셋 설명")
+    name: str = Field(..., description="데이터셋을 식별하기 위한 이름")
+    description: Optional[str] = Field(None, description="데이터셋에 대한 상세 설명")
+
+
+class DatasetUpdateRequest(BaseModel):
+    """API 요청용 데이터셋 수정 스키마"""
+    name: Optional[str] = Field(None, description="새로운 데이터셋 이름. 생략 시 기존 값 유지")
+    description: Optional[str] = Field(None, description="새로운 데이터셋 설명. 생략 시 기존 값 유지")
 
 
 class DatasetRegistryReadSchema(BaseModel):
     """데이터셋 레지스트리 정보"""
     model_config = ConfigDict(from_attributes=True, protected_namespaces=())
 
-    id: int
-    artifact_path: str
-    uri: str
-    dataset_id: int
-    created_at: datetime
-    updated_at: datetime
-    deleted_at: Optional[datetime] = None
-    created_by: str = ""
-    updated_by: str = ""
-    deleted_by: str = ""
+    id: int = Field(..., description="레지스트리 ID")
+    artifact_path: str = Field(..., description="MLflow에 저장된 데이터셋의 아티팩트 경로")
+    uri: str = Field(..., description="MLflow에서 접근 가능한 데이터셋 URI")
+    dataset_id: int = Field(..., description="연결된 데이터셋 ID")
+    created_at: datetime = Field(..., description="생성 시각")
+    updated_at: datetime = Field(..., description="수정 시각")
+    deleted_at: Optional[datetime] = Field(None, description="삭제 시각")
+    created_by: str = Field("", description="생성자")
+    updated_by: str = Field("", description="수정자")
+    deleted_by: str = Field("", description="삭제자")
 
 
 class DatasetReadSchema(BaseModel):
     """데이터셋 응답 (외부 API 형식)"""
     model_config = ConfigDict(from_attributes=True, protected_namespaces=())
 
-    id: int
-    name: str
-    dataset_registry: DatasetRegistryReadSchema
-    created_at: datetime
-    updated_at: datetime
-    deleted_at: Optional[datetime] = None
-    created_by: str = ""
-    updated_by: str = ""
-    deleted_by: str = ""
+    id: int = Field(..., description="데이터셋 고유 ID")
+    name: str = Field(..., description="데이터셋 이름")
+    description: Optional[str] = Field(None, description="데이터셋에 대한 상세 설명")
+    dataset_registry: DatasetRegistryReadSchema = Field(..., description="데이터셋 레지스트리 정보")
+    created_at: datetime = Field(..., description="데이터셋 생성 시각")
+    updated_at: datetime = Field(..., description="데이터셋 수정 시각")
+    deleted_at: Optional[datetime] = Field(None, description="데이터셋 삭제 시각")
+    created_by: str = Field("", description="생성자")
+    updated_by: str = Field("", description="수정자")
+    deleted_by: str = Field("", description="삭제자")
 
 
 class DatasetListResponse(BaseModel):
@@ -53,9 +60,9 @@ class DatasetListResponse(BaseModel):
 
 class DatasetValidationResponse(BaseModel):
     """데이터셋 파일 검증 응답"""
-    is_valid: bool = Field(..., description="검증 성공 여부")
-    message: str = Field(..., description="검증 결과 메시지")
-    details: Optional[Dict[str, Any]] = Field(None, description="상세 오류 정보")
+    is_valid: bool = Field(..., description="검증 성공 여부. true면 통과, false면 실패")
+    message: str = Field(..., description="검증 결과 메시지. 실패 시 오류 원인 설명 포함")
+    details: Optional[Dict[str, Any]] = Field(None, description="상세 오류 정보. 검증 실패 시에만 제공")
 
 
 class InnoUserInfo(BaseModel):
