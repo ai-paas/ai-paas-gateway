@@ -88,27 +88,18 @@ async def get_datasets(
     try:
         skip = (page - 1) * size
 
-        # 1. 사용자 데이터셋 총 개수 조회 (Inno DB)
-        total_datasets = dataset_crud.get_datasets_count_by_member(
-            db=db,
-            member_id=current_user.member_id
-        )
-
-        if total_datasets == 0:
-            return _create_pagination_response([], 0, page, size)
-
-        # 2. 사용자 데이터셋 매핑 조회 (페이지네이션 적용, {surro_dataset_id: created_by})
-        dataset_mappings = dataset_crud.get_dataset_mappings_by_member_id(
+        # 1. 사용자의 전체 데이터셋 매핑 조회 ({surro_dataset_id: created_by})
+        all_mappings = dataset_crud.get_dataset_mappings_by_member_id(
             db,
             current_user.member_id,
-            skip=skip,
-            limit=size
+            skip=0,
+            limit=10000
         )
 
-        if not dataset_mappings:
-            return _create_pagination_response([], total_datasets, page, size)
+        if not all_mappings:
+            return _create_pagination_response([], 0, page, size)
 
-        # 3. 외부 API에서 전체 데이터셋 조회 (페이지네이션 없이)
+        # 2. 외부 API에서 전체 데이터셋 조회 (페이지네이션 없이)
         all_datasets_response = await dataset_service.get_datasets(
             page=None,
             page_size=None,
@@ -119,19 +110,26 @@ async def get_datasets(
             }
         )
 
-        # 4. 사용자 소유 데이터셋만 필터링
-        filtered = [d for d in all_datasets_response.data if d.id in dataset_mappings]
+        # 3. 매핑과 외부 API 교집합으로 실제 사용 가능한 데이터셋 필터링
+        available = [d for d in all_datasets_response.data if d.id in all_mappings]
+        total = len(available)
+
+        if total == 0:
+            return _create_pagination_response([], 0, page, size)
+
+        # 4. 교집합 결과에 대해 페이지네이션 적용
+        paginated = available[skip:skip + size]
 
         # 5. 사용자 정보 추가 + 로컬 DB의 created_by 매핑
         member_info = _create_inno_user_info(current_user)
         wrapped = []
-        for dataset in filtered:
+        for dataset in paginated:
             dataset_dict = dataset.model_dump()
             dataset_dict["member_info"] = member_info.model_dump()
-            dataset_dict["created_by"] = dataset_mappings.get(dataset.id, "")
+            dataset_dict["created_by"] = all_mappings.get(dataset.id, "")
             wrapped.append(DatasetWithMemberInfo(**dataset_dict))
 
-        return _create_pagination_response(wrapped, total_datasets, page, size)
+        return _create_pagination_response(wrapped, total, page, size)
 
     except Exception as e:
         logger.error(f"Error getting datasets for {current_user.member_id}: {str(e)}")
