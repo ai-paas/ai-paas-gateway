@@ -48,4 +48,4 @@ jobs:
       run: |
         docker stop ai-paas-gateway-api || true
         docker rm ai-paas-gateway-api || true
-        docker run --env-file .env -d --name ai-paas-gateway-api -p 8106:8000 ai-paas-gateway:latest
+        docker run --env-file .env -d --name ai-paas-gateway-api -p 8000:8000 ai-paas-gateway:latest
