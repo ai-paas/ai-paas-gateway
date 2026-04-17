@@ -6,7 +6,10 @@ on:
 
 jobs:
   deploy:
-    runs-on: self-hosted
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        runner: [aipaas-backend, ai-paas-gateway]
 
     steps:
     - uses: actions/checkout@v2
