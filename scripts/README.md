@@ -21,7 +21,7 @@
 - `mlops_openapi.json` — MLOps `/openapi.json` 덤프 (스웨거 설명 동기화용 참조)
 - `mlops_workflows_summary.txt` — 위 덤프에서 Workflows 섹션만 추출한 요약
 - `mlops_models_summary.txt` — 위 덤프에서 Models 섹션만 추출한 요약
-- `test_workflow_gets.py` — 게이트웨이(127.0.0.1:8000) vs MLOps(***REDACTED***:30080) GET 비교 스크립트
+- `test_workflow_gets.py` — 게이트웨이(127.0.0.1:8000) vs MLOps(`<MLOPS_BASE_URL>`) GET 비교 스크립트
 - `.tok_local`, `.tok_mlops` — 로그인 토큰 임시 저장 (테스트 후 삭제 권장)
 
 ## MLOps OpenAPI 재다운로드
@@ -29,7 +29,8 @@
 스웨거 설명 최신화 등이 필요할 때:
 
 ```bash
-curl -sS -o scripts/local/mlops_openapi.json http://***REDACTED***:30080/openapi.json
+export MLOPS_BASE_URL="http://<mlops-host>:<mlops-port>"
+curl -sS -o scripts/local/mlops_openapi.json "$MLOPS_BASE_URL/openapi.json"
 ```
 
 ## GET API 비교 테스트
@@ -44,6 +45,7 @@ curl -sS -o scripts/local/mlops_openapi.json http://***REDACTED***:30080/openapi
 # (권장) 셸 히스토리에 평문 비밀번호가 남지 않도록 read -s로 입력
 read -sp "Local admin password: " LOCAL_PW && echo
 read -sp "MLOps password: " MLOPS_PW && echo
+export MLOPS_BASE_URL="http://<mlops-host>:<mlops-port>"
 # 또는 .env에서 로드: source <(grep -E '^EXTERNAL_API_(USERNAME|PASSWORD)=' .env)
 
 # 1) 로컬 게이트웨이 로그인 (member_id는 팀 관리자 계정)
@@ -54,7 +56,7 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/auth/login \
   > scripts/local/.tok_local
 
 # 2) MLOps 로그인 (.env의 EXTERNAL_API_USERNAME / EXTERNAL_API_PASSWORD)
-curl -s -X POST http://***REDACTED***:30080/api/v1/authentications/token \
+curl -s -X POST "$MLOPS_BASE_URL/api/v1/authentications/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   --data-urlencode "username=$EXTERNAL_API_USERNAME" \
   --data-urlencode "password=$MLOPS_PW" \
