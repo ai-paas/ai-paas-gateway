@@ -111,3 +111,7 @@ coverage.xml
 # 로컬 전용 테스트
 docs/reports/
 /backups/
+
+# 로컬 전용 스크립트/덤프 (MLOps OpenAPI 비교, 임시 토큰, 테스트 등)
+# 관리 규약: 커밋할 개발 도구는 scripts/ 직하, 로컬 전용은 scripts/local/ 하위에 배치
+scripts/local/
