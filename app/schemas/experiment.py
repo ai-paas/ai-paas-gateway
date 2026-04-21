@@ -55,6 +55,14 @@ class ExperimentListItem(BaseModel):
     updated_at: Optional[datetime] = Field(None, description="실험 수정 시각")
 
 
+class ExperimentListResponse(BaseModel):
+    """실험 목록 응답"""
+    data: List[ExperimentListItem] = Field(..., description="실험 목록")
+    total: int = Field(..., description="전체 항목 수")
+    page: int = Field(..., description="현재 페이지 번호")
+    size: int = Field(..., description="페이지당 항목 수")
+
+
 class ExperimentDetailResponse(BaseModel):
     """실험 상세 응답"""
     model_config = ConfigDict(from_attributes=True)

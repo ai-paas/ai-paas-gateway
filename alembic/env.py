@@ -19,10 +19,15 @@ from app.models import Base
 # access to the values within the .ini file in use.
 config = context.config
 
-# 환경변수에서 DATABASE_URL 가져와서 설정
+# 환경변수에서 DATABASE_URL 가져와서 설정.
+# alembic.ini에는 sqlalchemy.url을 하드코딩하지 않으므로, 이 값이 없으면 마이그레이션 중단.
 database_url = os.getenv("DATABASE_URL")
-if database_url:
-    config.set_main_option("sqlalchemy.url", database_url)
+if not database_url:
+    raise RuntimeError(
+        "DATABASE_URL environment variable is required for Alembic migrations. "
+        "Set it in .env (see .env.example) before running alembic commands."
+    )
+config.set_main_option("sqlalchemy.url", database_url)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

@@ -182,6 +182,75 @@ class DatasetCRUD:
         db.refresh(db_dataset)
         return db_dataset
 
+    def upsert_dataset_mapping(
+            self,
+            db: Session,
+            surro_dataset_id: int,
+            member_id: str,
+            dataset_name: str = None
+    ) -> Dataset:
+        """삭제 여부와 관계없이 매핑을 생성하거나 재활성화한다."""
+        existing = db.query(Dataset).filter(
+            and_(
+                Dataset.surro_dataset_id == surro_dataset_id,
+                Dataset.created_by == member_id
+            )
+        ).order_by(Dataset.id.desc()).first()
+
+        if existing:
+            existing.name = dataset_name
+            existing.is_active = True
+            existing.deleted_at = None
+            existing.deleted_by = None
+            existing.updated_by = member_id
+            existing.updated_at = datetime.utcnow()
+            db.commit()
+            db.refresh(existing)
+            return existing
+
+        return self.create_dataset_mapping(
+            db=db,
+            surro_dataset_id=surro_dataset_id,
+            member_id=member_id,
+            dataset_name=dataset_name
+        )
+
+    def soft_delete_missing_mappings(
+            self,
+            db: Session,
+            member_id: str,
+            active_surro_dataset_ids: List[int],
+            deleted_by: Optional[str] = None
+    ) -> int:
+        """외부 목록에 없는 활성 매핑을 소프트 삭제한다."""
+        active_id_set = set(active_surro_dataset_ids)
+        targets = db.query(Dataset).filter(
+            and_(
+                Dataset.created_by == member_id,
+                Dataset.deleted_at.is_(None),
+                Dataset.is_active == True
+            )
+        ).all()
+
+        deleted_count = 0
+        deleted_actor = deleted_by or member_id
+        now = datetime.utcnow()
+
+        for dataset in targets:
+            if dataset.surro_dataset_id in active_id_set:
+                continue
+            dataset.is_active = False
+            dataset.deleted_at = now
+            dataset.deleted_by = deleted_actor
+            dataset.updated_by = deleted_actor
+            dataset.updated_at = now
+            deleted_count += 1
+
+        if deleted_count:
+            db.commit()
+
+        return deleted_count
+
     def delete_dataset_mapping(
             self,
             db: Session,
