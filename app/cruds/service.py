@@ -1,6 +1,8 @@
-from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_
 from typing import List, Optional, Tuple
+
+from sqlalchemy import or_
+from sqlalchemy.orm import Session
+
 from app.models.service import Service
 from app.schemas.service import ServiceCreate, ServiceUpdate
 

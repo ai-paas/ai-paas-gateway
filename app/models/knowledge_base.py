@@ -1,8 +1,10 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Index, Sequence
-from sqlalchemy.sql import func
-from sqlalchemy.orm import relationship
-from app.models import Base  # 이 import가 중요!
 from datetime import datetime
+
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Index, Sequence
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+
+from app.models import Base  # 이 import가 중요!
 
 
 class KnowledgeBase(Base):  # Base를 상속받아야 함!

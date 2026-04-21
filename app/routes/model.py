@@ -1,20 +1,19 @@
+import logging
+from typing import List, Optional, Dict, Any
+
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Path, File, UploadFile, Form
 from sqlalchemy.orm import Session
-from typing import List, Optional, Dict, Any
-import logging
-import json
-import math
 
-from app.database import get_db
-from app.auth import get_current_user, get_current_admin_user
+from app.auth import get_current_user
 from app.cruds import model_crud
+from app.database import get_db
+from app.models import Member, Model
 from app.schemas.model import (
     ModelResponse, ModelCreateRequest,
-    ModelTestRequest, ModelTestResponse,ModelCreateResponse ,
-    InnoUserInfo, ModelWithMemberInfo, ModelListWrapper
+    ModelCreateResponse,
+    InnoUserInfo
 )
 from app.services.model_service import model_service
-from app.models import Member, Model
 
 logger = logging.getLogger(__name__)
 

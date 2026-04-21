@@ -1,8 +1,10 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON, Index
-from sqlalchemy.sql import func
-from sqlalchemy.orm import relationship
-from . import Base
 from datetime import datetime
+
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON, Index
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+
+from . import Base
 
 
 class Prompt(Base):

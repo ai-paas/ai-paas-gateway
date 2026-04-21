@@ -1,6 +1,3 @@
-from app.models.lite_model import LiteModelData
-
-
 class LiteModelCRUD:
     """Placeholder CRUD for LiteModelData.
 

@@ -1,6 +1,7 @@
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional, Dict, Any, TYPE_CHECKING
 from datetime import datetime
+from typing import List, Optional, Dict, Any, TYPE_CHECKING
+
+from pydantic import BaseModel, Field, ConfigDict
 
 # 타입 체킹할 때만 import (순환 참조 방지)
 if TYPE_CHECKING:

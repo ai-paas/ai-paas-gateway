@@ -1,15 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException, Response, status, Query, Path
-from typing import Optional, Union, List
 import logging
+from typing import Optional, List
+
+from fastapi import APIRouter, Depends, HTTPException, Response, status, Query, Path
 
 from app.auth import get_current_user
+from app.models import Member
 from app.schemas.hub_connect import (
     ModelListParams, HubModelListWrapper, HubUserInfo,
     ExtendedHubModelResponse, HubModelFilesWrapper, ModelDownloadResponse,
     TagListResponse, TagGroupResponse, TagGroupAllResponse
 )
 from app.services.hub_connect_service import hub_connect_service
-from app.models import Member
 
 logger = logging.getLogger(__name__)
 

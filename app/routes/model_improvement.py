@@ -1,17 +1,18 @@
+import logging
+from typing import List, Optional
+
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
-from typing import List, Optional
-import logging
 
-from app.database import get_db
 from app.auth import get_current_user
 from app.cruds import model_improvement_crud, model_crud
+from app.database import get_db
+from app.models import Member
 from app.schemas.model_improvement import (
     ModelImprovementRequest, ModelImprovementResponse,
     ModelImprovementStatusResponse, TaskTypeResponse
 )
 from app.services.model_improvement_service import model_improvement_service
-from app.models import Member
 
 logger = logging.getLogger(__name__)
 

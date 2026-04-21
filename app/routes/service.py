@@ -1,9 +1,12 @@
+import logging
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from typing import Optional
-from app.database import get_db
+
+from app.auth import get_current_user
 from app.cruds.service import service_crud
-from app.auth import get_current_user, get_current_admin_user
+from app.database import get_db
 from app.schemas.service import (
     ServiceCreate,
     ServiceUpdate,
@@ -12,7 +15,6 @@ from app.schemas.service import (
     ServiceListResponse
 )
 from app.services.service_service import service_service
-import logging
 
 logger = logging.getLogger(__name__)
 

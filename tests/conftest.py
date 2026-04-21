@@ -6,17 +6,16 @@ DB 전략:
 - 선택: TEST_DATABASE_URL 환경변수로 PostgreSQL 전환 가능
 """
 import os
+
 import pytest
 from sqlalchemy import create_engine, event
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session
 
-from app.models.base import Base
 # 모든 모델을 import해야 Base.metadata에 등록됨
 from app.models import (
-    Member, Dataset, KnowledgeBase, Model, Workflow,
-    Experiment, ModelImprovement, Prompt, Service,
-    HubConnection, AnyCloudData, AnyCloudCache, LiteModelData
+    Member
 )
+from app.models.base import Base
 
 
 def get_test_engine():

@@ -1,11 +1,13 @@
+import logging
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
-from typing import Optional, List
-from app.database import get_db
-from app.cruds.knowledge_base import knowledge_base_crud
+
 from app.auth import get_current_user
+from app.cruds.knowledge_base import knowledge_base_crud
+from app.database import get_db
 from app.schemas.knowledge_base import (
-    KnowledgeBaseCreate,
     KnowledgeBaseUpdate,
     KnowledgeBaseResponse,
     KnowledgeBaseDetailResponse,
@@ -17,7 +19,6 @@ from app.schemas.knowledge_base import (
     KnowledgeBaseSearchResponse
 )
 from app.services.knowledge_base_service import knowledge_base_service
-import logging
 
 logger = logging.getLogger(__name__)
 

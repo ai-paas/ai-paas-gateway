@@ -1,5 +1,6 @@
+from typing import Any, Dict, List
+
 from pydantic import BaseModel, ConfigDict, Field
-from typing import Any, Optional, Dict, List
 
 
 class LiteModelResponse(BaseModel):

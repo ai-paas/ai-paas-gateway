@@ -1,5 +1,7 @@
-from sqlalchemy.orm import Session
 from typing import List, Optional, Tuple
+
+from sqlalchemy.orm import Session
+
 from app.models.prompt import Prompt
 from app.schemas.prompt import PromptCreate
 

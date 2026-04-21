@@ -1,7 +1,8 @@
-from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_
-from typing import Optional, List
 from datetime import datetime
+from typing import Optional, List
+
+from sqlalchemy import and_, or_
+from sqlalchemy.orm import Session
 
 from app.models.model import Model
 from app.schemas.model import ModelCreate, ModelUpdate

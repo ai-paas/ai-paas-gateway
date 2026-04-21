@@ -1,14 +1,15 @@
-import httpx
-import logging
-import json
 import asyncio
+import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
+
+import httpx
 from fastapi import HTTPException, status
+
 from app.config import settings
 from app.schemas.model import (
     ModelCreateRequest, ModelUpdate, ModelResponse,
-    ExternalModelResponse, ModelCreateResponse
+    ModelCreateResponse
 )
 
 logger = logging.getLogger(__name__)
