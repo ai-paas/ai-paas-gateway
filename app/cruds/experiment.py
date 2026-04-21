@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import and_
-from typing import Optional, List
+from sqlalchemy import and_, or_
+from typing import Optional, List, Tuple
 from datetime import datetime
 
 from app.models.experiment import Experiment
@@ -18,6 +18,36 @@ class ExperimentCRUD:
             )
         ).all()
         return [e.surro_experiment_id for e in experiments if e.surro_experiment_id]
+
+    def search_experiments_by_member_id(
+        self,
+        db: Session,
+        member_id: str,
+        skip: int = 0,
+        limit: int = 20,
+        search: Optional[str] = None,
+    ) -> Tuple[List[Experiment], int]:
+        """로컬 실험 매핑 검색"""
+        query = db.query(Experiment).filter(
+            and_(
+                Experiment.created_by == member_id,
+                Experiment.deleted_at.is_(None),
+            )
+        )
+
+        if search:
+            search_filter = f"%{search}%"
+            query = query.filter(
+                or_(
+                    Experiment.name.ilike(search_filter),
+                    Experiment.description.ilike(search_filter),
+                )
+            )
+
+        query = query.order_by(Experiment.surro_experiment_id.desc())
+        total = query.count()
+        experiments = query.offset(skip).limit(limit).all()
+        return experiments, total
 
     def get_experiment_by_surro_id(self, db: Session, surro_experiment_id: int, member_id: str) -> Optional[Experiment]:
         """외부 실험 ID와 멤버 ID로 조회"""
