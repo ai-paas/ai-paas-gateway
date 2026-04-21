@@ -4,6 +4,9 @@ on:
   push:
     branches: [ develop ]
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     runs-on: ${{ matrix.runner }}
