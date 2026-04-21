@@ -1,5 +1,6 @@
+import asyncio
 import logging
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.orm import Session
@@ -12,6 +13,7 @@ from app.schemas.experiment import (
     ExperimentDetailResponse,
     ExperimentInternalUpdateRequest,
     ExperimentListItem,
+    ExperimentListResponse,
     ExperimentReadResponse,
     ExperimentUpdateRequest,
 )
@@ -28,6 +30,43 @@ from app.services.pipeline_service import pipeline_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/learning", tags=["Learning"])
+SEARCH_DETAIL_CONCURRENCY = 5
+
+
+def _create_pagination_response(data, total: int, page: int, size: int):
+    return {
+        "data": data,
+        "total": total,
+        "page": page,
+        "size": size,
+    }
+
+
+async def _fetch_learning_details(
+    experiment_ids: List[int],
+    current_user: Member,
+) -> List[dict]:
+    semaphore = asyncio.Semaphore(SEARCH_DETAIL_CONCURRENCY)
+
+    async def _fetch_one(experiment_id: int):
+        async with semaphore:
+            try:
+                return await experiment_service.get_experiment(
+                    experiment_id=experiment_id,
+                    user_info={
+                        "member_id": current_user.member_id,
+                        "role": current_user.role,
+                        "name": current_user.name,
+                    },
+                )
+            except Exception as detail_error:
+                logger.warning(
+                    f"Failed to fetch learning detail for experiment {experiment_id}: {str(detail_error)}"
+                )
+                return None
+
+    results = await asyncio.gather(*[_fetch_one(experiment_id) for experiment_id in experiment_ids])
+    return [result for result in results if result is not None]
 
 
 async def _sync_external_experiments_for_admin(db: Session, current_user: Member) -> set[int]:
@@ -76,10 +115,56 @@ async def _sync_external_experiments_for_admin(db: Session, current_user: Member
     return owned_ids
 
 
-@router.get("", response_model=List[ExperimentListItem], summary="List Learning")
+@router.get(
+    "",
+    response_model=ExperimentListResponse,
+    summary="List Learning",
+    description="""
+학습 목록 조회
+
+파이프라인 학습 실행으로 생성된 학습 항목의 목록을 반환합니다.
+게이트웨이에서 사용자 소유 학습만 필터링한 뒤 페이지네이션하여 응답합니다.
+
+## Query Parameters
+- **page** (int, optional): 페이지 번호
+  - 기본값: `1`
+  - 최소값: `1`
+- **size** (int, optional): 페이지당 항목 수
+  - 기본값: `20`
+  - 범위: `1-100`
+
+## Response (ExperimentListResponse)
+- **data** (List[ExperimentListItem]): 학습 목록
+- **total** (int): 전체 항목 수
+- **page** (int): 현재 페이지 번호
+- **size** (int): 페이지당 항목 수
+
+`data`의 각 항목은 다음 정보를 포함합니다.
+- **id** (int): 학습 ID
+- **name** (str): 학습 이름
+- **description** (str, optional): 학습 설명
+- **status** (str): 학습 상태
+- **registration_status** (str): 모델 등록 상태
+- **registered_model_id** (int | null): 등록된 모델 ID
+- **elapsed_time** (int): 경과 시간
+- **end_time** (datetime | null): 종료 시각
+- **reference_model**: 참조 모델 요약 정보
+- **dataset**: 데이터셋 요약 정보
+- **created_at** (datetime): 생성 시각
+- **updated_at** (datetime): 수정 시각
+
+## Notes
+- 외부 MLOps 실험 목록을 게이트웨이에서 사용자 소유 기준으로 필터링한 뒤 응답합니다.
+
+## Errors
+- 401: 인증되지 않은 사용자
+- 500: 서버 내부 오류
+""",
+)
 async def list_learning(
-    skip: int = Query(0, ge=0, description="Number of items to skip"),
-    limit: int = Query(100, ge=1, le=1000, description="Maximum number of items to return"),
+    page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
+    size: int = Query(20, ge=1, le=100, description="페이지당 항목 수"),
+    search: Optional[str] = Query(None, description="검색어 (이름, 설명)"),
     db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
@@ -97,8 +182,13 @@ async def list_learning(
         - 기본값: `100`
         - 범위: `1-1000`
 
-    ## Response (List[ExperimentListItem])
-    각 항목은 다음 정보를 포함합니다.
+    ## Response (ExperimentListResponse)
+    - **data** (List[ExperimentListItem]): 학습 목록
+    - **total** (int): 전체 항목 수
+    - **page** (int): 현재 페이지 번호
+    - **size** (int): 페이지당 항목 수
+
+    `data`의 각 항목은 다음 정보를 포함합니다.
     - **id** (int): 학습 ID
     - **name** (str): 학습 이름
     - **description** (str, optional): 학습 설명
@@ -116,9 +206,46 @@ async def list_learning(
     - 500: 서버 내부 오류
     """
     try:
+        skip = (page - 1) * size
         owned_ids = await _sync_external_experiments_for_admin(db, current_user)
+
+        if search:
+            local_matches, total = experiment_crud.search_experiments_by_member_id(
+                db=db,
+                member_id=current_user.member_id,
+                skip=skip,
+                limit=size,
+                search=search,
+            )
+            if not local_matches:
+                return _create_pagination_response([], total, page, size)
+
+            page_ids = [exp.surro_experiment_id for exp in local_matches if exp.surro_experiment_id]
+            details = await _fetch_learning_details(page_ids, current_user)
+
+            for detail in details:
+                if detail.get("id") is None:
+                    continue
+                experiment_crud.update_mapping(
+                    db=db,
+                    surro_experiment_id=detail["id"],
+                    member_id=current_user.member_id,
+                    update_data={
+                        "name": detail.get("name"),
+                        "description": detail.get("description"),
+                    },
+                )
+
+            detail_by_id = {
+                detail["id"]: detail
+                for detail in details
+                if detail.get("id") is not None
+            }
+            ordered = [detail_by_id[experiment_id] for experiment_id in page_ids if experiment_id in detail_by_id]
+            return _create_pagination_response(ordered, total, page, size)
+
         if not owned_ids:
-            return []
+            return _create_pagination_response([], 0, page, size)
 
         all_experiments = await experiment_service.list_experiments(
             skip=0,
@@ -131,7 +258,8 @@ async def list_learning(
         )
 
         filtered = [exp for exp in all_experiments if exp.get("id") in owned_ids]
-        return filtered[skip:skip + limit]
+        total = len(filtered)
+        return _create_pagination_response(filtered[skip:skip + size], total, page, size)
 
     except HTTPException:
         raise
