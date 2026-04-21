@@ -1,7 +1,10 @@
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Index
-from sqlalchemy.sql import func
-from . import Base
 from datetime import datetime
+
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Index
+from sqlalchemy.sql import func
+
+from . import Base
+
 
 class Model(Base):
     """

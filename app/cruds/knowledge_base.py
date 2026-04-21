@@ -1,8 +1,9 @@
-from sqlalchemy.orm import Session
-from sqlalchemy import and_
-from typing import List, Optional, Tuple
-from datetime import datetime
 import logging
+from datetime import datetime
+from typing import Optional
+
+from sqlalchemy import and_
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 

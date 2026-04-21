@@ -1,10 +1,12 @@
+import logging
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from typing import Optional
-from app.database import get_db
-from app.models.prompt import Prompt  # 마이그레이션용 import 추가
+
+from app.auth import get_current_user
 from app.cruds.prompt import prompt_crud
-from app.auth import get_current_user, get_current_admin_user
+from app.database import get_db
 from app.schemas.prompt import (
     PromptCreate,
     PromptUpdate,
@@ -14,7 +16,6 @@ from app.schemas.prompt import (
     PromptVariableTypeListSchema
 )
 from app.services.prompt_service import prompt_service
-import logging
 
 logger = logging.getLogger(__name__)
 

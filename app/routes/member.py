@@ -1,18 +1,19 @@
+from datetime import datetime
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from typing import Optional
-from app.database import get_db
-from app.cruds import member_crud
+
 from app.auth import (
     get_current_user,
     get_current_admin_user,
     check_member_access
 )
+from app.cruds import member_crud
+from app.database import get_db
 from app.schemas.member import (
     MemberCreate, MemberUpdate, MemberResponse, MemberListResponse
 )
-from datetime import datetime
-
 
 router = APIRouter(prefix="/members", tags=["members"])
 

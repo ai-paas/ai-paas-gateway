@@ -12,7 +12,6 @@ from app.models import Member
 from app.schemas.experiment import (
     ExperimentDetailResponse,
     ExperimentInternalUpdateRequest,
-    ExperimentListItem,
     ExperimentListResponse,
     ExperimentReadResponse,
     ExperimentUpdateRequest,

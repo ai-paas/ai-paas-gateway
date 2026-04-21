@@ -1,6 +1,7 @@
-from pydantic import BaseModel, ConfigDict
-from typing import List, Optional, Dict, Any
 from datetime import datetime
+from typing import List, Optional, Dict, Any
+
+from pydantic import BaseModel, ConfigDict
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 

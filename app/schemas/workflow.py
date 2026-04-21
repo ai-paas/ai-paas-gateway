@@ -1,6 +1,7 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List, Any, Dict
 from datetime import datetime
+from typing import Optional, List, Any, Dict
+
+from pydantic import BaseModel, Field
 
 
 # ===== 외부 API 응답 스키마 =====
