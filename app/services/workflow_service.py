@@ -403,6 +403,53 @@ class WorkflowService:
             logger.error(f"Error testing ML workflow: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
 
+    async def inference_workflow_model(
+            self,
+            workflow_id: str,
+            component_id: str,
+            image: Optional[UploadFile] = None,
+            text: Optional[str] = None,
+            search_text: Optional[str] = None,
+            user_info: Optional[Dict] = None,
+    ) -> Dict[str, Any]:
+        """배포된 모델에 추론 요청 (Deprecated)
+
+        MLOps는 이 엔드포인트를 deprecated 처리했으며 내부적으로 test/rag 또는 test/ml로
+        대체 사용을 권장합니다. 호환성 유지를 위해 프록시만 제공합니다.
+        """
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}/models/{component_id}/inference"
+
+            data = {}
+            files = {}
+            if text is not None:
+                data['text'] = text
+            if search_text is not None:
+                data['search_text'] = search_text
+            if image is not None:
+                files['image'] = (image.filename, await image.read(), image.content_type)
+
+            kwargs = {}
+            if files:
+                kwargs['files'] = files
+                if data:
+                    kwargs['data'] = data
+            elif data:
+                kwargs['data'] = data
+
+            response = await self._make_authenticated_request(
+                "POST", url, user_info=user_info, **kwargs
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error inferring workflow model: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
     # ===== Template 관련 =====
 
     async def get_templates(

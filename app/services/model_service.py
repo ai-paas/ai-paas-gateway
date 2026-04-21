@@ -660,6 +660,102 @@ class ModelService:
                 detail=f"Internal error: {str(e)}"
             )
 
+    async def auto_generate_model(
+            self,
+            model_key: str,
+            user_info: Optional[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
+        """사전 정의 모델 자동 등록
+
+        MLOps의 POST /models/auto-generate 을 호출합니다.
+        provider/type/format 등의 메타 정보가 MLOps 내부에서 자동으로 설정됩니다.
+        """
+        try:
+            url = f"{self.base_url}/models/auto-generate"
+            params = {"model_key": model_key}
+
+            logger.info(f"Auto-generating model at: {url} (model_key={model_key})")
+
+            response = await self._make_authenticated_request(
+                "POST", url, user_info=user_info, params=params
+            )
+
+            if response.status_code in [200, 201]:
+                return response.json()
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Failed to auto-generate model: {response.text}"
+            )
+
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout auto-generating model: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="External service timeout"
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error auto-generating model: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
+    async def update_base_deployment_status(
+            self,
+            model_id: int,
+            service_name: str,
+            service_hostname: str,
+            deployment_status: str,
+            internal_url: Optional[str] = None,
+            error_message: Optional[str] = None,
+            user_info: Optional[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
+        """모델 기본 배포 상태 업데이트 (내부 API 프록시)
+
+        Kubeflow 파이프라인 컴포넌트에서만 호출되는 내부 API로,
+        게이트웨이는 호환성을 위해 그대로 프록시합니다.
+        """
+        try:
+            url = f"{self.base_url}/models/base-deployments/{model_id}/status"
+            payload = {
+                "service_name": service_name,
+                "service_hostname": service_hostname,
+                "status": deployment_status,
+            }
+            if internal_url is not None:
+                payload["internal_url"] = internal_url
+            if error_message is not None:
+                payload["error_message"] = error_message
+
+            response = await self._make_authenticated_request(
+                "PUT", url, user_info=user_info, json=payload,
+                headers={'Content-Type': 'application/json'}
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Failed to update base deployment status: {response.text}"
+            )
+
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout updating base deployment status: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="External service timeout"
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error updating base deployment status: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
     async def get_model_formats(
             self,
             user_info: Optional[Dict[str, str]] = None,
