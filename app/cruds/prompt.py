@@ -1,5 +1,6 @@
 from typing import List, Optional, Tuple
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.prompt import Prompt
@@ -55,12 +56,26 @@ class PromptCRUD:
             db: Session,
             skip: Optional[int] = None,
             limit: Optional[int] = None,
-            search: Optional[str] = None
+            search: Optional[str] = None,
+            order_by: Optional[list] = None,
     ) -> Tuple[List[Prompt], int]:
         """프롬프트 목록 조회"""
         query = db.query(Prompt)
 
+        if search:
+            search_filter = f"%{search}%"
+            query = query.filter(
+                or_(
+                    Prompt.name.ilike(search_filter),
+                    Prompt.description.ilike(search_filter),
+                    Prompt.content.ilike(search_filter),
+                )
+            )
+
         total = query.count()
+
+        if order_by:
+            query = query.order_by(*order_by)
 
         # 페이지네이션 적용 (skip, limit이 있을 때만)
         if skip is not None and limit is not None:

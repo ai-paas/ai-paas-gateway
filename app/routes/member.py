@@ -9,13 +9,27 @@ from app.auth import (
     get_current_admin_user,
     check_member_access
 )
+from app.common.sort import parse_sort, resolve_sort_columns
 from app.cruds import member_crud
 from app.database import get_db
+from app.models.member import Member
 from app.schemas.member import (
     MemberCreate, MemberUpdate, MemberResponse, MemberListResponse
 )
 
 router = APIRouter(prefix="/members", tags=["members"])
+
+_MEMBER_SORT_FIELDS = {
+    "member_id": Member.member_id,
+    "name": Member.name,
+    "email": Member.email,
+    "role": Member.role,
+    "is_active": Member.is_active,
+    "created_at": Member.created_at,
+    "updated_at": Member.updated_at,
+}
+_MEMBER_SORT_DEFAULT = [(Member.created_at, True)]
+_MEMBER_SORT_TIE_BREAKER = Member.member_id
 
 
 @router.post("/", response_model=MemberResponse)
@@ -44,17 +58,39 @@ def get_members(
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
         search: Optional[str] = Query(None, description="검색어 (아이디, 이름, 이메일)"),
         role: Optional[str] = Query(None, description="역할 필터 (admin/user)"),
+        sort: Optional[str] = Query(
+            None,
+            description=(
+                "정렬 기준. `,` 로 다중 키, `-` 접두사는 내림차순(DESC). "
+                "미지정 시 `-created_at`. 허용 필드: "
+                "`member_id`, `name`, `email`, `role`, `is_active`, `created_at`, `updated_at`."
+            ),
+            openapi_examples={
+                "default": {"summary": "최신순 (기본)", "value": "-created_at"},
+                "name_asc": {"summary": "이름 오름차순", "value": "name"},
+                "name_desc": {"summary": "이름 내림차순", "value": "-name"},
+                "role_then_name": {"summary": "역할 ASC + 이름 ASC", "value": "role,name"},
+                "multi": {"summary": "활성 상태 DESC + 생성일 DESC", "value": "-is_active,-created_at"},
+            },
+        ),
         db: Session = Depends(get_db),
         _: None = Depends(get_current_admin_user)
 ):
     """멤버 목록 조회 (검색 및 필터링 포함)"""
     skip = (page - 1) * size
+    order_by = resolve_sort_columns(
+        parsed=parse_sort(sort),
+        allowed=_MEMBER_SORT_FIELDS,
+        default=_MEMBER_SORT_DEFAULT,
+        tie_breaker=_MEMBER_SORT_TIE_BREAKER,
+    )
     members, total = member_crud.get_members(
         db=db,
-        skip = skip,
+        skip=skip,
         limit=size,
         search=search,
-        role=role
+        role=role,
+        order_by=order_by,
     )
 
     return MemberListResponse(

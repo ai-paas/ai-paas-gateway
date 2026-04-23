@@ -1,7 +1,7 @@
 from sqlalchemy import Column, Integer, String, DateTime, Boolean, Index, JSON
 from sqlalchemy.sql import func
 
-from . import Base
+from .base import Base
 
 
 class HubConnection(Base):

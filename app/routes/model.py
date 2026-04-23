@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, Path, File
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
+from app.common.sort import parse_sort, sort_in_memory
 from app.cruds import model_crud
 from app.database import get_db
 from app.models import Member, Model
@@ -18,6 +19,17 @@ from app.services.model_service import model_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/models", tags=["Models"])
+
+# 외부 ModelResponse 객체 기준 getter (id 와 surro_model_id 는 동일 축)
+_MODEL_SORT_GETTERS = {
+    "id": lambda m: m.id,
+    "surro_model_id": lambda m: m.id,
+    "name": lambda m: m.name,
+    "created_at": lambda m: m.created_at,
+    "updated_at": lambda m: m.updated_at,
+}
+_MODEL_SORT_DEFAULT = [("created_at", True)]
+_MODEL_SORT_TIE_BREAKER = lambda m: m.id
 
 
 def _create_inno_user_info(user: Member) -> InnoUserInfo:
@@ -206,6 +218,20 @@ async def get_all_models(
         model_provider_id: Optional[int] = Query(None, description="모델 제공자 ID로 필터링"),
         model_format_id: Optional[int] = Query(None, description="모델 포맷 ID로 필터링"),
         filter_type: Optional[str] = Query(None, description="필터 타입: 'custom'(내 모델만), 'catalog'(카탈로그만), None(전체)"),
+        sort: Optional[str] = Query(
+            None,
+            description=(
+                "정렬 기준. `,` 로 다중 키, `-` 접두사는 내림차순(DESC). "
+                "미지정 시 `-created_at`. 허용 필드: "
+                "`id`, `surro_model_id`, `name`, `created_at`, `updated_at`."
+            ),
+            openapi_examples={
+                "default": {"summary": "최신순 (기본)", "value": "-created_at"},
+                "name_asc": {"summary": "이름 오름차순", "value": "name"},
+                "name_desc": {"summary": "이름 내림차순", "value": "-name"},
+                "multi": {"summary": "수정시각 DESC + 이름 ASC", "value": "-updated_at,name"},
+            },
+        ),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
@@ -348,16 +374,27 @@ async def get_all_models(
                    hasattr(m.format_info, 'id') and m.format_info.id == model_format_id
             ]
 
-        # 6. 페이지네이션 적용
+        # 6. 정렬 적용 (외부 응답 필드 기준 in-memory 정렬)
+        filtered_models = sort_in_memory(
+            items=filtered_models,
+            parsed=parse_sort(sort),
+            getters=_MODEL_SORT_GETTERS,
+            default=_MODEL_SORT_DEFAULT,
+            tie_breaker_getter=_MODEL_SORT_TIE_BREAKER,
+        )
+
+        # 7. 페이지네이션 적용
         total = len(filtered_models)
         skip = (page - 1) * size
         paginated_models = filtered_models[skip:skip + size]
 
-        # 7. ModelResponse로 변환
+        # 8. ModelResponse로 변환
         wrapped_models = [ModelResponse(**m.model_dump()) for m in paginated_models]
 
         return _create_pagination_response(wrapped_models, total, page, size)
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting all models for {current_user.member_id}: {str(e)}")
         raise HTTPException(

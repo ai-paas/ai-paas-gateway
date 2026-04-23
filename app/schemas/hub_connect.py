@@ -93,6 +93,9 @@ class ModelListResponse(BaseModel):
     total: Optional[int] = Field(None, description="총 모델 수")
     page: int = Field(1, description="현재 페이지")
     limit: int = Field(30, description="페이지 당 항목 수")
+    has_more: Optional[bool] = Field(None, description="다음 페이지 존재 가능성 (Kaggle 등 하한값 total을 쓰는 마켓에서 의미 있음)")
+    total_is_exact: Optional[bool] = Field(None, description="total이 정확한 전체 수인지 여부 (HF=true, Kaggle=false)")
+    applied_filters: Optional[Dict[str, Any]] = Field(None, description="실제 업스트림에 적용된 필터 정보 (일부 마켓에서만 제공)")
 
 
 class ModelFileInfo(BaseModel):
@@ -112,10 +115,20 @@ class HubUserInfo(BaseModel):
     role: str = Field(..., description="사용자 역할")
     name: str = Field(..., description="사용자 이름")
 
+class ModelListPagination(BaseModel):
+    """허브 모델 목록 페이지네이션 정보"""
+    total: Optional[int] = Field(None, description="전체 모델 수 또는 하한값 (total_is_exact=false일 때 '최소 이만큼')")
+    page: int = Field(1, description="현재 페이지")
+    limit: int = Field(30, description="페이지당 항목 수")
+    has_more: Optional[bool] = Field(None, description="다음 페이지 존재 가능성")
+    total_is_exact: Optional[bool] = Field(None, description="total이 정확한 전체 수인지 여부 (HuggingFace=true, Kaggle=false)")
+    applied_filters: Optional[Dict[str, Any]] = Field(None, description="실제 업스트림에 적용된 필터 정보 (일부 마켓에서만 제공)")
+
+
 class HubModelListWrapper(BaseModel):
     """허브 모델 목록 래퍼"""
     data: List[HubModelResponse] = Field(..., description="모델 목록")
-    pagination: Optional[Dict[str, Any]] = Field(None, description="페이지네이션 정보")
+    pagination: Optional[ModelListPagination] = Field(None, description="페이지네이션 정보")
 
 
 class HubModelFilesWrapper(BaseModel):
@@ -146,6 +159,13 @@ class ExtendedHubModelResponse(BaseModel):
     license: Optional[str] = Field(None, description="라이선스")
     license_link: Optional[str] = Field(None, description="라이선스 링크")
     card_html: Optional[str] = Field(None, description="모델 카드 HTML 내용")
+    variation_resolved: Optional[bool] = Field(
+        None,
+        description="(Kaggle 전용) 요청 핸들의 framework/variation 메타가 exact match로 해결되었는지 여부. false면 모델 레벨 정보로 폴백."
+    )
+
+    # 업스트림 마켓 카드 메타데이터의 추가 필드를 그대로 pass-through (HF/Kaggle 공통 확장 포인트)
+    model_config = ConfigDict(extra="allow")
 
     def dict(self, *args, **kwargs):
         data = super().dict(*args, **kwargs)
@@ -216,3 +236,71 @@ class TagGroupAllResponse(BaseModel):
 class TagsParams(BaseModel):
     """태그 조회 파라미터"""
     market: Optional[str] = Field("huggingface", description="모델 마켓")
+
+
+# ===== Datasets =====
+
+class DatasetListParams(BaseModel):
+    """데이터셋 목록 조회 파라미터 (공개 API는 page/size 사용, 서비스에서 limit로 변환)"""
+    market: Optional[str] = Field("huggingface", description="대상 마켓")
+    query: Optional[str] = Field(None, description="검색어")
+    sort: Optional[str] = Field("likes", description="정렬 기준")
+    page: Optional[int] = Field(1, ge=1, description="페이지 번호")
+    size: Optional[int] = Field(20, ge=1, le=100, description="페이지당 항목 수")
+
+
+class HubDatasetItem(BaseModel):
+    """데이터셋 목록 아이템"""
+    id: str = Field(..., description="데이터셋 식별자")
+    author: Optional[str] = Field(None, description="작성자")
+    downloads: Optional[int] = Field(None, description="다운로드 수")
+    likes: Optional[int] = Field(None, description="좋아요 수")
+    lastModified: Optional[Union[str, datetime]] = Field(None, description="마지막 수정 시각")
+    gated: Optional[Union[bool, str]] = Field(None, description="접근 제한 여부")
+    private: Optional[bool] = Field(None, description="비공개 여부")
+    repoType: Optional[str] = Field(None, description="저장소 타입")
+
+    model_config = ConfigDict(extra="allow")
+
+
+class DatasetListResponse(BaseModel):
+    """데이터셋 목록 응답 (게이트웨이 공개 계약: data/total/page/size)"""
+    data: List[HubDatasetItem] = Field(..., description="데이터셋 목록")
+    total: Optional[int] = Field(None, description="전체 개수 또는 하한값 (total_is_exact=false일 때는 '최소 이만큼'의 의미)")
+    page: int = Field(1, description="현재 페이지")
+    size: int = Field(20, description="페이지당 항목 수")
+    has_more: Optional[bool] = Field(None, description="다음 페이지 존재 가능성")
+    total_is_exact: Optional[bool] = Field(None, description="total이 정확한 전체 수인지 여부 (HF=true, Kaggle=false)")
+
+
+class DatasetInfoResponse(BaseModel):
+    """데이터셋 상세 응답"""
+    dataset_info: Dict[str, Any] = Field(default_factory=dict, description="설정별 데이터셋 상세 정보 (Kaggle은 features/splits 메타가 없어 항상 빈 객체)")
+    pending: List[str] = Field(default_factory=list, description="아직 준비 중인 항목 목록")
+    failed: List[Any] = Field(default_factory=list, description="조회 실패 항목 목록")
+    partial: Optional[bool] = Field(None, description="일부만 조회되었는지 여부 (Kaggle은 항상 true)")
+    cardData: Optional[Dict[str, Any]] = Field(None, description="README 카드 메타데이터")
+
+    model_config = ConfigDict(extra="allow")
+
+
+class DatasetFileInfo(BaseModel):
+    """데이터셋 파일 정보"""
+    name: str = Field(..., description="파일명 또는 저장소 내 경로")
+    size: Optional[str] = Field(None, description="사람이 읽기 쉬운 파일 크기")
+    blob_id: Optional[str] = Field(None, description="파일 blob 식별자 (Kaggle은 항상 null)")
+
+
+class DatasetFilesResponse(BaseModel):
+    """데이터셋 파일 목록 응답"""
+    data: List[DatasetFileInfo] = Field(..., description="파일 목록")
+
+
+class DatasetSnapshotDownloadResponse(BaseModel):
+    """데이터셋 스냅샷 다운로드 결과 (download_dir 지정 시)"""
+    download_type: str = Field(..., description="다운로드 방식")
+    snapshot_path: Optional[str] = Field(None, description="저장된 스냅샷 경로")
+    repo_id: str = Field(..., description="대상 데이터셋 ID")
+    total_files: Optional[int] = Field(None, description="저장된 파일 수")
+    message: Optional[str] = Field(None, description="캐시 다운로드 시 안내 메시지")
+    filters_applied: Optional[bool] = Field(None, description="(Kaggle 전용) allow/ignore 패턴이 실제 적용되었는지 여부")

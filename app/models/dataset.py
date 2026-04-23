@@ -1,7 +1,7 @@
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, Index
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, Index, Text
 from sqlalchemy.sql import func
 
-from . import Base
+from .base import Base
 
 
 class Dataset(Base):
@@ -40,6 +40,11 @@ class Dataset(Base):
         String(255),
         nullable=True,
         comment="데이터셋 이름 (캐시용)"
+    )
+    description = Column(
+        Text,
+        nullable=True,
+        comment="데이터셋 설명 (캐시용, 검색 대상)"
     )
 
     # 메타데이터
@@ -116,6 +121,7 @@ class Dataset(Base):
             'surro_dataset_id': self.surro_dataset_id,
             'created_by': self.created_by,
             'name': self.name,
+            'description': self.description,
             'created_at': self.created_at,
             'updated_at': self.updated_at,
             'updated_by': self.updated_by,
@@ -134,12 +140,14 @@ class Dataset(Base):
             cls,
             surro_dataset_id: int,
             member_id: str,
-            dataset_name: str = None
+            dataset_name: str = None,
+            dataset_description: str = None
     ):
         """새 매핑 생성을 위한 헬퍼 메서드"""
         return cls(
             surro_dataset_id=surro_dataset_id,
             created_by=member_id,
             updated_by=member_id,
-            name=dataset_name
+            name=dataset_name,
+            description=dataset_description
         )
