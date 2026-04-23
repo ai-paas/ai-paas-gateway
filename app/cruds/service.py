@@ -42,7 +42,8 @@ class ServiceCRUD:
             skip: int = 0,
             limit: int = 100,
             search: Optional[str] = None,
-            creator_name: Optional[str] = None
+            creator_name: Optional[str] = None,
+            order_by: Optional[list] = None,
     ) -> Tuple[List[Service], int]:
         """서비스 목록 조회"""
         query = db.query(Service)
@@ -60,6 +61,8 @@ class ServiceCRUD:
             query = query.filter(Service.created_by.ilike(f"%{creator_name}%"))
 
         total = query.count()
+        if order_by:
+            query = query.order_by(*order_by)
         services = query.offset(skip).limit(limit).all()
         return services, total
 

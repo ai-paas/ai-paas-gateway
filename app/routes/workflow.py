@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
+from app.common.sort import parse_sort, sort_in_memory
 from app.cruds.workflow import workflow_crud
 from app.database import get_db
 from app.models.member import Member
@@ -23,6 +24,19 @@ from app.services.workflow_service import workflow_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
+
+# 워크플로우는 merge 후 WorkflowResponse 리스트로 in-memory 정렬.
+# 로컬 필드(id/name/created_at/updated_at/created_by) + 외부 필드(status) 모두 허용.
+_WORKFLOW_SORT_GETTERS = {
+    "id": lambda w: w.id,
+    "name": lambda w: w.name,
+    "created_at": lambda w: w.created_at,
+    "updated_at": lambda w: w.updated_at,
+    "created_by": lambda w: w.created_by,
+    "status": lambda w: w.status,
+}
+_WORKFLOW_SORT_DEFAULT = [("created_at", True)]
+_WORKFLOW_SORT_TIE_BREAKER = lambda w: w.id
 
 # ===== Component Types =====
 
@@ -214,6 +228,21 @@ async def get_workflows(
         creator_id: Optional[str] = Query(None, description="생성자 member_id 필터 (게이트웨이 DB 기준)"),
         service_id: Optional[str] = Query(None, description="서비스 ID 필터 (UUID)"),
         status: Optional[str] = Query(None, description="상태 필터 (DRAFT/ACTIVE/ERROR)"),
+        sort: Optional[str] = Query(
+            None,
+            description=(
+                "정렬 기준. `,` 로 다중 키, `-` 접두사는 내림차순(DESC). "
+                "미지정 시 `-created_at`. 허용 필드: "
+                "`id`, `name`, `created_at`, `updated_at`, `created_by`, `status`."
+            ),
+            openapi_examples={
+                "default": {"summary": "최신순 (기본)", "value": "-created_at"},
+                "name_asc": {"summary": "이름 오름차순", "value": "name"},
+                "status_asc": {"summary": "상태 ASC (외부 필드)", "value": "status"},
+                "status_then_name": {"summary": "상태 ASC + 이름 ASC", "value": "status,name"},
+                "multi": {"summary": "수정시각 DESC + 이름 ASC", "value": "-updated_at,name"},
+            },
+        ),
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -236,6 +265,9 @@ async def get_workflows(
         - "DRAFT": 임시저장 상태
         - "ACTIVE": 활성 상태 (배포됨)
         - "ERROR": 오류 상태
+    - sort (str, optional): 정렬 기준 (`,` 다중 키, `-` DESC).
+        - 기본: `-created_at`. 허용: `id`, `name`, `created_at`, `updated_at`, `created_by`, `status`.
+        - 로컬 필드와 외부 필드(`status`) 모두 지원 — merge 완료 리스트에 in-memory 정렬 적용.
 
     ## Response (WorkflowListResponse)
     - total (int): 필터 조건에 맞는 전체 워크플로우 수
@@ -260,6 +292,7 @@ async def get_workflows(
 
     ## Errors
     - **401**: 인증되지 않은 사용자
+    - **422**: 허용되지 않은 sort 필드
     - **500**: 서버 내부 오류
     """
     user_info = {
@@ -372,7 +405,16 @@ async def get_workflows(
 
     total = len(merged)
 
-    # 5) 게이트웨이 레벨 페이지네이션
+    # 5) 정렬 (merge 완료된 리스트에 in-memory 적용, 로컬/외부 필드 모두 수용)
+    merged = sort_in_memory(
+        items=merged,
+        parsed=parse_sort(sort),
+        getters=_WORKFLOW_SORT_GETTERS,
+        default=_WORKFLOW_SORT_DEFAULT,
+        tie_breaker_getter=_WORKFLOW_SORT_TIE_BREAKER,
+    )
+
+    # 6) 게이트웨이 레벨 페이지네이션
     if page is not None and size is not None:
         start = (page - 1) * size
         merged = merged[start:start + size]

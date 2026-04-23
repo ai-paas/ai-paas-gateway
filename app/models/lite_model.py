@@ -1,7 +1,7 @@
 from sqlalchemy import Boolean, Column, DateTime, Index, Integer, JSON, String
 from sqlalchemy.sql import func
 
-from . import Base
+from .base import Base
 
 
 class LiteModelData(Base):

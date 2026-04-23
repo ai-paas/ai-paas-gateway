@@ -186,6 +186,78 @@ class ModelCRUD:
         db.refresh(db_model)
         return db_model
 
+    def upsert_model_mapping(
+            self,
+            db: Session,
+            surro_model_id: int,
+            member_id: str,
+            model_name: str = None,
+            is_catalog: bool = False
+    ) -> Model:
+        """삭제 여부와 관계없이 매핑을 생성하거나 재활성화한다."""
+        existing = db.query(Model).filter(
+            and_(
+                Model.surro_model_id == surro_model_id,
+                Model.created_by == member_id
+            )
+        ).order_by(Model.id.desc()).first()
+
+        if existing:
+            existing.name = model_name or existing.name
+            existing.is_catalog = is_catalog
+            existing.is_active = True
+            existing.deleted_at = None
+            existing.deleted_by = None
+            existing.updated_by = member_id
+            existing.updated_at = datetime.utcnow()
+            db.commit()
+            db.refresh(existing)
+            return existing
+
+        return self.create_model_mapping(
+            db=db,
+            surro_model_id=surro_model_id,
+            member_id=member_id,
+            model_name=model_name,
+            is_catalog=is_catalog
+        )
+
+    def soft_delete_missing_mappings(
+            self,
+            db: Session,
+            member_id: str,
+            active_surro_model_ids: List[int],
+            deleted_by: Optional[str] = None
+    ) -> int:
+        """외부 목록에 없는 활성 매핑을 소프트 삭제한다."""
+        active_id_set = set(active_surro_model_ids)
+        targets = db.query(Model).filter(
+            and_(
+                Model.created_by == member_id,
+                Model.deleted_at.is_(None),
+                Model.is_active == True
+            )
+        ).all()
+
+        deleted_count = 0
+        actor = deleted_by or member_id
+        now = datetime.utcnow()
+
+        for model in targets:
+            if model.surro_model_id in active_id_set:
+                continue
+            model.is_active = False
+            model.deleted_at = now
+            model.deleted_by = actor
+            model.updated_by = actor
+            model.updated_at = now
+            deleted_count += 1
+
+        if deleted_count:
+            db.commit()
+
+        return deleted_count
+
     def delete_model_mapping(self, db: Session, surro_model_id: int, member_id: str) -> bool:
         """모델 매핑 소프트 삭제"""
         db_model = self.get_model_by_surro_id(db, surro_model_id, member_id)

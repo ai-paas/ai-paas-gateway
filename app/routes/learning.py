@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from typing import List, Optional
 
@@ -6,9 +5,11 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_admin_user, get_current_user
+from app.common.sort import parse_sort, resolve_sort_columns
 from app.cruds import experiment_crud
 from app.database import get_db
 from app.models import Member
+from app.models.experiment import Experiment
 from app.schemas.experiment import (
     ExperimentDetailResponse,
     ExperimentInternalUpdateRequest,
@@ -29,7 +30,15 @@ from app.services.pipeline_service import pipeline_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/learning", tags=["Learning"])
-SEARCH_DETAIL_CONCURRENCY = 5
+
+_LEARNING_SORT_FIELDS = {
+    "surro_experiment_id": Experiment.surro_experiment_id,
+    "name": Experiment.name,
+    "created_at": Experiment.created_at,
+    "updated_at": Experiment.updated_at,
+}
+_LEARNING_SORT_DEFAULT = [(Experiment.created_at, True)]
+_LEARNING_SORT_TIE_BREAKER = Experiment.surro_experiment_id
 
 
 def _create_pagination_response(data, total: int, page: int, size: int):
@@ -41,43 +50,24 @@ def _create_pagination_response(data, total: int, page: int, size: int):
     }
 
 
-async def _fetch_learning_details(
-    experiment_ids: List[int],
-    current_user: Member,
-) -> List[dict]:
-    semaphore = asyncio.Semaphore(SEARCH_DETAIL_CONCURRENCY)
-
-    async def _fetch_one(experiment_id: int):
-        async with semaphore:
-            try:
-                return await experiment_service.get_experiment(
-                    experiment_id=experiment_id,
-                    user_info={
-                        "member_id": current_user.member_id,
-                        "role": current_user.role,
-                        "name": current_user.name,
-                    },
-                )
-            except Exception as detail_error:
-                logger.warning(
-                    f"Failed to fetch learning detail for experiment {experiment_id}: {str(detail_error)}"
-                )
-                return None
-
-    results = await asyncio.gather(*[_fetch_one(experiment_id) for experiment_id in experiment_ids])
-    return [result for result in results if result is not None]
-
-
 async def _sync_external_experiments_for_admin(db: Session, current_user: Member) -> set[int]:
-    # External MLOps still exposes training through the legacy pipeline/experiments APIs.
-    # The gateway keeps a local experiments mapping table so the frontend can use the
-    # unified learning domain while ownership checks remain gateway-controlled.
+    """admin 사용자에 한해 외부에만 존재하는 실험을 로컬 매핑에 등록.
+
+    외부 목록을 내부에서 1회 fetch. 상세/목록 API 에 의존하지 않도록 독립 유지.
+    """
     owned_ids = set(experiment_crud.get_experiments_by_member_id(db, current_user.member_id))
 
     if current_user.role != "admin":
         return owned_ids
 
-    all_experiments = await experiment_service.list_experiments(
+    all_experiments = await _fetch_external_experiments(current_user)
+    _register_missing_experiments_to_admin(db, current_user, all_experiments, owned_ids)
+    return owned_ids
+
+
+async def _fetch_external_experiments(current_user: Member) -> List[dict]:
+    """외부 MLOps 에서 실험 목록을 가져온다 (admin sync + stale validation 공용)."""
+    return await experiment_service.list_experiments(
         skip=0,
         limit=1000,
         user_info={
@@ -87,6 +77,14 @@ async def _sync_external_experiments_for_admin(db: Session, current_user: Member
         },
     )
 
+
+def _register_missing_experiments_to_admin(
+    db: Session,
+    current_user: Member,
+    all_experiments: List[dict],
+    owned_ids: set[int],
+) -> None:
+    """외부에만 존재하는 실험을 admin 의 로컬 매핑으로 등록."""
     missing = [exp for exp in all_experiments if exp.get("id") not in owned_ids]
     for exp in missing:
         exp_id = exp.get("id")
@@ -111,8 +109,6 @@ async def _sync_external_experiments_for_admin(db: Session, current_user: Member
         except Exception as sync_error:
             logger.warning(f"Failed to sync external experiment {exp_id}: {str(sync_error)}")
 
-    return owned_ids
-
 
 @router.get(
     "",
@@ -122,15 +118,15 @@ async def _sync_external_experiments_for_admin(db: Session, current_user: Member
 학습 목록 조회
 
 파이프라인 학습 실행으로 생성된 학습 항목의 목록을 반환합니다.
-게이트웨이에서 사용자 소유 학습만 필터링한 뒤 페이지네이션하여 응답합니다.
+게이트웨이 로컬 매핑이 정렬·페이지네이션을 주도하며, 외부 MLOps API는
+페이지 내 항목의 상세 정보를 동시 보강합니다.
 
 ## Query Parameters
-- **page** (int, optional): 페이지 번호
-  - 기본값: `1`
-  - 최소값: `1`
-- **size** (int, optional): 페이지당 항목 수
-  - 기본값: `20`
-  - 범위: `1-100`
+- **page** (int, optional): 페이지 번호 (기본값: 1, 최소값: 1)
+- **size** (int, optional): 페이지당 항목 수 (기본값: 20, 범위: 1-100)
+- **search** (str, optional): 검색어 (이름, 설명 ILIKE)
+- **sort** (str, optional): 정렬 기준. `,` 로 다중 키, `-` 접두사=DESC.
+  기본 `-created_at`. 허용: `surro_experiment_id`, `name`, `created_at`, `updated_at`.
 
 ## Response (ExperimentListResponse)
 - **data** (List[ExperimentListItem]): 학습 목록
@@ -138,25 +134,13 @@ async def _sync_external_experiments_for_admin(db: Session, current_user: Member
 - **page** (int): 현재 페이지 번호
 - **size** (int): 페이지당 항목 수
 
-`data`의 각 항목은 다음 정보를 포함합니다.
-- **id** (int): 학습 ID
-- **name** (str): 학습 이름
-- **description** (str, optional): 학습 설명
-- **status** (str): 학습 상태
-- **registration_status** (str): 모델 등록 상태
-- **registered_model_id** (int | null): 등록된 모델 ID
-- **elapsed_time** (int): 경과 시간
-- **end_time** (datetime | null): 종료 시각
-- **reference_model**: 참조 모델 요약 정보
-- **dataset**: 데이터셋 요약 정보
-- **created_at** (datetime): 생성 시각
-- **updated_at** (datetime): 수정 시각
-
 ## Notes
-- 외부 MLOps 실험 목록을 게이트웨이에서 사용자 소유 기준으로 필터링한 뒤 응답합니다.
+- 외부 MLOps 실험 상세를 게이트웨이 로컬 매핑 순서에 맞춰 보강합니다.
+- 외부에서 사라진 매핑은 응답에서 스킵됩니다.
 
 ## Errors
 - 401: 인증되지 않은 사용자
+- 422: 허용되지 않은 sort 필드
 - 500: 서버 내부 오류
 """,
 )
@@ -164,101 +148,86 @@ async def list_learning(
     page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
     size: int = Query(20, ge=1, le=100, description="페이지당 항목 수"),
     search: Optional[str] = Query(None, description="검색어 (이름, 설명)"),
+    sort: Optional[str] = Query(
+        None,
+        description=(
+            "정렬 기준. `,` 로 다중 키, `-` 접두사는 내림차순(DESC). "
+            "미지정 시 `-created_at`. 허용 필드: "
+            "`surro_experiment_id`, `name`, `created_at`, `updated_at`."
+        ),
+        openapi_examples={
+            "default": {"summary": "최신순 (기본)", "value": "-created_at"},
+            "name_asc": {"summary": "이름 오름차순", "value": "name"},
+            "name_desc": {"summary": "이름 내림차순", "value": "-name"},
+            "multi": {"summary": "수정시각 DESC + 이름 ASC", "value": "-updated_at,name"},
+        },
+    ),
     db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
-    """
-    학습 목록 조회
-
-    파이프라인 학습 실행으로 생성된 학습 항목의 목록을 반환합니다.
-    게이트웨이에서 사용자 소유 학습만 필터링한 뒤, 프론트엔드와 약속된 `skip`/`limit` 방식으로 페이지네이션하여 응답합니다.
-
-    ## Query Parameters
-    - **skip** (int, optional): 건너뛸 항목 수
-        - 기본값: `0`
-        - 최소값: `0`
-    - **limit** (int, optional): 반환할 최대 항목 수
-        - 기본값: `100`
-        - 범위: `1-1000`
-
-    ## Response (ExperimentListResponse)
-    - **data** (List[ExperimentListItem]): 학습 목록
-    - **total** (int): 전체 항목 수
-    - **page** (int): 현재 페이지 번호
-    - **size** (int): 페이지당 항목 수
-
-    `data`의 각 항목은 다음 정보를 포함합니다.
-    - **id** (int): 학습 ID
-    - **name** (str): 학습 이름
-    - **description** (str, optional): 학습 설명
-    - **status** (str): 학습 상태
-    - **model registration status 관련 요약 정보**
-    - **경과 시간, 종료 시간 등 요약 정보**
-
-    ## Notes
-    - 외부 MLOps API의 실험 목록을 게이트웨이에서 사용자 기준으로 필터링한 후 응답합니다.
-    - 프론트엔드 연동 규약에 따라 게이트웨이에서는 `skip`/`limit` 방식 페이지네이션을 유지합니다.
-    - 외부 API의 페이지 파라미터 형식은 게이트웨이 내부에서만 사용되며 프론트엔드에 그대로 노출하지 않습니다.
-
-    ## Errors
-    - 401: 인증되지 않은 사용자
-    - 500: 서버 내부 오류
-    """
+    """학습 목록 조회 (로컬 주도형 페이지네이션 + 외부 list 응답 재사용)."""
     try:
         skip = (page - 1) * size
-        owned_ids = await _sync_external_experiments_for_admin(db, current_user)
 
-        if search:
-            local_matches, total = experiment_crud.search_experiments_by_member_id(
-                db=db,
-                member_id=current_user.member_id,
-                skip=skip,
-                limit=size,
-                search=search,
+        # 외부 list 를 1회 fetch. 이 응답을 (1) admin sync 대상 (2) stale 검증
+        # (3) 페이지 상세 소스 세 가지로 재사용 → per-ID 호출 N회 제거, stale 차단.
+        all_external_experiments = await _fetch_external_experiments(current_user)
+        detail_by_external_id = {
+            exp["id"]: exp
+            for exp in all_external_experiments
+            if exp.get("id") is not None
+        }
+        valid_external_ids = set(detail_by_external_id.keys())
+
+        # admin: 외부에만 존재하는 실험을 로컬에 등록 (부수효과)
+        if current_user.role == "admin":
+            owned_ids = set(
+                experiment_crud.get_experiments_by_member_id(db, current_user.member_id)
             )
-            if not local_matches:
-                return _create_pagination_response([], total, page, size)
+            _register_missing_experiments_to_admin(
+                db, current_user, all_external_experiments, owned_ids,
+            )
 
-            page_ids = [exp.surro_experiment_id for exp in local_matches if exp.surro_experiment_id]
-            details = await _fetch_learning_details(page_ids, current_user)
-
-            for detail in details:
-                if detail.get("id") is None:
-                    continue
-                experiment_crud.update_mapping(
-                    db=db,
-                    surro_experiment_id=detail["id"],
-                    member_id=current_user.member_id,
-                    update_data={
-                        "name": detail.get("name"),
-                        "description": detail.get("description"),
-                    },
-                )
-
-            detail_by_id = {
-                detail["id"]: detail
-                for detail in details
-                if detail.get("id") is not None
-            }
-            ordered = [detail_by_id[experiment_id] for experiment_id in page_ids if experiment_id in detail_by_id]
-            return _create_pagination_response(ordered, total, page, size)
-
-        if not owned_ids:
-            return _create_pagination_response([], 0, page, size)
-
-        all_experiments = await experiment_service.list_experiments(
-            skip=0,
-            limit=1000,
-            user_info={
-                "member_id": current_user.member_id,
-                "role": current_user.role,
-                "name": current_user.name,
-            },
+        order_by = resolve_sort_columns(
+            parsed=parse_sort(sort),
+            allowed=_LEARNING_SORT_FIELDS,
+            default=_LEARNING_SORT_DEFAULT,
+            tie_breaker=_LEARNING_SORT_TIE_BREAKER,
         )
 
-        filtered = [exp for exp in all_experiments if exp.get("id") in owned_ids]
-        total = len(filtered)
-        return _create_pagination_response(filtered[skip:skip + size], total, page, size)
+        local_matches, total = experiment_crud.search_experiments_by_member_id(
+            db=db,
+            member_id=current_user.member_id,
+            skip=skip,
+            limit=size,
+            search=search,
+            order_by=order_by,
+            valid_surro_ids=valid_external_ids,
+        )
+        if not local_matches:
+            return _create_pagination_response([], total, page, size)
+
+        # 페이지 항목만 로컬 캐시 동기화
+        for match in local_matches:
+            detail = detail_by_external_id.get(match.surro_experiment_id)
+            if detail is None:
+                continue
+            experiment_crud.update_mapping(
+                db=db,
+                surro_experiment_id=detail["id"],
+                member_id=current_user.member_id,
+                update_data={
+                    "name": detail.get("name"),
+                    "description": detail.get("description"),
+                },
+            )
+
+        ordered = [
+            detail_by_external_id[match.surro_experiment_id]
+            for match in local_matches
+            if match.surro_experiment_id in detail_by_external_id
+        ]
+        return _create_pagination_response(ordered, total, page, size)
 
     except HTTPException:
         raise

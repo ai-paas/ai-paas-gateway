@@ -4,7 +4,7 @@ from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
-from . import Base
+from .base import Base
 
 
 class Prompt(Base):

@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 from app.models.dataset import Dataset
+
+_MISSING = object()
 
 
 class DatasetCRUD:
@@ -18,56 +20,6 @@ class DatasetCRUD:
         return db.query(Dataset).filter(
             and_(Dataset.id == dataset_id, Dataset.deleted_at.is_(None))
         ).first()
-
-    def get_datasets(
-            self,
-            db: Session,
-            skip: int = 0,
-            limit: int = 100,
-            search: Optional[str] = None,
-            is_active: Optional[bool] = True
-    ) -> List[Dataset]:
-        """데이터셋 매핑 목록 조회"""
-        query = db.query(Dataset).filter(Dataset.deleted_at.is_(None))
-
-        if is_active is not None:
-            query = query.filter(Dataset.is_active == is_active)
-
-        # 검색 조건 추가
-        if search:
-            search_term = f"%{search}%"
-            query = query.filter(
-                or_(
-                    Dataset.name.ilike(search_term),
-                    Dataset.description.ilike(search_term)
-                )
-            )
-
-        return query.offset(skip).limit(limit).all()
-
-    def get_datasets_count(
-            self,
-            db: Session,
-            search: Optional[str] = None,
-            is_active: Optional[bool] = True
-    ) -> int:
-        """데이터셋 매핑 총 개수 조회"""
-        query = db.query(Dataset).filter(Dataset.deleted_at.is_(None))
-
-        if is_active is not None:
-            query = query.filter(Dataset.is_active == is_active)
-
-        # 검색 조건 추가
-        if search:
-            search_term = f"%{search}%"
-            query = query.filter(
-                or_(
-                    Dataset.name.ilike(search_term),
-                    Dataset.description.ilike(search_term)
-                )
-            )
-
-        return query.count()
 
     def get_datasets_count_by_member(
             self,
@@ -128,6 +80,83 @@ class DatasetCRUD:
             for dataset in datasets if dataset.surro_dataset_id
         }
 
+    def search_datasets_by_member_id(
+            self,
+            db: Session,
+            member_id: str,
+            skip: int = 0,
+            limit: int = 20,
+            search: Optional[str] = None,
+            order_by: Optional[list] = None,
+            valid_surro_ids: Optional[set] = None,
+    ) -> Tuple[List[Dataset], int]:
+        """로컬 데이터셋 매핑 검색 (이름, 설명). (결과, 총개수) 반환.
+
+        `order_by` 미지정 시 `surro_dataset_id DESC` 를 기본 적용한다.
+        `valid_surro_ids` 가 주어지면 그 집합에 속한 매핑만 포함 → `total` 과 `data`
+        가 stale 매핑으로 어긋나지 않도록 외부 존재 기준으로 교차 필터링한다.
+        """
+        query = db.query(Dataset).filter(
+            and_(
+                Dataset.created_by == member_id,
+                Dataset.deleted_at.is_(None),
+                Dataset.is_active == True,
+            )
+        )
+
+        if valid_surro_ids is not None:
+            if not valid_surro_ids:
+                return [], 0
+            query = query.filter(Dataset.surro_dataset_id.in_(valid_surro_ids))
+
+        if search:
+            search_term = f"%{search}%"
+            query = query.filter(
+                or_(
+                    Dataset.name.ilike(search_term),
+                    Dataset.description.ilike(search_term),
+                )
+            )
+
+        total = query.count()
+        if order_by:
+            query = query.order_by(*order_by)
+        else:
+            query = query.order_by(Dataset.surro_dataset_id.desc())
+        datasets = query.offset(skip).limit(limit).all()
+        return datasets, total
+
+    def backfill_cache_if_changed(
+            self,
+            db: Session,
+            surro_dataset_id: int,
+            member_id: str,
+            name=_MISSING,
+            description=_MISSING,
+    ) -> bool:
+        """외부 응답값이 로컬 캐시와 다를 때만 갱신한다.
+
+        - "인자 미지정"과 "명시적 None"을 구분하기 위해 sentinel(`_MISSING`)을 사용한다.
+          미지정이면 해당 필드는 건드리지 않고, None이 명시적으로 전달되면 외부가 값을 비운
+          것으로 간주해 로컬도 NULL로 수렴시킨다(검색 false positive 방지).
+        - 변경 시에만 commit. updated_by/updated_at은 건드리지 않음(시스템 sync vs 사용자 수정 구분).
+        """
+        mapping = self.get_dataset_by_surro_id(db, surro_dataset_id, member_id)
+        if not mapping:
+            return False
+
+        changed = False
+        if name is not _MISSING and mapping.name != name:
+            mapping.name = name
+            changed = True
+        if description is not _MISSING and mapping.description != description:
+            mapping.description = description
+            changed = True
+
+        if changed:
+            db.commit()
+        return changed
+
     def get_dataset_by_surro_id(
             self,
             db: Session,
@@ -148,19 +177,24 @@ class DatasetCRUD:
             db: Session,
             surro_dataset_id: int,
             member_id: str,
-            dataset_name: str = None
+            dataset_name: str = None,
+            dataset_description: str = None
     ) -> Dataset:
         """외부 API 데이터셋과 Inno 사용자 매핑 생성"""
         # 중복 확인
         existing = self.get_dataset_by_surro_id(db, surro_dataset_id, member_id)
         if existing:
-            # stale 매핑이면 이름 업데이트 (MLOps 재설치 등으로 ID 재사용 시)
-            if dataset_name and existing.name != dataset_name:
+            stale_name = dataset_name and existing.name != dataset_name
+            stale_desc = dataset_description is not None and existing.description != dataset_description
+            if stale_name or stale_desc:
                 logger.info(
                     f"Updating stale dataset mapping: surro_id={surro_dataset_id}, "
                     f"old_name={existing.name}, new_name={dataset_name}"
                 )
-                existing.name = dataset_name
+                if stale_name:
+                    existing.name = dataset_name
+                if stale_desc:
+                    existing.description = dataset_description
                 existing.updated_by = member_id
                 existing.updated_at = datetime.utcnow()
                 db.commit()
@@ -176,7 +210,8 @@ class DatasetCRUD:
             surro_dataset_id=surro_dataset_id,
             created_by=member_id,
             updated_by=member_id,
-            name=dataset_name
+            name=dataset_name,
+            description=dataset_description
         )
         db.add(db_dataset)
         db.commit()
@@ -188,7 +223,8 @@ class DatasetCRUD:
             db: Session,
             surro_dataset_id: int,
             member_id: str,
-            dataset_name: str = None
+            dataset_name: str = None,
+            dataset_description: str = None
     ) -> Dataset:
         """삭제 여부와 관계없이 매핑을 생성하거나 재활성화한다."""
         existing = db.query(Dataset).filter(
@@ -200,6 +236,7 @@ class DatasetCRUD:
 
         if existing:
             existing.name = dataset_name
+            existing.description = dataset_description
             existing.is_active = True
             existing.deleted_at = None
             existing.deleted_by = None
@@ -213,7 +250,8 @@ class DatasetCRUD:
             db=db,
             surro_dataset_id=surro_dataset_id,
             member_id=member_id,
-            dataset_name=dataset_name
+            dataset_name=dataset_name,
+            dataset_description=dataset_description
         )
 
     def soft_delete_missing_mappings(
@@ -300,7 +338,8 @@ class DatasetCRUD:
             db: Session,
             surro_dataset_id: int,
             member_id: str,
-            dataset_name: str = None
+            dataset_name: str = None,
+            dataset_description: str = None
     ) -> Optional[Dataset]:
         """데이터셋 캐시 정보 업데이트"""
         db_dataset = self.get_dataset_by_surro_id(db, surro_dataset_id, member_id)
@@ -309,6 +348,8 @@ class DatasetCRUD:
 
         if dataset_name is not None:
             db_dataset.name = dataset_name
+        if dataset_description is not None:
+            db_dataset.description = dataset_description
 
         db_dataset.updated_by = member_id
         db_dataset.updated_at = datetime.utcnow()
@@ -320,23 +361,26 @@ class DatasetCRUD:
     def bulk_create_mappings(
             self,
             db: Session,
-            mappings: List[tuple[int, str, str]]
+            mappings: List[Tuple[int, str, str, Optional[str]]]
     ) -> int:
         """
         여러 데이터셋 매핑을 한번에 생성
 
         Args:
-            mappings: (surro_dataset_id, member_id, dataset_name) 튜플 리스트
+            mappings: (surro_dataset_id, member_id, dataset_name, dataset_description) 튜플 리스트
 
         Returns:
             생성된 매핑 개수
         """
         created_count = 0
-        for surro_id, member_id, name in mappings:
+        for entry in mappings:
+            surro_id, member_id, name = entry[0], entry[1], entry[2]
+            description = entry[3] if len(entry) > 3 else None
             try:
-                # 중복 체크
                 if not self.get_dataset_by_surro_id(db, surro_id, member_id):
-                    self.create_dataset_mapping(db, surro_id, member_id, name)
+                    self.create_dataset_mapping(
+                        db, surro_id, member_id, name, description
+                    )
                     created_count += 1
             except Exception as e:
                 logger.error(f"Failed to create mapping for {surro_id}: {e}")

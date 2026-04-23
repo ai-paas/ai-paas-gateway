@@ -5,8 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
+from app.common.sort import parse_sort, resolve_sort_columns
 from app.cruds.service import service_crud
 from app.database import get_db
+from app.models.service import Service
 from app.schemas.service import (
     ServiceCreate,
     ServiceUpdate,
@@ -15,6 +17,15 @@ from app.schemas.service import (
     ServiceListResponse
 )
 from app.services.service_service import service_service
+
+_SERVICE_SORT_FIELDS = {
+    "id": Service.id,
+    "name": Service.name,
+    "created_at": Service.created_at,
+    "updated_at": Service.updated_at,
+}
+_SERVICE_SORT_DEFAULT = [(Service.created_at, True)]
+_SERVICE_SORT_TIE_BREAKER = Service.id
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +114,19 @@ async def get_services(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지당 항목 수"),
         search: Optional[str] = Query(None, description="검색어 (이름, 설명)"),
+        sort: Optional[str] = Query(
+            None,
+            description=(
+                "정렬 기준. `,` 로 다중 키, `-` 접두사는 내림차순(DESC). "
+                "미지정 시 `-created_at`. 허용 필드: `id`, `name`, `created_at`, `updated_at`."
+            ),
+            openapi_examples={
+                "default": {"summary": "최신순 (기본)", "value": "-created_at"},
+                "name_asc": {"summary": "이름 오름차순", "value": "name"},
+                "name_desc": {"summary": "이름 내림차순", "value": "-name"},
+                "multi": {"summary": "수정시각 DESC + 이름 ASC", "value": "-updated_at,name"},
+            },
+        ),
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -119,6 +143,7 @@ async def get_services(
     | `page` | integer | — | 1 | 페이지 번호 (1부터 시작) |
     | `size` | integer | — | 20 | 페이지당 항목 수 (1-100) |
     | `search` | string | — | — | 검색어 (이름, 설명) |
+    | `sort` | string | — | `-created_at` | 정렬. `,`로 다중 키, `-` 접두사=DESC. 허용: `id`, `name`, `created_at`, `updated_at` |
 
     ## Response (200) — `ServiceListResponse`
 
@@ -131,14 +156,22 @@ async def get_services(
 
     ## Errors
     - 401: 인증되지 않은 사용자
+    - 422: 허용되지 않은 sort 필드
     - 500: 서버 내부 오류
     """
     skip = (page - 1) * size
+    order_by = resolve_sort_columns(
+        parsed=parse_sort(sort),
+        allowed=_SERVICE_SORT_FIELDS,
+        default=_SERVICE_SORT_DEFAULT,
+        tie_breaker=_SERVICE_SORT_TIE_BREAKER,
+    )
     services, total = service_crud.get_services(
         db=db,
         skip=skip,
         limit=size,
-        search=search
+        search=search,
+        order_by=order_by,
     )
 
     return ServiceListResponse(

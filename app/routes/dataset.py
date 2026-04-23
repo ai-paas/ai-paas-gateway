@@ -5,9 +5,11 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, Path, File
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
+from app.common.sort import parse_sort, resolve_sort_columns
 from app.cruds import dataset_crud
 from app.database import get_db
 from app.models import Member
+from app.models.dataset import Dataset
 from app.schemas.dataset import (
     DatasetCreateRequest, DatasetUpdateRequest, DatasetReadSchema,
     DatasetListWrapper, DatasetWithMemberInfo, InnoUserInfo,
@@ -18,6 +20,15 @@ from app.services.dataset_service import dataset_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/datasets", tags=["Datasets"])
+
+_DATASET_SORT_FIELDS = {
+    "surro_dataset_id": Dataset.surro_dataset_id,
+    "name": Dataset.name,
+    "created_at": Dataset.created_at,
+    "updated_at": Dataset.updated_at,
+}
+_DATASET_SORT_DEFAULT = [(Dataset.created_at, True)]
+_DATASET_SORT_TIE_BREAKER = Dataset.surro_dataset_id
 
 
 def _create_inno_user_info(user: Member) -> InnoUserInfo:
@@ -48,6 +59,21 @@ def _create_pagination_response(
 async def get_datasets(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지당 항목 수"),
+        search: Optional[str] = Query(None, description="검색어 (이름, 설명)"),
+        sort: Optional[str] = Query(
+            None,
+            description=(
+                "정렬 기준. `,` 로 다중 키, `-` 접두사는 내림차순(DESC). "
+                "미지정 시 `-created_at`. 허용 필드: "
+                "`surro_dataset_id`, `name`, `created_at`, `updated_at`."
+            ),
+            openapi_examples={
+                "default": {"summary": "최신순 (기본)", "value": "-created_at"},
+                "name_asc": {"summary": "이름 오름차순", "value": "name"},
+                "name_desc": {"summary": "이름 내림차순", "value": "-name"},
+                "multi": {"summary": "수정시각 DESC + 이름 ASC", "value": "-updated_at,name"},
+            },
+        ),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
@@ -55,83 +81,92 @@ async def get_datasets(
     데이터셋 목록 조회
 
     등록된 데이터셋들의 목록을 페이지네이션하여 조회합니다.
+    게이트웨이 로컬 매핑 테이블이 정렬/페이지네이션을 주도하며, 외부 MLOps API는
+    각 항목의 상세 정보를 보강합니다. 검색어가 있으면 이름/설명에 대해
+    대소문자 구분 없는 부분 일치(ILIKE)로 필터링합니다.
 
-    **Query Parameters**
-    - **page** (int, 선택): 페이지 번호 (1부터 시작, 기본값: 1, 최소값: 1)
+    ## Query Parameters
+    - **page** (int, 선택): 페이지 번호 (기본값: 1, 최소값: 1)
     - **size** (int, 선택): 페이지당 항목 수 (기본값: 20, 범위: 1-100)
+    - **search** (str, 선택): 검색어. 이름/설명에 대한 대소문자 구분 없는 부분 일치
+    - **sort** (str, 선택): 정렬 기준. `,` 로 다중 키, `-` 접두사=DESC.
+      기본 `-created_at`. 허용: `surro_dataset_id`, `name`, `created_at`, `updated_at`.
 
-    **Response**
-    - **data**: 데이터셋 목록, 각 항목은 다음 정보를 포함:
-      - id (int): 데이터셋 고유 ID
-      - name (str): 데이터셋 이름
-      - description (str, optional): 데이터셋에 대한 상세 설명 (없을 수 있음)
-      - dataset_registry (DatasetRegistryReadSchema): 데이터셋 레지스트리 정보
-        - id (int): 레지스트리 ID
-        - artifact_path (str): MLflow에 저장된 데이터셋의 아티팩트 경로
-        - uri (str): MLflow에서 접근 가능한 데이터셋 URI
-        - dataset_id (int): 연결된 데이터셋 ID
-        - created_at (datetime): 생성 시각
-        - updated_at (datetime): 수정 시각
-      - created_at (datetime): 데이터셋 생성 시각
-      - updated_at (datetime): 데이터셋 수정 시각
-    - **total** (int): 전체 데이터셋 수
+    ## Response (DatasetListWrapper)
+    - **data**: 데이터셋 목록
+    - **total** (int): 전체 매핑 수 (검색 시 매칭 총 개수)
     - **page** (int): 현재 페이지 번호
     - **size** (int): 현재 페이지 크기
 
-    **Notes**
-    - page와 size를 모두 생략하면 전체 데이터를 조회합니다.
-    - 페이지네이션 사용 시 page와 size를 모두 제공해야 합니다.
+    ## Notes
+    - 정렬·페이지네이션은 로컬 매핑 테이블 기준. 외부 상세는 페이지 내 항목만 보강됩니다.
+    - 외부에서 사라진 매핑은 스킵됩니다.
+    - 로컬 캐시 이름/설명은 조회 중 외부 응답과 차이가 있으면 자동 보정됩니다.
 
-    **Errors**
+    ## Errors
     - 401: 인증되지 않은 사용자
+    - 422: 허용되지 않은 sort 필드
     - 500: 서버 내부 오류
     """
     try:
         skip = (page - 1) * size
-
-        # 1. 사용자의 전체 데이터셋 매핑 조회 ({surro_dataset_id: created_by})
-        all_mappings = dataset_crud.get_dataset_mappings_by_member_id(
-            db,
-            current_user.member_id,
-            skip=0,
-            limit=10000
-        )
-
-        if not all_mappings:
-            return _create_pagination_response([], 0, page, size)
-
-        # 2. 외부 API에서 전체 데이터셋 조회 (페이지네이션 없이)
-        all_datasets_response = await dataset_service.get_datasets(
-            page=None,
-            page_size=None,
-            user_info={
-                'member_id': current_user.member_id,
-                'role': current_user.role,
-                'name': current_user.name
-            }
-        )
-
-        # 3. 매핑과 외부 API 교집합으로 실제 사용 가능한 데이터셋 필터링
-        available = [d for d in all_datasets_response.data if d.id in all_mappings]
-        total = len(available)
-
-        if total == 0:
-            return _create_pagination_response([], 0, page, size)
-
-        # 4. 교집합 결과에 대해 페이지네이션 적용
-        paginated = available[skip:skip + size]
-
-        # 5. 사용자 정보 추가 + 로컬 DB의 created_by 매핑
         member_info = _create_inno_user_info(current_user)
-        wrapped = []
-        for dataset in paginated:
-            dataset_dict = dataset.model_dump()
+        user_info = {
+            'member_id': current_user.member_id,
+            'role': current_user.role,
+            'name': current_user.name
+        }
+
+        order_by = resolve_sort_columns(
+            parsed=parse_sort(sort),
+            allowed=_DATASET_SORT_FIELDS,
+            default=_DATASET_SORT_DEFAULT,
+            tie_breaker=_DATASET_SORT_TIE_BREAKER,
+        )
+
+        # 외부 목록을 먼저 받아 "현재 외부에 존재하는 데이터셋 ID" 집합을 구성.
+        # CRUD 에 `valid_surro_ids` 로 전달해 stale 매핑이 total 에 포함되지 않도록 함.
+        all_datasets_response = await dataset_service.get_datasets(
+            page=None, page_size=None, user_info=user_info,
+        )
+        valid_external_ids = {d.id for d in all_datasets_response.data}
+        detail_by_external_id = {d.id: d for d in all_datasets_response.data}
+
+        # 로컬 주도형: 정렬·페이지네이션은 로컬 매핑에서, stale 매핑은 외부 교차로 제외
+        local_matches, total = dataset_crud.search_datasets_by_member_id(
+            db=db,
+            member_id=current_user.member_id,
+            skip=skip,
+            limit=size,
+            search=search,
+            order_by=order_by,
+            valid_surro_ids=valid_external_ids,
+        )
+        if not local_matches:
+            return _create_pagination_response([], total, page, size)
+
+        ordered = []
+        for match in local_matches:
+            detail = detail_by_external_id.get(match.surro_dataset_id)
+            if detail is None:
+                # 이론상 valid_surro_ids 필터로 걸러졌어야 함 (방어 코드)
+                continue
+            dataset_crud.backfill_cache_if_changed(
+                db=db,
+                surro_dataset_id=detail.id,
+                member_id=current_user.member_id,
+                name=detail.name,
+                description=detail.description,
+            )
+            dataset_dict = detail.model_dump()
             dataset_dict["member_info"] = member_info.model_dump()
-            dataset_dict["created_by"] = all_mappings.get(dataset.id, "")
-            wrapped.append(DatasetWithMemberInfo(**dataset_dict))
+            dataset_dict["created_by"] = match.created_by or ""
+            ordered.append(DatasetWithMemberInfo(**dataset_dict))
 
-        return _create_pagination_response(wrapped, total, page, size)
+        return _create_pagination_response(ordered, total, page, size)
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting datasets for {current_user.member_id}: {str(e)}")
         raise HTTPException(
@@ -197,6 +232,14 @@ async def get_dataset(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Dataset {dataset_id} not found"
             )
+
+        dataset_crud.backfill_cache_if_changed(
+            db=db,
+            surro_dataset_id=dataset_id,
+            member_id=current_user.member_id,
+            name=dataset.name,
+            description=dataset.description,
+        )
 
         db_dataset = dataset_crud.get_dataset_by_surro_id(
             db=db,
@@ -281,21 +324,20 @@ async def update_dataset(
             }
         )
 
-        # 3. 로컬 DB 매핑 이름 동기화
-        if dataset_data and dataset_data.name:
-            try:
-                dataset_crud.update_dataset_cache(
-                    db=db,
-                    surro_dataset_id=dataset_id,
-                    member_id=current_user.member_id,
-                    dataset_name=dataset_data.name
-                )
-                logger.info(
-                    f"Updated dataset mapping name: surro_id={dataset_id}, "
-                    f"new_name={dataset_data.name}"
-                )
-            except Exception as cache_error:
-                logger.error(f"Failed to update dataset cache: {str(cache_error)}")
+        # 3. 로컬 DB 매핑 이름/설명 동기화 (외부 응답값을 진실의 소스로 사용)
+        try:
+            dataset_crud.backfill_cache_if_changed(
+                db=db,
+                surro_dataset_id=dataset_id,
+                member_id=current_user.member_id,
+                name=updated_dataset.name,
+                description=updated_dataset.description,
+            )
+            logger.info(
+                f"Synced dataset mapping cache with external response: surro_id={dataset_id}"
+            )
+        except Exception as cache_error:
+            logger.error(f"Failed to sync dataset cache: {str(cache_error)}")
 
         # 4. created_by를 로컬 DB 값으로 설정
         db_dataset = dataset_crud.get_dataset_by_surro_id(
@@ -524,7 +566,8 @@ async def create_dataset(
                 db=db,
                 surro_dataset_id=created_dataset.id,
                 member_id=current_user.member_id,
-                dataset_name=created_dataset.name
+                dataset_name=created_dataset.name,
+                dataset_description=created_dataset.description
             )
             logger.info(
                 f"Created dataset mapping: surro_id={created_dataset.id}, "

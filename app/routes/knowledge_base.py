@@ -5,8 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
+from app.common.sort import parse_sort, resolve_sort_columns
 from app.cruds.knowledge_base import knowledge_base_crud
 from app.database import get_db
+from app.models.knowledge_base import KnowledgeBase
 from app.schemas.knowledge_base import (
     KnowledgeBaseUpdate,
     KnowledgeBaseResponse,
@@ -23,6 +25,16 @@ from app.services.knowledge_base_service import knowledge_base_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge-bases"])
+
+_KB_SORT_FIELDS = {
+    "id": KnowledgeBase.id,
+    "name": KnowledgeBase.name,
+    "collection_name": KnowledgeBase.collection_name,
+    "created_at": KnowledgeBase.created_at,
+    "updated_at": KnowledgeBase.updated_at,
+}
+_KB_SORT_DEFAULT = [(KnowledgeBase.created_at, True)]
+_KB_SORT_TIE_BREAKER = KnowledgeBase.id
 
 
 # ===== 메타데이터 조회 API (페이징 추가) =====
@@ -198,6 +210,20 @@ async def get_knowledge_bases(
         page: int = Query(1, ge=1, description="페이지 번호 (기본값: 1)"),
         size: int = Query(10, ge=1, le=1000, description="페이지당 항목 수 (기본값: 10)"),
         search: Optional[str] = Query(None, description="검색어 (이름, 설명, collection_name)"),
+        sort: Optional[str] = Query(
+            None,
+            description=(
+                "정렬 기준. `,` 로 다중 키, `-` 접두사는 내림차순(DESC). "
+                "미지정 시 `-created_at`. 허용 필드: "
+                "`id`, `name`, `collection_name`, `created_at`, `updated_at`."
+            ),
+            openapi_examples={
+                "default": {"summary": "최신순 (기본)", "value": "-created_at"},
+                "name_asc": {"summary": "이름 오름차순", "value": "name"},
+                "name_desc": {"summary": "이름 내림차순", "value": "-name"},
+                "collection": {"summary": "collection 이름 ASC + 최신순", "value": "collection_name,-created_at"},
+            },
+        ),
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -206,9 +232,18 @@ async def get_knowledge_bases(
     - **page**: 페이지 번호 (기본값: 1)
     - **size**: 페이지당 항목 수 (기본값: 10)
     - **search**: 검색어 (선택)
+    - **sort**: 정렬 기준 (선택). 기본 `-created_at`.
+      허용: `id`, `name`, `collection_name`, `created_at`, `updated_at`.
     """
     skip = (page - 1) * size
     limit = size
+
+    order_by = resolve_sort_columns(
+        parsed=parse_sort(sort),
+        allowed=_KB_SORT_FIELDS,
+        default=_KB_SORT_DEFAULT,
+        tie_breaker=_KB_SORT_TIE_BREAKER,
+    )
 
     # DB에서 조회 (현재 사용자 소유만)
     knowledge_bases, total = knowledge_base_crud.get_knowledge_bases(
@@ -216,7 +251,8 @@ async def get_knowledge_bases(
         skip=skip,
         limit=limit,
         search=search,
-        member_id=current_user.member_id
+        member_id=current_user.member_id,
+        order_by=order_by,
     )
 
     # 외부 API에서 전체 목록 조회

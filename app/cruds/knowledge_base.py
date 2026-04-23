@@ -91,8 +91,13 @@ class KnowledgeBaseCRUD:
             skip: Optional[int] = None,
             limit: Optional[int] = None,
             search: Optional[str] = None,
-            member_id: Optional[str] = None
+            member_id: Optional[str] = None,
+            order_by: Optional[list] = None,
     ):
+        """지식베이스 목록 조회.
+
+        `order_by` 미지정 시 `created_at DESC` 를 기본 적용한다.
+        """
         query = db.query(KnowledgeBase).filter(
             and_(
                 KnowledgeBase.deleted_at.is_(None),
@@ -113,7 +118,10 @@ class KnowledgeBaseCRUD:
             )
 
         total = query.count()
-        query = query.order_by(KnowledgeBase.created_at.desc())
+        if order_by:
+            query = query.order_by(*order_by)
+        else:
+            query = query.order_by(KnowledgeBase.created_at.desc())
 
         if skip is not None and limit is not None:
             knowledge_bases = query.offset(skip).limit(limit).all()

@@ -53,6 +53,7 @@ class MemberCRUD:
         limit: int = 100,
         search: Optional[str] = None,
         role: Optional[str] = None,
+        order_by: Optional[list] = None,
     ) -> tuple[List[Member], int]:
         """전체 멤버 목록 조회 (활성/비활성 필터링 가능)"""
         query = db.query(Member)
@@ -73,6 +74,8 @@ class MemberCRUD:
             query = query.filter(Member.role == role)
 
         total = query.count()
+        if order_by:
+            query = query.order_by(*order_by)
         members = query.offset(skip).limit(limit).all()
         return members, total
 

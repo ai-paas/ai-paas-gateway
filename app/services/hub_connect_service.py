@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 import httpx
 from fastapi import HTTPException, status
@@ -10,7 +10,9 @@ from app.config import settings
 from app.schemas.hub_connect import (
     HubModelResponse, ModelListParams, ModelListResponse,
     ModelFileInfo, ModelFilesResponse, ExtendedHubModelResponse,
-    TagListParams, TagListResponse, TagGroupResponse, TagGroupAllResponse, TagItem
+    TagListParams, TagListResponse, TagGroupResponse, TagGroupAllResponse, TagItem,
+    DatasetListParams, DatasetListResponse, HubDatasetItem,
+    DatasetInfoResponse, DatasetFileInfo, DatasetFilesResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -245,14 +247,26 @@ class HubConnectService:
                         logger.warning(f"Failed to parse hub model: {e}")
                         continue
 
-                # total 추출
-                total = external_data.get('total') if isinstance(external_data, dict) else len(models)
+                # total 및 Kaggle 페이지네이션 메타 추출
+                if isinstance(external_data, dict):
+                    total = external_data.get('total')
+                    has_more = external_data.get('has_more')
+                    total_is_exact = external_data.get('total_is_exact')
+                    applied_filters = external_data.get('applied_filters')
+                else:
+                    total = len(models)
+                    has_more = None
+                    total_is_exact = None
+                    applied_filters = None
 
                 return ModelListResponse(
                     data=models,
                     total=total,
                     page=params.page or 1,
-                    limit=params.limit or len(models)
+                    limit=params.limit or len(models),
+                    has_more=has_more,
+                    total_is_exact=total_is_exact,
+                    applied_filters=applied_filters,
                 )
 
             else:
@@ -316,6 +330,12 @@ class HubConnectService:
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="Hub service timeout"
             )
+        except httpx.ConnectError as e:
+            logger.error(f"Connection error getting hub model {model_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Hub service unavailable"
+            )
         except HTTPException:
             raise
         except Exception as e:
@@ -378,6 +398,12 @@ class HubConnectService:
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="Hub service timeout"
             )
+        except httpx.ConnectError as e:
+            logger.error(f"Connection error getting model files {model_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Hub service unavailable"
+            )
         except HTTPException:
             raise
         except Exception as e:
@@ -427,6 +453,12 @@ class HubConnectService:
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="Hub service timeout"
+            )
+        except httpx.ConnectError as e:
+            logger.error(f"Connection error downloading model file {model_id}/{filename}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Hub service unavailable"
             )
         except HTTPException:
             raise
@@ -639,6 +671,312 @@ class HubConnectService:
             raise
         except Exception as e:
             logger.error(f"Error getting tags for group '{group}': {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
+
+    # ===== Datasets =====
+
+    async def get_datasets(
+            self,
+            params: DatasetListParams,
+            user_info: Optional[Dict[str, str]] = None
+    ) -> DatasetListResponse:
+        """데이터셋 목록 조회 (공개 page/size → 업스트림 page/limit 내부 변환)"""
+        try:
+            url = f"{self.base_url}/datasets/"
+
+            query_params: Dict[str, Any] = {}
+            if params.market:
+                query_params["market"] = params.market
+            if params.query:
+                query_params["query"] = params.query
+            if params.sort:
+                query_params["sort"] = params.sort
+            if params.page:
+                query_params["page"] = params.page
+            if params.size:
+                query_params["limit"] = params.size  # 공개: size → 업스트림: limit
+
+            logger.info(f"Getting hub datasets from: {url}")
+
+            response = await self._make_authenticated_request(
+                "GET", url, user_info=user_info, params=query_params
+            )
+
+            if response.status_code == 200:
+                external_data = response.json()
+
+                datasets_data = []
+                if isinstance(external_data, dict):
+                    datasets_data = external_data.get('datasets', external_data.get('data', []))
+                elif isinstance(external_data, list):
+                    datasets_data = external_data
+
+                datasets: List[HubDatasetItem] = []
+                for item in datasets_data:
+                    try:
+                        datasets.append(HubDatasetItem(**item))
+                    except Exception as e:
+                        logger.warning(f"Failed to parse hub dataset item: {e}")
+                        continue
+
+                if isinstance(external_data, dict):
+                    total = external_data.get('total')
+                    has_more = external_data.get('has_more')
+                    total_is_exact = external_data.get('total_is_exact')
+                else:
+                    total = len(datasets)
+                    has_more = None
+                    total_is_exact = None
+
+                return DatasetListResponse(
+                    data=datasets,
+                    total=total,
+                    page=params.page or 1,
+                    size=params.size or len(datasets),
+                    has_more=has_more,
+                    total_is_exact=total_is_exact,
+                )
+
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Failed to get hub datasets: {response.text}"
+            )
+
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout getting hub datasets: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Hub service timeout"
+            )
+        except httpx.ConnectError as e:
+            logger.error(f"Connection error getting hub datasets: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Hub service unavailable"
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting hub datasets: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
+    async def get_dataset_info(
+            self,
+            repo_id: str,
+            market: str,
+            user_info: Optional[Dict[str, str]] = None
+    ) -> DatasetInfoResponse:
+        """데이터셋 상세 조회"""
+        try:
+            url = f"{self.base_url}/datasets/{repo_id}/info"
+            params = {"market": market}
+
+            logger.info(f"Getting hub dataset info from: {url}")
+
+            response = await self._make_authenticated_request(
+                "GET", url, user_info=user_info, params=params
+            )
+
+            if response.status_code == 200:
+                return DatasetInfoResponse(**response.json())
+
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Failed to get hub dataset info: {response.text}"
+            )
+
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout getting hub dataset info {repo_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Hub service timeout"
+            )
+        except httpx.ConnectError as e:
+            logger.error(f"Connection error getting hub dataset info {repo_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Hub service unavailable"
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting hub dataset info {repo_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
+    async def get_dataset_files(
+            self,
+            repo_id: str,
+            market: str,
+            user_info: Optional[Dict[str, str]] = None
+    ) -> DatasetFilesResponse:
+        """데이터셋 파일 목록 조회"""
+        try:
+            url = f"{self.base_url}/datasets/{repo_id}/files"
+            params = {"market": market}
+
+            logger.info(f"Getting hub dataset files from: {url}")
+
+            response = await self._make_authenticated_request(
+                "GET", url, user_info=user_info, params=params
+            )
+
+            if response.status_code == 200:
+                files_data = response.json()
+                file_list = []
+                if isinstance(files_data, dict):
+                    file_list = files_data.get('files', files_data.get('data', []))
+                elif isinstance(files_data, list):
+                    file_list = files_data
+
+                files: List[DatasetFileInfo] = []
+                for file_dict in file_list:
+                    try:
+                        files.append(DatasetFileInfo(**file_dict))
+                    except Exception as e:
+                        logger.warning(f"Failed to parse dataset file info: {e}")
+                        continue
+
+                return DatasetFilesResponse(data=files)
+
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Failed to get hub dataset files: {response.text}"
+            )
+
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout getting hub dataset files {repo_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Hub service timeout"
+            )
+        except httpx.ConnectError as e:
+            logger.error(f"Connection error getting hub dataset files {repo_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Hub service unavailable"
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error getting hub dataset files {repo_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
+    async def download_dataset_snapshot(
+            self,
+            repo_id: str,
+            market: str,
+            download_dir: Optional[str] = None,
+            allow_patterns: Optional[List[str]] = None,
+            ignore_patterns: Optional[List[str]] = None,
+            user_info: Optional[Dict[str, str]] = None,
+    ) -> Any:
+        """데이터셋 스냅샷 다운로드 (download_dir 지정 시 JSON, 미지정 시 바이너리 응답)"""
+        try:
+            url = f"{self.base_url}/datasets/{repo_id}/download"
+            params: Dict[str, Any] = {"market": market}
+            if download_dir:
+                params["download_dir"] = download_dir
+            if allow_patterns:
+                params["allow_patterns"] = allow_patterns
+            if ignore_patterns:
+                params["ignore_patterns"] = ignore_patterns
+
+            logger.info(f"Downloading dataset snapshot from: {url}")
+
+            response = await self._make_authenticated_request(
+                "GET", url, user_info=user_info, params=params
+            )
+
+            if response.status_code == 200:
+                content_type = response.headers.get("content-type", "")
+                if "application/json" in content_type:
+                    return response.json()
+                return response
+
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Failed to download dataset snapshot: {response.text}"
+            )
+
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout downloading dataset snapshot {repo_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Hub service timeout"
+            )
+        except httpx.ConnectError as e:
+            logger.error(f"Connection error downloading dataset snapshot {repo_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Hub service unavailable"
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error downloading dataset snapshot {repo_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
+    async def download_dataset_file(
+            self,
+            repo_id: str,
+            filename: str,
+            market: str,
+            user_info: Optional[Dict[str, str]] = None,
+    ) -> Any:
+        """데이터셋 파일 단건 다운로드"""
+        try:
+            url = f"{self.base_url}/datasets/{repo_id}/download/{filename}"
+            params = {"market": market}
+
+            logger.info(f"Downloading dataset file from: {url}")
+
+            response = await self._make_authenticated_request(
+                "GET", url, user_info=user_info, params=params
+            )
+
+            if response.status_code == 200:
+                content_type = response.headers.get("content-type", "")
+                if "application/json" in content_type:
+                    return response.json()
+                return response
+
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Failed to download dataset file: {response.text}"
+            )
+
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout downloading dataset file {repo_id}/{filename}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Hub service timeout"
+            )
+        except httpx.ConnectError as e:
+            logger.error(f"Connection error downloading dataset file {repo_id}/{filename}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Hub service unavailable"
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error downloading dataset file {repo_id}/{filename}: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal error: {str(e)}"

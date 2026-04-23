@@ -1,7 +1,7 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, Index
 from sqlalchemy.sql import func
 
-from . import Base
+from .base import Base
 
 
 class Experiment(Base):

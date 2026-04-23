@@ -5,8 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
+from app.common.sort import parse_sort, resolve_sort_columns
 from app.cruds.prompt import prompt_crud
 from app.database import get_db
+from app.models.prompt import Prompt
 from app.schemas.prompt import (
     PromptCreate,
     PromptUpdate,
@@ -20,6 +22,16 @@ from app.services.prompt_service import prompt_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/prompts", tags=["prompts"])
+
+_PROMPT_SORT_FIELDS = {
+    "id": Prompt.id,
+    "name": Prompt.name,
+    "created_at": Prompt.created_at,
+    "updated_at": Prompt.updated_at,
+    "created_by": Prompt.created_by,
+}
+_PROMPT_SORT_DEFAULT = [(Prompt.created_at, True)]
+_PROMPT_SORT_TIE_BREAKER = Prompt.id
 
 
 @router.get("/variable-types", response_model=PromptVariableTypeListSchema)
@@ -151,6 +163,20 @@ async def get_prompts(
         page: Optional[int] = Query(None, ge=1, description="페이지 번호 (1부터 시작)"),
         size: Optional[int] = Query(None, ge=1, le=1000, description="페이지당 항목 수"),
         search: Optional[str] = Query(None, description="검색어 (이름, 설명, 내용)"),
+        sort: Optional[str] = Query(
+            None,
+            description=(
+                "정렬 기준. `,` 로 다중 키, `-` 접두사는 내림차순(DESC). "
+                "미지정 시 `-created_at`. 허용 필드: "
+                "`id`, `name`, `created_at`, `updated_at`, `created_by`."
+            ),
+            openapi_examples={
+                "default": {"summary": "최신순 (기본)", "value": "-created_at"},
+                "name_asc": {"summary": "이름 오름차순", "value": "name"},
+                "name_desc": {"summary": "이름 내림차순", "value": "-name"},
+                "multi": {"summary": "작성자 ASC + 최신순", "value": "created_by,-created_at"},
+            },
+        ),
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -166,6 +192,7 @@ async def get_prompts(
     | `page` | integer | — | 페이지 번호 (1부터 시작, 생략 시 전체 데이터 조회) |
     | `size` | integer | — | 페이지당 항목 수 (1-1000, 생략 시 전체 데이터 조회) |
     | `search` | string | — | 검색어 (이름, 설명, 내용) |
+    | `sort` | string | — | 정렬. `,`로 다중 키, `-` 접두사=DESC. 기본 `-created_at`. 허용: `id`, `name`, `created_at`, `updated_at`, `created_by` |
 
     ## Response (200) — `PromptListResponse`
 
@@ -183,6 +210,7 @@ async def get_prompts(
 
     ## Errors
     - 401: 인증되지 않은 사용자
+    - 422: 허용되지 않은 sort 필드
     - 500: 서버 내부 오류
     """
     skip = None
@@ -193,12 +221,20 @@ async def get_prompts(
         skip = (page - 1) * size
         limit = size
 
+    order_by = resolve_sort_columns(
+        parsed=parse_sort(sort),
+        allowed=_PROMPT_SORT_FIELDS,
+        default=_PROMPT_SORT_DEFAULT,
+        tie_breaker=_PROMPT_SORT_TIE_BREAKER,
+    )
+
     # DB에서 조회 (실제 데이터 포함)
     prompts, total = prompt_crud.get_prompts(
         db=db,
         skip=skip,
         limit=limit,
-        search=search
+        search=search,
+        order_by=order_by,
     )
 
     # prompt_variable 정규화
