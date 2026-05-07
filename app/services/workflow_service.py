@@ -6,12 +6,17 @@ from typing import Dict, Any, Optional, List
 import httpx
 from fastapi import HTTPException, UploadFile
 
+# 센티넬: "미지정"과 "명시적 None"을 구별하기 위한 마커.
+# Pydantic의 model_fields_set과 함께 사용해 partial update에서 null 전달 의도를 보존.
+_UNSET: Any = object()
+
 from app.config import settings
 from app.schemas.workflow import (
     ExternalWorkflowDetailResponse,
     ExternalWorkflowBriefResponse,
     WorkflowExecuteResponse,
-    WorkflowTestResponse
+    WorkflowTestResponse,
+    WorkflowValidateResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,6 +107,34 @@ class WorkflowService:
             response = await getattr(self.client, method.lower())(url, **kwargs)
 
         return response
+
+    # ===== Workflow Definition 검증 (MLOps v2) =====
+
+    async def validate_workflow(
+            self, workflow_definition: Dict[str, Any],
+            user_info: Optional[Dict] = None
+    ) -> WorkflowValidateResponse:
+        """워크플로우 정의 검증 (생성 전 사전 검증)
+
+        MLOps v2 `POST /api/v1/workflows/validate` 패스스루.
+        DB 변경 없이 정의의 유효성만 검사한다.
+        """
+        try:
+            url = f"{self.base_url}/workflows/validate"
+            payload = {"workflow_definition": workflow_definition}
+
+            response = await self._make_authenticated_request(
+                "POST", url, user_info=user_info, json=payload
+            )
+
+            if response.status_code == 200:
+                return WorkflowValidateResponse(**response.json())
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error validating workflow: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
 
     # ===== Workflow CRUD =====
 
@@ -197,10 +230,16 @@ class WorkflowService:
     async def update_workflow(
             self, workflow_id: str, name: Optional[str] = None, description: Optional[str] = None,
             category: Optional[str] = None, status: Optional[str] = None,
-            service_id: Optional[str] = None, workflow_definition: Optional[Dict] = None,
+            service_id: Any = _UNSET, workflow_definition: Optional[Dict] = None,
             user_info: Optional[Dict] = None
     ) -> Optional[ExternalWorkflowDetailResponse]:
-        """워크플로우 수정"""
+        """워크플로우 수정
+
+        service_id는 sentinel(`_UNSET`) / `None` / `str`을 구별:
+        - `_UNSET`: 클라이언트가 service_id 필드를 안 보냄 → MLOps에 전달 안 함
+        - `None`: 명시적 null → MLOps에 `service_id: null` 전달 (unlink)
+        - `str`: UUID → MLOps에 그대로 전달
+        """
         try:
             url = f"{self.base_url}/workflows/{workflow_id}"
             payload = {}
@@ -212,7 +251,7 @@ class WorkflowService:
                 payload['category'] = category
             if status:
                 payload['status'] = status
-            if service_id is not None:
+            if service_id is not _UNSET:
                 payload['service_id'] = service_id
             if workflow_definition:
                 payload['workflow_definition'] = workflow_definition
@@ -250,13 +289,17 @@ class WorkflowService:
             raise HTTPException(status_code=500, detail=str(e))
 
     async def finalize_deletion(
-            self, workflow_id: str, run_id: str, user_info: Optional[Dict] = None
+            self, workflow_id: str, run_id: Optional[str] = None,
+            user_info: Optional[Dict] = None
     ) -> Dict[str, Any]:
-        """워크플로우 삭제 완료 처리"""
+        """워크플로우 삭제 완료 처리
+
+        MLOps v2 spec은 query parameter `run_id`를 받지 않는다.
+        호환성 차원에서 인자는 유지하되 외부에는 전달하지 않는다.
+        """
         try:
             url = f"{self.base_url}/workflows/{workflow_id}/finalize-deletion"
-            params = {"run_id": run_id}
-            response = await self._make_authenticated_request("POST", url, user_info=user_info, params=params)
+            response = await self._make_authenticated_request("POST", url, user_info=user_info)
 
             if response.status_code == 200:
                 return response.json()
@@ -273,14 +316,15 @@ class WorkflowService:
             self, workflow_id: str, parameters: Optional[Dict[str, Any]] = None,
             user_info: Optional[Dict] = None
     ) -> WorkflowExecuteResponse:
-        """워크플로우 실행"""
+        """워크플로우 실행
+
+        MLOps v2 spec은 request body 없이 호출. parameters 인자는 게이트웨이
+        호환성을 위해 시그니처에 남겨두지만 외부에는 전달하지 않는다.
+        """
         try:
             url = f"{self.base_url}/workflows/{workflow_id}/execute"
-            payload = {}
-            if parameters:
-                payload['parameters'] = parameters
 
-            response = await self._make_authenticated_request("POST", url, user_info=user_info, json=payload)
+            response = await self._make_authenticated_request("POST", url, user_info=user_info)
 
             if response.status_code == 200:
                 return WorkflowExecuteResponse(**response.json())
@@ -402,53 +446,6 @@ class WorkflowService:
             raise
         except Exception as e:
             logger.error(f"Error testing ML workflow: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
-
-    async def inference_workflow_model(
-            self,
-            workflow_id: str,
-            component_id: str,
-            image: Optional[UploadFile] = None,
-            text: Optional[str] = None,
-            search_text: Optional[str] = None,
-            user_info: Optional[Dict] = None,
-    ) -> Dict[str, Any]:
-        """배포된 모델에 추론 요청 (Deprecated)
-
-        MLOps는 이 엔드포인트를 deprecated 처리했으며 내부적으로 test/rag 또는 test/ml로
-        대체 사용을 권장합니다. 호환성 유지를 위해 프록시만 제공합니다.
-        """
-        try:
-            url = f"{self.base_url}/workflows/{workflow_id}/models/{component_id}/inference"
-
-            data = {}
-            files = {}
-            if text is not None:
-                data['text'] = text
-            if search_text is not None:
-                data['search_text'] = search_text
-            if image is not None:
-                files['image'] = (image.filename, await image.read(), image.content_type)
-
-            kwargs = {}
-            if files:
-                kwargs['files'] = files
-                if data:
-                    kwargs['data'] = data
-            elif data:
-                kwargs['data'] = data
-
-            response = await self._make_authenticated_request(
-                "POST", url, user_info=user_info, **kwargs
-            )
-
-            if response.status_code == 200:
-                return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Error inferring workflow model: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
 
     # ===== Template 관련 =====
@@ -574,15 +571,20 @@ class WorkflowService:
             raise HTTPException(status_code=500, detail=str(e))
 
     async def clone_template(
-            self, template_id: str, workflow_name: str, service_id: Optional[int] = None,
+            self, template_id: str, workflow_name: str,
+            surro_service_id: Optional[str] = None,
             user_info: Optional[Dict] = None
     ) -> Dict[str, Any]:
-        """템플릿으로부터 워크플로우 생성"""
+        """템플릿으로부터 워크플로우 생성
+
+        MLOps v2는 service_id로 UUID(string)를 받는다. 게이트웨이 라우트는 내부 PK(int)를
+        받지만, surro_service_id로 매핑된 후의 UUID를 이 함수에 전달해야 한다.
+        """
         try:
             url = f"{self.base_url}/workflows/templates/{template_id}/clone"
             params = {"workflow_name": workflow_name}
-            if service_id is not None:
-                params["service_id"] = service_id
+            if surro_service_id is not None:
+                params["service_id"] = surro_service_id
 
             response = await self._make_authenticated_request("POST", url, user_info=user_info, params=params)
 
@@ -649,3 +651,6 @@ class WorkflowService:
 
 
 workflow_service = WorkflowService()
+
+# 라우트에서 partial update의 "미지정" 인자를 표현할 때 import해서 사용.
+UNSET = _UNSET

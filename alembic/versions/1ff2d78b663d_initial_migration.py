@@ -164,27 +164,6 @@ def upgrade() -> None:
     op.create_index("idx_knowledge_bases_surro_id", "knowledge_bases", ["surro_knowledge_id"], unique=True)
 
     op.create_table(
-        "lite_model_data",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("request_path", sa.String(length=500), nullable=True),
-        sa.Column("request_method", sa.String(length=10), nullable=True),
-        sa.Column("payload", sa.JSON(), nullable=True),
-        sa.Column("member_id", sa.String(length=50), nullable=True),
-        sa.Column("cache_key", sa.String(length=255), nullable=True),
-        sa.Column("hit_count", sa.Integer(), nullable=False),
-        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("is_active", sa.Boolean(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_index(op.f("ix_lite_model_data_id"), "lite_model_data", ["id"], unique=False)
-    op.create_index("idx_lite_model_data_expires", "lite_model_data", ["expires_at"], unique=False)
-    op.create_index("idx_lite_model_data_active", "lite_model_data", ["is_active"], unique=False)
-    op.create_index("idx_lite_model_data_created", "lite_model_data", ["created_at"], unique=False)
-    op.create_index("idx_lite_model_data_member_created", "lite_model_data", ["member_id", "created_at"], unique=False)
-
-    op.create_table(
         "models",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("surro_model_id", sa.Integer(), nullable=False),
@@ -291,13 +270,6 @@ def downgrade() -> None:
     op.drop_index(op.f("ix_models_surro_model_id"), table_name="models")
     op.drop_index(op.f("ix_models_id"), table_name="models")
     op.drop_table("models")
-
-    op.drop_index("idx_lite_model_data_member_created", table_name="lite_model_data")
-    op.drop_index("idx_lite_model_data_created", table_name="lite_model_data")
-    op.drop_index("idx_lite_model_data_active", table_name="lite_model_data")
-    op.drop_index("idx_lite_model_data_expires", table_name="lite_model_data")
-    op.drop_index(op.f("ix_lite_model_data_id"), table_name="lite_model_data")
-    op.drop_table("lite_model_data")
 
     op.drop_index("idx_knowledge_bases_surro_id", table_name="knowledge_bases")
     op.drop_index(op.f("ix_knowledge_bases_surro_knowledge_id"), table_name="knowledge_bases")

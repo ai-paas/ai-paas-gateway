@@ -135,18 +135,21 @@ class ExternalWorkflowBriefResponse(BaseModel):
 # ===== 워크플로우 생성/수정 요청 =====
 
 class ComponentCreateRequest(BaseModel):
-    """컴포넌트 생성 요청"""
+    """컴포넌트 생성 요청 (MLOps v2)"""
+    ref_id: str = Field(..., description="프론트엔드 생성 임시 참조 ID — Connection이 이 값으로 컴포넌트를 식별")
     name: str
     type: str  # START, END, MODEL, KNOWLEDGE_BASE
+    description: Optional[str] = None
     model_id: Optional[int] = None
     knowledge_base_id: Optional[int] = None
     prompt_id: Optional[int] = None
+    config: Optional[Dict[str, Any]] = None
 
 
 class ConnectionCreateRequest(BaseModel):
-    """연결 생성 요청"""
-    source_component_type: str
-    target_component_type: str
+    """연결 생성 요청 (MLOps v2 — ref_id 기반)"""
+    source_ref_id: str = Field(..., description="소스 컴포넌트의 ref_id")
+    target_ref_id: str = Field(..., description="타겟 컴포넌트의 ref_id")
 
 
 class WorkflowDefinition(BaseModel):
@@ -236,8 +239,8 @@ class WorkflowExecuteRequest(BaseModel):
     """워크플로우 실행 요청"""
     parameters: Optional[Dict[str, Any]] = Field(
         default_factory=dict,
-        description="실행 파라미터 (커스텀 설정 값들을 전달)",
-        json_schema_extra={"example": {"gpu_enabled": True, "replicas": 2}}
+        description="호환성 유지용 실행 파라미터. 현재 실행 처리에는 사용되지 않습니다.",
+        json_schema_extra={"example": {}}
     )
 
 
@@ -247,6 +250,30 @@ class WorkflowExecuteResponse(BaseModel):
     kubeflow_run_id: str = Field(..., description="Kubeflow 파이프라인 실행 ID")
     status: str = Field(..., description="실행 상태 (PENDING/RUNNING/SUCCEEDED/FAILED)")
     message: str = Field(..., description="상태 메시지")
+
+
+# ===== 워크플로우 정의 검증 (MLOps v2 신규) =====
+
+class WorkflowValidateRequest(BaseModel):
+    """워크플로우 정의 검증 요청 (MLOps v2)"""
+    workflow_definition: WorkflowDefinition = Field(
+        ..., description="검증할 워크플로우 정의 (생성 전 사전 검증용)"
+    )
+
+
+class ValidationCheckResponse(BaseModel):
+    """검증 규칙 결과 한 항목"""
+    rule: str = Field(..., description="검증 규칙 식별자")
+    passed: bool = Field(..., description="해당 규칙 통과 여부")
+    message: Optional[str] = Field(None, description="실패 시 상세 메시지")
+
+
+class WorkflowValidateResponse(BaseModel):
+    """워크플로우 정의 검증 응답 (MLOps v2)"""
+    valid: bool = Field(..., description="모든 규칙 통과 여부")
+    checks: List[ValidationCheckResponse] = Field(
+        default_factory=list, description="규칙별 검증 결과 목록"
+    )
 
 
 # ===== 워크플로우 테스트 관련 =====

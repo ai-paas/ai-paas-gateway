@@ -104,13 +104,6 @@ class Settings:
     ANY_CLOUD_MAX_CONNECTIONS: int = int(os.getenv("ANY_CLOUD_MAX_CONNECTIONS", "100"))
     ANY_CLOUD_MAX_KEEPALIVE_CONNECTIONS: int = int(os.getenv("ANY_CLOUD_MAX_KEEPALIVE_CONNECTIONS", "20"))
 
-    LITE_MODEL_ENABLED: bool = _get_bool("LITE_MODEL_ENABLED", False)
-    LITE_MODEL_TARGET_BASE_URL: str = os.getenv("LITE_MODEL_TARGET_BASE_URL", "")
-    LITE_MODEL_TIMEOUT: float = float(os.getenv("LITE_MODEL_TIMEOUT", "30.0"))
-    LITE_MODEL_CONNECT_TIMEOUT: float = float(os.getenv("LITE_MODEL_CONNECT_TIMEOUT", "5.0"))
-    LITE_MODEL_MAX_CONNECTIONS: int = int(os.getenv("LITE_MODEL_MAX_CONNECTIONS", "100"))
-    LITE_MODEL_MAX_KEEPALIVE_CONNECTIONS: int = int(os.getenv("LITE_MODEL_MAX_KEEPALIVE_CONNECTIONS", "20"))
-
     def __init__(self):
         if not self.DATABASE_URL:
             raise ValueError("DATABASE_URL environment variable is required")

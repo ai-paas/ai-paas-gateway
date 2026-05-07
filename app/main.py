@@ -15,7 +15,6 @@ from app.routes import (
     hub_connect,
     knowledge_base,
     learning,
-    lite_model,
     member,
     model,
     model_improvement,
@@ -72,10 +71,6 @@ app.include_router(any_cloud.router_helm, prefix=settings.API_V1_STR)
 app.include_router(any_cloud.router_monit, prefix=settings.API_V1_STR)
 app.include_router(any_cloud.router_package, prefix=settings.API_V1_STR)
 app.include_router(any_cloud.router_catalog, prefix=settings.API_V1_STR)
-app.include_router(lite_model.router_info, prefix=settings.API_V1_STR)
-app.include_router(lite_model.router_optimize, prefix=settings.API_V1_STR)
-app.include_router(lite_model.router_task, prefix=settings.API_V1_STR)
-app.include_router(lite_model.router_model, prefix=settings.API_V1_STR)
 
 
 @app.get("/")

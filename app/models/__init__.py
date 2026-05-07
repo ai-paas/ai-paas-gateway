@@ -4,7 +4,6 @@ from .dataset import Dataset
 from .experiment import Experiment
 from .hub_connect import HubConnection
 from .knowledge_base import KnowledgeBase
-from .lite_model import LiteModelData
 from .member import Member
 from .model import Model
 from .model_improvement import ModelImprovement
