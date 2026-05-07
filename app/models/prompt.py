@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON, Index
+from sqlalchemy import Boolean, Column, Integer, String, Text, DateTime, ForeignKey, JSON, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -35,10 +35,14 @@ class Prompt(Base):
 
     created_by = Column(String(100), ForeignKey("members.member_id"), nullable=False)
     surro_prompt_id = Column(Integer, nullable=False, index=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_by = Column(String(100), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
 
     creator = relationship("Member", backref="created_prompts")
 
     __table_args__ = (
         Index('idx_prompts_surro_prompt_id', 'surro_prompt_id', unique=True),
+        Index('idx_prompts_active', 'surro_prompt_id', 'is_active', 'deleted_at'),
         {'extend_existing': True}
     )

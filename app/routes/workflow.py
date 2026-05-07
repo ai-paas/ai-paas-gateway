@@ -1,11 +1,12 @@
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.common.sort import parse_sort, sort_in_memory
+from app.cruds.service import service_crud
 from app.cruds.workflow import workflow_crud
 from app.database import get_db
 from app.models.member import Member
@@ -17,9 +18,11 @@ from app.schemas.workflow import (
     WorkflowListResponse,
     WorkflowExecuteRequest,
     WorkflowExecuteResponse,
-    WorkflowTestResponse
+    WorkflowTestResponse,
+    WorkflowValidateRequest,
+    WorkflowValidateResponse,
 )
-from app.services.workflow_service import workflow_service
+from app.services.workflow_service import UNSET as _SERVICE_UNSET, workflow_service
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +93,55 @@ async def get_component_types(
         "data": component_types
     }
 
+# ===== Workflow Definition 검증 (MLOps v2 신규) =====
+
+@router.post("/validate", response_model=WorkflowValidateResponse)
+async def validate_workflow_definition(
+        validate_request: WorkflowValidateRequest,
+        current_user=Depends(get_current_user),
+):
+    """
+    워크플로우 정의 사전 검증
+
+    워크플로우 생성 전에 정의(components/connections)가 유효한지 검사합니다.
+    저장 없이 검증 규칙 결과만 반환합니다.
+
+    ## Request Body (WorkflowValidateRequest)
+    - **workflow_definition** (WorkflowDefinition, required): 검증할 정의
+        - components (List[ComponentCreateRequest]): 컴포넌트 목록
+            - ref_id, name, type 필수
+            - description, model_id, knowledge_base_id, prompt_id, config 선택
+        - connections (List[ConnectionCreateRequest]): ref_id 기반 연결 목록
+            - source_ref_id, target_ref_id 필수
+
+    ## Response (WorkflowValidateResponse)
+    - **valid** (bool): 모든 규칙 통과 여부
+    - **checks** (List[ValidationCheckResponse]): 규칙별 결과
+        - rule (str): 규칙 식별자
+        - passed (bool): 통과 여부
+        - message (str, optional): 실패 시 상세 메시지
+
+    ## Notes
+    - 저장하지 않음 — 순수 사전 검증용
+    - 본 검사를 통과해도 실제 생성(`POST /workflows`) 시 추가 정합성 검사가 있을 수 있음
+
+    ## Errors
+    - **401**: 인증되지 않은 사용자
+    - **422**: 정의 형식 오류 (Pydantic 스키마 위반)
+    - **500**: MLOps 검증 호출 실패
+    """
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name,
+    }
+
+    return await workflow_service.validate_workflow(
+        workflow_definition=validate_request.workflow_definition.dict(),
+        user_info=user_info,
+    )
+
+
 # ===== Workflow CRUD =====
 
 @router.post("/", response_model=WorkflowResponse, status_code=status.HTTP_201_CREATED)
@@ -112,14 +164,17 @@ async def create_workflow(
     - **service_id** (str, optional): 연결할 서비스 ID
     - **workflow_definition** (WorkflowDefinition, optional): 워크플로우 정의
         - components (List[ComponentCreateRequest]): 컴포넌트 목록
+            - ref_id (str, required): 프론트엔드 생성 임시 참조 ID — Connection이 이 값으로 식별
             - name (str): 컴포넌트 이름
             - type (ComponentType): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
+            - description (str, optional): 컴포넌트 설명
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
-        - connections (List[ConnectionCreateRequest]): 연결 목록
-            - source_component_type (ComponentType): 소스 컴포넌트 타입
-            - target_component_type (ComponentType): 타겟 컴포넌트 타입
+            - config (dict, optional): 컴포넌트별 세부 설정
+        - connections (List[ConnectionCreateRequest]): 연결 목록 — *MLOps v2부터 ref_id 기반*
+            - source_ref_id (str): 소스 컴포넌트의 ref_id
+            - target_ref_id (str): 타겟 컴포넌트의 ref_id
 
     ## Response (WorkflowResponse)
     - **id** (int): 게이트웨이 DB PK
@@ -158,6 +213,8 @@ async def create_workflow(
     ## Errors
     - **400**: 잘못된 요청 (정의 오류 등)
     - **401**: 인증되지 않은 사용자
+    - **403**: service_id가 다른 사용자 소유의 service일 때 (admin 제외)
+    - **404**: service_id가 게이트웨이 DB에 존재하지 않을 때
     - **500**: 서버 내부 오류 (MLOps에는 생성됐으나 게이트웨이 DB 저장 실패 포함)
     """
     user_info = {
@@ -165,6 +222,20 @@ async def create_workflow(
         'role': current_user.role,
         'name': current_user.name
     }
+
+    # 서비스 링크 권한 확인: 다른 사용자의 service에 link 불가 (admin 제외)
+    if workflow_create.service_id:
+        db_service = service_crud.get_service_by_surro_id(db, workflow_create.service_id)
+        if not db_service:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Service not found: {workflow_create.service_id}",
+            )
+        if current_user.role != "admin" and db_service.created_by != current_user.member_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permission denied: cannot link another user's service",
+            )
 
     # 외부 API 호출
     workflow_definition_dict = None
@@ -729,15 +800,18 @@ async def update_template(
     - **status** (str, optional): 새 상태 (DRAFT/ACTIVE/ERROR)
         - 템플릿은 일반적으로 DRAFT 상태 유지 (실행 불가)
     - **workflow_definition** (WorkflowUpdateDefinition, optional): 새 템플릿 구조
-        - components (List[ComponentUpdateRequest]): 컴포넌트 목록
+        - components (List[ComponentCreateRequest]): 컴포넌트 목록
+            - ref_id (str, required): 프론트엔드 생성 임시 참조 ID
             - name (str): 컴포넌트 이름
             - type (ComponentType): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
+            - description (str, optional): 컴포넌트 설명
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
-        - connections (List[ConnectionUpdateRequest]): 연결 목록
-            - source_component_type (ComponentType): 소스 컴포넌트 타입
-            - target_component_type (ComponentType): 타겟 컴포넌트 타입
+            - config (dict, optional): 컴포넌트별 세부 설정
+        - connections (List[ConnectionCreateRequest]): 연결 목록 — *MLOps v2부터 ref_id 기반*
+            - source_ref_id (str): 소스 컴포넌트의 ref_id
+            - target_ref_id (str): 타겟 컴포넌트의 ref_id
 
     ## Response (WorkflowTemplateReadSchema)
     - **id** (str): 템플릿 UUID
@@ -845,7 +919,10 @@ async def delete_template(
 async def clone_template(
         template_id: str,
         workflow_name: str = Query(..., description="새로 생성할 워크플로우 이름"),
-        service_id: Optional[int] = Query(None, description="연결할 서비스 ID"),
+        service_id: Optional[int] = Query(
+            None,
+            description="연결할 서비스 ID. 서비스 목록/상세 조회 응답의 id 값을 사용합니다.",
+        ),
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -861,8 +938,10 @@ async def clone_template(
     ## Query Parameters
     - **workflow_name** (str, required): 새로 생성할 워크플로우 이름
     - **service_id** (int, optional): 연결할 서비스 ID
+        - 서비스 목록/상세 조회 응답의 `id` 값을 사용
         - 서비스와 연결시 모니터링 가능
-        - (MLOps 원본은 UUID str이나, 게이트웨이는 내부 서비스 매핑을 위해 int로 노출)
+        - 존재하지 않는 서비스면 404 반환
+        - 접근 권한이 없는 서비스면 403 반환
 
     ## Response (WorkflowReadSchema)
     - **id** (str): 생성된 워크플로우 UUID
@@ -883,20 +962,15 @@ async def clone_template(
     - **created_at** (datetime): 생성 시각
     - **updated_at** (datetime): 수정 시각
 
-    게이트웨이 추가 필드 (응답에 함께 포함):
-    - **db_id** (int): 게이트웨이 DB PK
-    - **db_created_at** (str): 게이트웨이 DB 생성 시각 (ISO 8601)
-    - **db_created_by** (str): 게이트웨이 사용자 member_id
-
     ## Notes
     - 템플릿의 모든 컴포넌트와 연결이 복사됨
     - 생성된 워크플로우는 템플릿과 독립적으로 동작
     - template_id가 자동으로 기록됨
-    - MLOps에는 복제되었으나 게이트웨이 DB 저장에 실패하는 경우 경고만 기록하고 MLOps 응답은 그대로 반환
 
     ## Errors
     - **401**: 인증되지 않은 사용자
-    - **404**: 템플릿을 찾을 수 없음
+    - **403**: service_id가 다른 사용자 소유의 service일 때 (admin 제외)
+    - **404**: 템플릿 또는 service_id를 찾을 수 없음
     - **500**: 서버 내부 오류
     """
     user_info = {
@@ -905,11 +979,28 @@ async def clone_template(
         'name': current_user.name
     }
 
+    # 게이트웨이 내부 service_id(int) → MLOps surro_service_id(UUID) 매핑
+    # + 다른 사용자의 service에 link 불가 (admin 제외)
+    surro_service_id: Optional[str] = None
+    if service_id is not None:
+        db_service = service_crud.get_service(db, service_id)
+        if not db_service:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Service not found: id={service_id}",
+            )
+        if current_user.role != "admin" and db_service.created_by != current_user.member_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permission denied: cannot link another user's service",
+            )
+        surro_service_id = db_service.surro_service_id
+
     # 외부 API에서 템플릿 복제
     clone_response = await workflow_service.clone_template(
         template_id=template_id,
         workflow_name=workflow_name,
-        service_id=service_id,
+        surro_service_id=surro_service_id,
         user_info=user_info
     )
 
@@ -1103,19 +1194,22 @@ async def update_workflow(
         - 모니터링 및 서비스 관리용 서비스 ID
         - null로 설정 시 서비스 연결 해제
     - **workflow_definition** (WorkflowUpdateDefinition, optional): 새 워크플로우 구조
-        - components (List[ComponentUpdateRequest]): 컴포넌트 목록
+        - components (List[ComponentCreateRequest]): 컴포넌트 목록
+            - ref_id (str, required): 프론트엔드 생성 임시 참조 ID
             - name (str): 컴포넌트 이름
             - type (ComponentType): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
                 - "START": 워크플로우 시작점
                 - "END": 워크플로우 종료점
                 - "MODEL": ML 모델 실행 노드
                 - "KNOWLEDGE_BASE": 지식 베이스 검색 노드
+            - description (str, optional): 컴포넌트 설명
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID (선택)
-        - connections (List[ConnectionUpdateRequest]): 연결 목록
-            - source_component_type (ComponentType): 소스 컴포넌트 타입
-            - target_component_type (ComponentType): 타겟 컴포넌트 타입
+            - config (dict, optional): 컴포넌트별 세부 설정
+        - connections (List[ConnectionCreateRequest]): 연결 목록 — *MLOps v2부터 ref_id 기반*
+            - source_ref_id (str): 소스 컴포넌트의 ref_id
+            - target_ref_id (str): 타겟 컴포넌트의 ref_id
 
     ## Response (WorkflowResponse)
     - **id** (int): 게이트웨이 DB PK
@@ -1144,8 +1238,8 @@ async def update_workflow(
 
     ## Errors
     - **401**: 인증되지 않은 사용자
-    - **403**: 권한 없음 (본인 소유가 아니며 admin도 아님)
-    - **404**: 워크플로우를 찾을 수 없음
+    - **403**: 권한 없음 (워크플로우가 본인 소유가 아니며 admin도 아님 / service_id가 다른 사용자 service일 때)
+    - **404**: 워크플로우 또는 service_id를 찾을 수 없음
     - **500**: 서버 내부 오류
     """
     # 우리 DB에서 기존 워크플로우 조회 (권한 확인용)
@@ -1159,6 +1253,27 @@ async def update_workflow(
     # 권한 확인
     if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
         raise HTTPException(status_code=403, detail="Permission denied")
+
+    # 서비스 링크 권한 확인 + 미지정/명시 null 구별
+    # - 요청 본문에 service_id가 아예 없으면: 외부에 전달 X (no-op)
+    # - 명시적 null: 외부에 service_id=null 전달 (unlink) — 권한 검사 불필요
+    # - UUID 값: 우리 DB에서 소유권 확인 후 전달
+    service_id_was_provided = "service_id" in workflow_update.model_fields_set
+    if workflow_update.service_id:
+        db_service = service_crud.get_service_by_surro_id(db, workflow_update.service_id)
+        if not db_service:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Service not found: {workflow_update.service_id}",
+            )
+        if current_user.role != "admin" and db_service.created_by != current_user.member_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permission denied: cannot link another user's service",
+            )
+
+    # 외부 API에 보낼 service_id: 요청에 포함됐을 때만 (명시 null도 그대로)
+    service_id_arg = workflow_update.service_id if service_id_was_provided else _SERVICE_UNSET
 
     # 외부 API 업데이트
     user_info = {
@@ -1178,7 +1293,7 @@ async def update_workflow(
             description=workflow_update.description,
             category=workflow_update.category,
             status=workflow_update.status,
-            service_id=workflow_update.service_id,
+            service_id=service_id_arg,
             workflow_definition=workflow_definition_dict,
             user_info=user_info
         )
@@ -1301,7 +1416,10 @@ async def delete_workflow(
 @router.post("/{surro_workflow_id}/finalize-deletion")
 async def finalize_workflow_deletion(
         surro_workflow_id: str,
-        run_id: str = Query(..., description="Cleanup run ID"),
+        run_id: Optional[str] = Query(
+            None,
+            description="Deprecated — 현재 삭제 완료 처리에는 사용되지 않음",
+        ),
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -1315,8 +1433,9 @@ async def finalize_workflow_deletion(
     - **workflow_id** (str): 삭제할 워크플로우 UUID
 
     ## Query Parameters
-    - **run_id** (str, required): Kubeflow Pipeline cleanup run ID
-        - `DELETE /workflows/{workflow_id}` 응답의 `cleanup_run_id` 사용
+    - **run_id** (str, optional, *deprecated*): 현재 삭제 완료 처리에는 사용되지 않음
+        - 호환성 차원에서 받기는 하나 처리에는 사용하지 않음
+        - 생략 가능
 
     ## Response
     - **workflow_id** (str): 워크플로우 UUID
@@ -1365,10 +1484,11 @@ async def finalize_workflow_deletion(
     }
 
     try:
+        # MLOps v2부터 run_id는 사용되지 않으므로 외부에 전달하지 않음
         finalize_response = await workflow_service.finalize_deletion(
             surro_workflow_id,
-            run_id,
-            user_info
+            run_id=None,
+            user_info=user_info,
         )
 
         # 삭제 완료된 경우 우리 DB에서도 삭제
@@ -1391,7 +1511,7 @@ async def finalize_workflow_deletion(
 @router.post("/{surro_workflow_id}/execute", response_model=WorkflowExecuteResponse)
 async def execute_workflow(
         surro_workflow_id: str,
-        execute_request: WorkflowExecuteRequest,
+        execute_request: Optional[WorkflowExecuteRequest] = Body(None),
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -1405,10 +1525,10 @@ async def execute_workflow(
     ## Path Parameters
     - **workflow_id** (str): 실행할 워크플로우 UUID
 
-    ## Request Body (WorkflowExecuteRequest)
-    - **parameters** (Dict[str, Any], optional): 실행 파라미터
-        - 커스텀 설정 값들을 전달할 수 있음
-        - 예: `{"gpus": 1, "replicas": 2}`
+    ## Request Body (Optional[WorkflowExecuteRequest])
+    - **parameters** (Dict[str, Any], optional): 호환성 유지용 실행 파라미터
+        - 현재 실행 처리에는 사용되지 않음
+        - body 자체를 생략해도 정상 호출됨
 
     ## Response (WorkflowExecuteResponse)
     - **workflow_id** (str): 실행된 워크플로우 UUID
@@ -1456,10 +1576,12 @@ async def execute_workflow(
         'name': current_user.name
     }
 
+    # MLOps v2는 body를 받지 않으므로 parameters는 외부에 전달하지 않음.
+    # 게이트웨이 호환성 차원에서 받기만 한다.
     execute_response = await workflow_service.execute_workflow(
         surro_workflow_id,
-        execute_request.parameters,
-        user_info
+        parameters=None,
+        user_info=user_info,
     )
 
     return execute_response
@@ -1818,7 +1940,7 @@ async def test_ml_workflow(
 
     return test_response
 
-# ===== Workflow 모델 추론 (Deprecated) =====
+# ===== Workflow 모델 추론 (Removed in MLOps v2) =====
 
 @router.post(
     "/{surro_workflow_id}/models/{component_id}/inference",
@@ -1827,126 +1949,30 @@ async def test_ml_workflow(
 async def inference_workflow_model(
         surro_workflow_id: str,
         component_id: str,
-        image: Optional[UploadFile] = File(None),
-        text: Optional[str] = Form(None),
-        search_text: Optional[str] = Form(None),
-        db: Session = Depends(get_db),
-        current_user=Depends(get_current_user)
+        current_user=Depends(get_current_user),
 ):
     """
-    배포된 모델에 추론 요청 (Deprecated)
+    배포된 모델에 추론 요청 — **MLOps v2에서 제거됨 (410 Gone)**
 
-    ⚠️ 이 API는 deprecated 되었습니다. 대신 다음 API를 사용하세요:
+    이 엔드포인트는 MLOps v2에서 더 이상 제공되지 않습니다.
+    아래 대체 API를 사용하세요:
+
     - RAG 워크플로우: `POST /api/v1/workflows/{workflow_id}/test/rag`
     - ML 워크플로우: `POST /api/v1/workflows/{workflow_id}/test/ml`
 
-    워크플로우에서 배포된 특정 모델 컴포넌트에 추론을 수행합니다.
-    - KServe 모델: KServe V2 프로토콜을 사용하며, Object Detection 모델을 지원합니다.
-    - Ollama 모델: Ollama 채팅 API(`/api/chat`)를 사용하며, LLM 모델을 지원합니다.
-
-    게이트웨이는 호환성 유지를 위해 MLOps로 요청을 그대로 전달(프록시)합니다.
-    신규 연동에서는 위의 test API를 사용하세요.
-
-    ## Path Parameters
-    - **workflow_id** (str): 워크플로우 UUID
-    - **component_id** (str): 컴포넌트 UUID (WorkflowComponent.id)
-        - 컴포넌트 ID 조회 방법:
-          1. 워크플로우 상세 조회: `GET /api/v1/workflows/{workflow_id}`
-             - 응답의 `components` 배열에서 `id` 필드 확인
-             - `type`이 "MODEL"인 컴포넌트의 `id` 사용
-          2. 배포된 모델 목록 조회: `GET /api/v1/workflows/{workflow_id}/models`
-             - 응답의 `deployed_models` 배열에서 `component_id` 필드 확인
-             - 배포된 모델만 조회 가능 (DEPLOYED 상태)
-
-    ## Request Body (Form Data)
-    - **image** (file, optional): 분석할 이미지 파일
-        - KServe 모델인 경우 필수
-        - Ollama 모델인 경우 선택 (텍스트와 함께 사용 가능)
-        - 지원 형식: JPEG, PNG, GIF, WebP
-        - Base64로 인코딩되어 서버로 전송
-    - **text** (str, optional): 텍스트 입력
-        - Ollama 모델인 경우 필수 (image가 없는 경우)
-        - KServe 모델인 경우 사용하지 않음
-    - **search_text** (str, optional): Knowledge Base 검색 결과 텍스트
-        - Knowledge Base 컴포넌트에서 검색된 결과를 전달하는 파라미터
-        - Ollama 모델인 경우에만 사용됨
-        - prompt_id가 설정된 경우: prompt의 context 변수에 자동 치환
-        - prompt_id가 없는 경우: [참고자료] 태그와 함께 system 메시지로 추가
-
-    ## Response (통일된 형식)
-    - **workflow_id** (str): 워크플로우 UUID
-    - **component_id** (str): 컴포넌트 UUID
-    - **model_info** (dict): 모델 정보
-        - component_id (str): 컴포넌트 ID
-        - service_name (str): 서비스 이름
-        - sanitized_model_name (str): 정제된 모델 이름 (DNS 규칙 준수)
-        - model_id (int, optional): 모델 ID
-        - original_model_name (str, optional): 원본 모델 이름
-        - model_type (str, optional): 모델 타입 (예: "ODM", "LLM")
-        - model_format (str, optional): 모델 포맷 (예: "pytorch", "gguf")
-    - **result** (dict): 추론 결과
-        - **model_type** (str): 모델 타입 ("KServe" 또는 "Ollama")
-        - KServe 모델인 경우:
-            - **predictions** (List[dict]): 추론 결과 목록
-                - 각 항목은 다음 필드를 포함:
-                    - **score** (float): 객체 감지 신뢰도 점수 (0.0 ~ 1.0)
-                    - **label** (str): 감지된 객체의 레이블 (예: "person", "laptop")
-                    - **box** (List[float]): 바운딩 박스 좌표 [x1, y1, x2, y2]
-            - **image_info** (dict, optional): 이미지 메타데이터
-                - **original_size** (dict): 원본 이미지 크기
-                - **model_input_size** (dict): 모델 입력 크기
-        - Ollama 모델인 경우:
-            - **response** (str): LLM 응답 텍스트
-            - **full_response** (dict, optional): Ollama API 전체 응답
-    - **raw_response** (dict, optional): 원본 응답 (예상치 못한 형식인 경우에만 포함)
-
-    ## Monitoring
-    - 모든 추론 요청은 ServiceMonitoring 테이블에 자동 기록
-    - 응답 시간, 성공/실패 여부, 사용자 정보 포함
-    - 서비스와 연결된 경우만 모니터링 데이터 저장
-
-    ## Notes
-    ### KServe 모델
-    - Istio Gateway를 통해 KServe InferenceService에 접근
-    - V2 프로토콜 엔드포인트: `/v2/models/{model_name}/infer`
-    - Host 헤더로 Istio 라우팅 제어
-
-    ### Ollama 모델
-    - internal_url을 통해 Ollama 서비스에 직접 접근 (예: `http://localhost:11434`)
-    - 채팅 API 엔드포인트: `/api/chat`
-    - model 필드에 repo_id 사용 (예: "gemma3", "ahmgam/medllama3-v20")
-    - 이미지는 base64로 인코딩되어 메시지에 포함됨
-
     ## Errors
-    - **400**: 잘못된 요청
-        - Ollama 모델인 경우: text 인자가 없으면 에러
-        - KServe 모델인 경우: image 인자가 없으면 에러
-        - 잘못된 이미지 파일
     - **401**: 인증되지 않은 사용자
-    - **404**: 워크플로우나 컴포넌트를 찾을 수 없음
-    - **503**: 모델 서비스가 준비되지 않음
-    - **504**: 추론 요청 타임아웃
+    - **410**: 인증된 호출 시 — 대체 API 정보를 응답에 포함
     """
-    existing_workflow = workflow_crud.get_workflow_by_surro_id(
-        db=db,
-        surro_workflow_id=surro_workflow_id
-    )
-    if not existing_workflow:
-        raise HTTPException(status_code=404, detail="Workflow not found")
-
-    user_info = {
-        'member_id': current_user.member_id,
-        'role': current_user.role,
-        'name': current_user.name
-    }
-
-    return await workflow_service.inference_workflow_model(
-        workflow_id=surro_workflow_id,
-        component_id=component_id,
-        image=image,
-        text=text,
-        search_text=search_text,
-        user_info=user_info,
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "message": "This endpoint was removed in MLOps v2.",
+            "alternatives": {
+                "rag_workflow": "POST /api/v1/workflows/{workflow_id}/test/rag",
+                "ml_workflow": "POST /api/v1/workflows/{workflow_id}/test/ml",
+            },
+        },
     )
 
 
