@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Path, Body, Request, UploadFile, File, Form
 from typing import Optional, Any, Dict
 import logging
-import json
 
 from app.auth import get_current_user
 from app.schemas.any_cloud import AnyCloudResponse, AnyCloudDataResponse, GenericRequest, ClusterCreateRequest, \
@@ -445,79 +444,22 @@ async def helm_repo_delete_api(
             detail="Internal server error occurred while deleting helm repo"
         )
 
-# 클러스터 내 노드별 상태 조회 API
-@router_monit.get("/monit/nodeStatus/{cluster_name}")
-async def get_monitoring_cluster_node(
-        cluster_name: str = Path(..., description="조회할 cluster 이름", examples=["openstack"]),
-        current_user: Member = Depends(get_current_user)
-):
-    """
-    클러스터 내 노드별 상태 조회
-    """
-    try:
-        user_info = _create_user_info_dict(current_user)
-
-        response = await any_cloud_service.get_monitoring_node(
-            cluster_name=cluster_name,
-            user_info=user_info
-        )
-
-        return response
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting monitoring {cluster_name} detail for {current_user.member_id}: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to monitoring"
-        )
-
-# 대시보드 모니터링 메트릭 조회 API
-@router_monit.get(
-    "/monit/resourceMonit/{cluster_name}/{type}/{key}",
-    openapi_extra={
-        "parameters": [
-            {
-                "name": "filter",
-                "in": "query",
-                "required": True,
-                "description": "node,namespace filter 및 duration",
-                "schema": {
-                    "type": "object",
-                    "example": {"namespace": "kubeflow", "duration": "3600"},
-                    "properties": {
-                        "namespace": {"type": "string"},
-                        "duration": {"type": "string"}
-                    }
-                },
-                "style": "form",
-                "explode": True
-            }
-        ]
-    }
-)
-async def get_monitoring_metric(
+@router_monit.get("/monit/{cluster_name}/query")
+async def get_prometheus_query(
         request: Request,
         cluster_name: str = Path(..., description="조회할 cluster 이름", examples=["openstack"]),
-        type: str = Path(..., description="메트릭 타입", examples=["cpu"]),
-        key: str = Path(..., description="조회할 메트릭 key", examples=["usage_namespace"]),
         current_user: Member = Depends(get_current_user)
 ):
     """
-    대시보드 모니터링 메트릭 조회 https://github.com/ai-paas/any-cloud-management/blob/main/anycloud/src/main/resources/application.yaml 참고
+    Prometheus instant query를 조회합니다.
     """
     try:
         user_info = _create_user_info_dict(current_user)
+        query_params = dict(request.query_params)
 
-        # 쿼리 파라미터를 filter dict로 변환
-        filter_dict = dict(request.query_params)
-
-        response = await any_cloud_service.get_monitoring_metric(
+        response = await any_cloud_service.get_prometheus_query(
             cluster_name=cluster_name,
-            type=type,
-            key=key,
-            filter=filter_dict,
+            query_params=query_params,
             user_info=user_info
         )
 
@@ -526,10 +468,47 @@ async def get_monitoring_metric(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting monitoring {cluster_name} detail for {current_user.member_id}: {str(e)}")
+        logger.error(
+            f"Error getting Prometheus instant query for {cluster_name} "
+            f"by {current_user.member_id}: {str(e)}"
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to get monitoring metric"
+            detail="Failed to get Prometheus instant query"
+        )
+
+
+@router_monit.get("/monit/{cluster_name}/query_range")
+async def get_prometheus_query_range(
+        request: Request,
+        cluster_name: str = Path(..., description="조회할 cluster 이름", example="openstack"),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    Prometheus range query를 조회합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+        query_params = dict(request.query_params)
+
+        response = await any_cloud_service.get_prometheus_query_range(
+            cluster_name=cluster_name,
+            query_params=query_params,
+            user_info=user_info
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            f"Error getting Prometheus range query for {cluster_name} "
+            f"by {current_user.member_id}: {str(e)}"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get Prometheus range query"
         )
 
 # 클러스터 특정 리소스 목록 조회 API
