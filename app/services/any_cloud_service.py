@@ -67,6 +67,17 @@ class AnyCloudService:
         클라이언트 사이드 페이징 처리
         백엔드에서 전체 데이터를 받아서 페이징 처리
         """
+        def get_nested_value(item: Any, field: str) -> Any:
+            value = item
+
+            for key in field.split("."):
+                if not isinstance(value, dict):
+                    return ""
+
+                value = value.get(key)
+
+            return value if value is not None else ""
+
         # 검색 처리
         filtered_data = data
         if search and search_fields:
@@ -74,7 +85,7 @@ class AnyCloudService:
             filtered_data = [
                 item for item in data
                 if any(
-                    search_lower in str(item.get(field, '')).lower()
+                    search_lower in str(get_nested_value(item, field)).lower()
                     for field in search_fields
                 )
             ]
@@ -491,7 +502,7 @@ class AnyCloudService:
                 page=page,
                 size=size,
                 search=search,
-                search_fields=["name", "metadata.name"]
+                search_fields=["metadata.name"]
             )
 
         return AnyCloudPagedResponse.create(
