@@ -419,23 +419,34 @@ class AnyCloudService:
             user_info=user_info
         )
 
-    async def get_monitoring_node(self, cluster_name: str, user_info: dict) -> dict:
+    async def get_prometheus_query(
+            self,
+            cluster_name: str,
+            query_params: dict,
+            user_info: dict
+    ) -> dict:
         """
-        클러스터 내 노드별 상태 조회 전용 메소드
+        Prometheus instant query 전용 메소드
         """
         return await self.generic_get_unwrapped(
-            path=f"/monit/nodeStatus/{cluster_name}",
-            user_info=user_info
+            path=f"/monit/{cluster_name}/query",
+            user_info=user_info,
+            **query_params
         )
 
-    async def get_monitoring_metric(self, cluster_name: str, type: str, key: str, filter: dict, user_info: dict) -> dict:
+    async def get_prometheus_query_range(
+            self,
+            cluster_name: str,
+            query_params: dict,
+            user_info: dict
+    ) -> dict:
         """
-        모니터링 메트릭 조회 전용 메소드
+        Prometheus range query 전용 메소드
         """
         return await self.generic_get_unwrapped(
-            path=f"/monit/resourceMonit/{cluster_name}/{type}/{key}",
+            path=f"/monit/{cluster_name}/query_range",
             user_info=user_info,
-            **filter  # filter dict를 **kwargs로 전개하여 쿼리 파라미터로 전달
+            **query_params
         )
 
     async def get_kubernetes_resource(
@@ -456,16 +467,38 @@ class AnyCloudService:
             user_info=user_info
         )
 
-        data = response.get("data", [])
-        if isinstance(data, dict):
-            data = data.get("items", [])
+        raw_data = response.get("data", [])
+        source_page = page
+        source_size = size
+        source_total = 0
 
-        return self._apply_client_side_pagination(
+        if isinstance(raw_data, dict):
+            data = raw_data.get("data")
+            if data is None:
+                data = raw_data.get("items", [])
+            source_page = raw_data.get("page", page) or page
+            source_size = raw_data.get("size", size) or size
+            source_total = raw_data.get("total", 0) or 0
+        else:
+            data = raw_data
+
+        if not isinstance(data, list):
+            data = []
+
+        if search:
+            return self._apply_client_side_pagination(
+                data=data,
+                page=page,
+                size=size,
+                search=search,
+                search_fields=["name", "metadata.name"]
+            )
+
+        return AnyCloudPagedResponse.create(
             data=data,
-            page=page,
-            size=size,
-            search=search,
-            search_fields=["name", "metadata.name"]
+            total=source_total or len(data),
+            page=source_page,
+            size=source_size
         )
 
     async def get_kubernetes_resource_name(self, resource_type: str, resource_name: str, clusterName: str, namespace: str, user_info: dict) -> dict:
