@@ -74,10 +74,25 @@ class ExternalComponentSchema(BaseModel):
     workflow_id: str
     name: str
     type: str  # START, END, MODEL, KNOWLEDGE_BASE
+    description: Optional[str] = None
     model_id: Optional[int] = None
     model: Optional[ModelDetailSchema] = None
     knowledge_base_id: Optional[int] = None
     prompt_id: Optional[int] = None
+    config: Optional[Dict[str, Any]] = None
+    x: Optional[int] = Field(None, description="프론트 캔버스 x 좌표 (음수 허용)")
+    y: Optional[int] = Field(None, description="프론트 캔버스 y 좌표 (음수 허용)")
+
+
+class UserBriefSchema(BaseModel):
+    """External API user response without password."""
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
+    id: int
+    username: str
+    name: str
 
 
 class ExternalConnectionSchema(BaseModel):
@@ -100,6 +115,7 @@ class ExternalWorkflowDetailResponse(BaseModel):
     status: str  # DRAFT, ACTIVE, ERROR
     service_id: Optional[str] = None
     creator_id: int
+    creator: Optional[UserBriefSchema] = None
     is_template: bool
     template_id: Optional[str] = None
     kubeflow_run_id: Optional[str] = None
@@ -144,6 +160,8 @@ class ComponentCreateRequest(BaseModel):
     knowledge_base_id: Optional[int] = None
     prompt_id: Optional[int] = None
     config: Optional[Dict[str, Any]] = None
+    x: Optional[int] = Field(None, description="프론트 캔버스 x 좌표 (음수 허용)")
+    y: Optional[int] = Field(None, description="프론트 캔버스 y 좌표 (음수 허용)")
 
 
 class ConnectionCreateRequest(BaseModel):

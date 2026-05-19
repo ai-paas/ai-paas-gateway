@@ -624,7 +624,7 @@ class WorkflowService:
             status: str, internal_url: Optional[str] = None,
             error_message: Optional[str] = None, user_info: Optional[Dict] = None
     ) -> Dict[str, Any]:
-        """컴포넌트 KServe 배포 상태 업데이트 (내부 API - Pipeline에서만 호출)"""
+        """컴포넌트 워크플로 서빙 배포 상태 업데이트 (내부 API - Pipeline에서만 호출)"""
         try:
             url = f"{self.base_url}/workflows/{workflow_id}/components/{component_id}/deployment-status"
             payload = {
