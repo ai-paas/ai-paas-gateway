@@ -3,19 +3,9 @@ from typing import List, Optional, Dict, Any
 
 from pydantic import BaseModel, ConfigDict
 
+from app.schemas.workflow import UserBriefSchema
+
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
-
-
-# 사용자 정보 스키마 (외부 API 응답용)
-class UserSchema(BaseModel):
-    id: int
-    username: str
-    name: str
-    password: str
-    created_at: datetime
-    updated_at: datetime
-    created_by: Optional[str] = None
-    updated_by: Optional[str] = None
 
 
 # 워크플로우 기본 스키마 (외부 API 응답용)
@@ -65,15 +55,18 @@ class ServiceMonitoringData(BaseModel):
 
 # 외부 API 응답 스키마
 class ExternalServiceResponse(BaseModel):
-    """외부 API에서 반환되는 서비스 응답"""
+    """외부 API에서 반환되는 서비스 응답.
+
+    MLOps ServiceBriefSchema의 required는 id/name/creator_id/creator뿐 — timestamp는 nullable.
+    """
     id: str  # UUID (surro_service_id로 저장)
     name: str
     description: Optional[str] = None
     tags: Optional[List[str]] = None
     creator_id: int
-    created_at: datetime
-    updated_at: datetime
-    creator: UserSchema
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    creator: UserBriefSchema
     workflow_count: int = 0
 
 
