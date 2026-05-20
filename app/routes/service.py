@@ -215,6 +215,9 @@ async def get_service(
     | `workflow_count` | integer | 연결된 워크플로우 수 |
     | `workflows` | List[WorkflowBaseSchema] | 연결된 워크플로우 목록 |
     | `monitoring_data` | ServiceMonitoringData \\| null | 모니터링 데이터 |
+    | `knowledge_bases` | List[KnowledgeBaseSummary] | 워크플로우 컴포넌트에서 수집한 KB 평탄 리스트(현재 사용자 권한 통과 항목만, id ASC) |
+    | `models` | List[ModelSummary] | 컴포넌트의 `model_id`로 수집한 모델 평탄 리스트(본인 소유 + 카탈로그 모델만) |
+    | `prompts` | List[PromptSummary] | 컴포넌트의 `prompt_id`로 수집한 프롬프트 평탄 리스트(현재 사용자 권한 통과 항목만) |
 
     ### monitoring_data.total_metrics (MonitoringMetrics)
 
@@ -228,8 +231,17 @@ async def get_service(
     | `error_count` | integer | 최근 1시간 오류 수 |
     | `success_rate` | float | 최근 1시간 성공률(%) |
 
+    ### KnowledgeBaseSummary / ModelSummary / PromptSummary
+
+    각 Summary 항목은 워크플로우 detail의 컴포넌트(`type` = "KNOWLEDGE_BASE" / "MODEL")에서
+    추출한 `knowledge_base_id` / `model_id` / `prompt_id`로 구성된다. 동일 ID가 여러 워크플로우에서
+    참조될 경우 한 번만 노출되고 `workflow_refs: [{id, name}]`에 사용처가 누적된다.
+    gateway DB 매핑이 없거나 현재 로그인 사용자에게 권한이 없는 항목은 best-effort로 누락된다
+    (메인 응답은 200 유지). 카탈로그 모델(`is_catalog=True`)은 소유권 없이도 노출 가능.
+
     ## Errors
     - 401: 인증되지 않은 사용자
+    - 403: 본인 소유 서비스가 아니고 admin도 아님
     - 404: 서비스를 찾을 수 없음
     - 500: 서버 내부 오류
     """
@@ -237,6 +249,10 @@ async def get_service(
     db_service = service_crud.get_service_by_surro_id(db=db, surro_service_id=surro_service_id)
     if not db_service:
         raise HTTPException(status_code=404, detail="Service not found")
+
+    # 1-1. 권한 검증 — 본인 소유 서비스 또는 admin만 접근 가능
+    if current_user.role != "admin" and db_service.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
 
     # 2. 외부 API 조회
     user_info = {
@@ -267,7 +283,12 @@ async def get_service(
             detail=f"Service {surro_service_id} not found in external API"
         )
 
-    # 3. 최종 응답 = 내부 DB + 외부 API 데이터 병합
+    # 3. 워크플로우 컴포넌트 기반 KB/모델/프롬프트 보강 (best-effort)
+    enrichment = await service_service.enrich_service_detail(
+        external_data, db, current_user
+    )
+
+    # 4. 최종 응답 = 내부 DB + 외부 API 데이터 + 보강 데이터 병합
     response = ServiceDetailResponse(
         id=db_service.id,
         name=db_service.name,
@@ -281,7 +302,12 @@ async def get_service(
         # 외부 API 데이터 병합
         workflow_count=getattr(external_data, "workflow_count", 0),
         workflows=getattr(external_data, "workflows", []),
-        monitoring_data=getattr(external_data, "monitoring_data", None)
+        monitoring_data=getattr(external_data, "monitoring_data", None),
+
+        # 보강 데이터 (현재 로그인 사용자 권한 통과 항목만)
+        knowledge_bases=enrichment.get("knowledge_bases", []),
+        models=enrichment.get("models", []),
+        prompts=enrichment.get("prompts", []),
     )
 
     return response
