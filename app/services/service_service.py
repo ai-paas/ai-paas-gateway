@@ -9,10 +9,54 @@ from fastapi import HTTPException, status
 from app.config import settings
 from app.schemas.service import (
     ExternalServiceResponse,
-    ExternalServiceDetailResponse
+    ExternalServiceDetailResponse,
+    KnowledgeBaseSummary,
+    ModelSummary,
+    PromptSummary,
+    WorkflowRefSchema,
 )
+from app.services.workflow_service import workflow_service
+from app.services.knowledge_base_service import knowledge_base_service
+from app.services.model_service import model_service
+from app.services.prompt_service import prompt_service
+from app.cruds.knowledge_base import knowledge_base_crud
+from app.cruds.model import model_crud
+from app.cruds.prompt import prompt_crud
+from app.models.model import Model
 
 logger = logging.getLogger(__name__)
+
+
+def _name_of(obj: Any, attr: str) -> Optional[str]:
+    """Nested 객체(예: provider_info)의 name 속성을 안전하게 추출."""
+    nested = getattr(obj, attr, None)
+    if nested is None:
+        return None
+    return getattr(nested, "name", None)
+
+
+def _build_model_summary(
+    model_id: int,
+    refs: List[WorkflowRefSchema],
+    inline_obj: Any = None,
+    fetched_obj: Any = None,
+) -> Optional[ModelSummary]:
+    """inline ModelDetailSchema 또는 단건 호출 결과(ModelResponse)에서 ModelSummary 빌드."""
+    src = inline_obj if inline_obj is not None else fetched_obj
+    if src is None:
+        return None
+    return ModelSummary(
+        id=model_id,
+        name=getattr(src, "name", None) or f"model-{model_id}",
+        description=getattr(src, "description", None),
+        provider=_name_of(src, "provider_info"),
+        model_type=_name_of(src, "type_info"),
+        format=_name_of(src, "format_info"),
+        task=getattr(src, "task", None),
+        visibility=getattr(src, "visibility", None),
+        created_at=getattr(src, "created_at", None),
+        workflow_refs=refs,
+    )
 
 
 class ServiceService:
@@ -445,6 +489,252 @@ class ServiceService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal error: {str(e)}"
             )
+
+    async def enrich_service_detail(
+        self,
+        external_data: ExternalServiceDetailResponse,
+        db: Any,
+        current_user: Any,
+    ) -> Dict[str, Any]:
+        """서비스 detail 응답에 워크플로우 컴포넌트 기반 KB/모델/프롬프트 평탄 리스트를 채워 반환.
+
+        흐름: 워크플로우 detail 병렬 조회 → 컴포넌트의 ID 수집 → gateway DB 매핑/권한 검증
+        → 단건 조회(병렬) → Summary 매핑 → id ASC 정렬.
+
+        Best-effort: 워크플로우/단건 호출 실패나 권한 거부는 해당 항목만 누락, 메인 응답은 200.
+        """
+        empty: Dict[str, Any] = {"knowledge_bases": [], "models": [], "prompts": []}
+
+        try:
+            workflows = list(getattr(external_data, "workflows", []) or [])
+            if not workflows:
+                return empty
+
+            user_info = {
+                "member_id": current_user.member_id,
+                "role": current_user.role,
+                "name": current_user.name,
+            }
+            is_admin = current_user.role == "admin"
+
+            # 1) workflow detail 병렬 조회 (동시성 상한 8)
+            sem = asyncio.Semaphore(8)
+
+            async def _fetch_workflow(wf_id: str):
+                async with sem:
+                    return await workflow_service.get_workflow(wf_id, user_info)
+
+            wf_results = await asyncio.gather(
+                *[_fetch_workflow(wf.id) for wf in workflows],
+                return_exceptions=True,
+            )
+
+            # 2) 컴포넌트의 ID 수집 + workflow_refs 누적 + inline 모델 캐시
+            kb_workflows: Dict[int, List[WorkflowRefSchema]] = {}
+            model_workflows: Dict[int, List[WorkflowRefSchema]] = {}
+            prompt_workflows: Dict[int, List[WorkflowRefSchema]] = {}
+            model_inline: Dict[int, Any] = {}
+
+            for wf, result in zip(workflows, wf_results):
+                if isinstance(result, Exception):
+                    logger.warning(
+                        f"enrich: skip workflow detail {wf.id}: {result}"
+                    )
+                    continue
+                if result is None:
+                    continue
+                ref = WorkflowRefSchema(id=result.id, name=result.name)
+                seen_kb: set = set()
+                seen_model: set = set()
+                seen_prompt: set = set()
+                for comp in (result.components or []):
+                    kb_id = getattr(comp, "knowledge_base_id", None)
+                    if kb_id is not None and kb_id not in seen_kb:
+                        seen_kb.add(kb_id)
+                        kb_workflows.setdefault(kb_id, []).append(ref)
+                    m_id = getattr(comp, "model_id", None)
+                    if m_id is not None and m_id not in seen_model:
+                        seen_model.add(m_id)
+                        model_workflows.setdefault(m_id, []).append(ref)
+                        if getattr(comp, "model", None) is not None:
+                            model_inline.setdefault(m_id, comp.model)
+                    p_id = getattr(comp, "prompt_id", None)
+                    if p_id is not None and p_id not in seen_prompt:
+                        seen_prompt.add(p_id)
+                        prompt_workflows.setdefault(p_id, []).append(ref)
+
+            # 3) 권한/매핑 검증 — 동기 DB 쿼리
+            allowed_kb_db: Dict[int, Any] = {}
+            for kb_id in kb_workflows:
+                db_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
+                    db, surro_knowledge_id=kb_id
+                )
+                if not db_kb:
+                    logger.info(f"enrich: skip kb {kb_id} (no gateway mapping)")
+                    continue
+                if not is_admin and db_kb.created_by != current_user.member_id:
+                    logger.info(
+                        f"enrich: skip kb {kb_id} (permission denied for {current_user.member_id})"
+                    )
+                    continue
+                allowed_kb_db[kb_id] = db_kb
+
+            allowed_model_ids: List[int] = []
+            for m_id in model_workflows:
+                is_owner = model_crud.check_model_ownership(
+                    db, m_id, current_user.member_id
+                )
+                if not is_owner:
+                    catalog_model = (
+                        db.query(Model)
+                        .filter(
+                            Model.is_catalog == True,  # noqa: E712
+                            Model.deleted_at.is_(None),
+                            Model.surro_model_id == m_id,
+                        )
+                        .first()
+                    )
+                    if not catalog_model:
+                        logger.info(
+                            f"enrich: skip model {m_id} (no ownership and not catalog)"
+                        )
+                        continue
+                allowed_model_ids.append(m_id)
+
+            allowed_prompt_db: Dict[int, Any] = {}
+            for p_id in prompt_workflows:
+                db_prompt = prompt_crud.get_prompt_by_surro_id(
+                    db, surro_prompt_id=p_id
+                )
+                if not db_prompt:
+                    logger.info(f"enrich: skip prompt {p_id} (no gateway mapping)")
+                    continue
+                if not is_admin and db_prompt.created_by != current_user.member_id:
+                    logger.info(
+                        f"enrich: skip prompt {p_id} (permission denied for {current_user.member_id})"
+                    )
+                    continue
+                allowed_prompt_db[p_id] = db_prompt
+
+            # 4) 단건 조회 병렬 (권한 통과 ID만, inline 있는 모델은 호출 생략)
+            allowed_kb_ids = list(allowed_kb_db.keys())
+            allowed_prompt_ids = list(allowed_prompt_db.keys())
+            model_ids_to_fetch = [
+                m_id for m_id in allowed_model_ids if m_id not in model_inline
+            ]
+
+            kb_results, prompt_results, model_results = await asyncio.gather(
+                asyncio.gather(
+                    *[
+                        knowledge_base_service.get_knowledge_base(kb_id, user_info)
+                        for kb_id in allowed_kb_ids
+                    ],
+                    return_exceptions=True,
+                ),
+                asyncio.gather(
+                    *[
+                        prompt_service.get_prompt(p_id, user_info)
+                        for p_id in allowed_prompt_ids
+                    ],
+                    return_exceptions=True,
+                ),
+                asyncio.gather(
+                    *[
+                        model_service.get_model(m_id, user_info)
+                        for m_id in model_ids_to_fetch
+                    ],
+                    return_exceptions=True,
+                ),
+            )
+
+            # 5) Summary 매핑
+            kb_list: List[KnowledgeBaseSummary] = []
+            for kb_id, ext in zip(allowed_kb_ids, kb_results):
+                db_kb = allowed_kb_db[kb_id]
+                if isinstance(ext, Exception):
+                    logger.warning(f"enrich: skip kb {kb_id}: {ext}")
+                    continue
+                if ext is None:
+                    logger.warning(f"enrich: skip kb {kb_id} (upstream 404)")
+                    continue
+                kb_list.append(
+                    KnowledgeBaseSummary(
+                        id=kb_id,
+                        name=ext.name,
+                        description=ext.description,
+                        type="RAG",
+                        collection_name=getattr(ext, "collection_name", None),
+                        embedding_model_id=getattr(ext, "embedding_model_id", None),
+                        search_method_id=getattr(ext, "search_method_id", None),
+                        created_by=db_kb.created_by,
+                        created_at=db_kb.created_at,
+                        workflow_refs=kb_workflows[kb_id],
+                    )
+                )
+
+            prompt_list: List[PromptSummary] = []
+            for p_id, ext in zip(allowed_prompt_ids, prompt_results):
+                db_prompt = allowed_prompt_db[p_id]
+                if isinstance(ext, Exception):
+                    logger.warning(f"enrich: skip prompt {p_id}: {ext}")
+                    continue
+                if ext is None:
+                    logger.warning(f"enrich: skip prompt {p_id} (upstream 404)")
+                    continue
+                variables: List[str] = []
+                raw_vars = getattr(ext, "prompt_variable", None) or []
+                for v in raw_vars:
+                    v_name = getattr(v, "name", None)
+                    if v_name:
+                        variables.append(v_name)
+                prompt_list.append(
+                    PromptSummary(
+                        id=p_id,
+                        name=ext.name,
+                        description=ext.description,
+                        content=getattr(ext, "content", None),
+                        variables=variables,
+                        created_at=db_prompt.created_at,
+                        created_by=db_prompt.created_by,
+                        workflow_refs=prompt_workflows[p_id],
+                    )
+                )
+
+            model_list: List[ModelSummary] = []
+            fetched_by_id: Dict[int, Any] = {}
+            for m_id, ext in zip(model_ids_to_fetch, model_results):
+                if isinstance(ext, Exception):
+                    logger.warning(f"enrich: skip model {m_id}: {ext}")
+                    continue
+                if ext is None:
+                    logger.warning(f"enrich: skip model {m_id} (upstream 404)")
+                    continue
+                fetched_by_id[m_id] = ext
+            for m_id in allowed_model_ids:
+                refs = model_workflows[m_id]
+                summary = _build_model_summary(
+                    model_id=m_id,
+                    refs=refs,
+                    inline_obj=model_inline.get(m_id),
+                    fetched_obj=fetched_by_id.get(m_id),
+                )
+                if summary is not None:
+                    model_list.append(summary)
+
+            # 6) id ASC 안정 정렬
+            kb_list.sort(key=lambda x: x.id)
+            model_list.sort(key=lambda x: x.id)
+            prompt_list.sort(key=lambda x: x.id)
+
+            return {
+                "knowledge_bases": kb_list,
+                "models": model_list,
+                "prompts": prompt_list,
+            }
+
+        except Exception:
+            logger.exception("enrich_service_detail failed; returning empty enrichment")
+            return empty
 
 
 # 싱글톤 인스턴스

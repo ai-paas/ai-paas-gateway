@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.workflow import UserBriefSchema
 
@@ -48,7 +48,7 @@ class WorkflowMonitoring(BaseModel):
 # 서비스 모니터링 데이터 스키마
 class ServiceMonitoringData(BaseModel):
     total_metrics: MonitoringMetrics
-    workflow_metrics: List[WorkflowMonitoring] = []
+    workflow_metrics: List[WorkflowMonitoring] = Field(default_factory=list)
     period_start: datetime
     period_end: datetime
 
@@ -72,7 +72,7 @@ class ExternalServiceResponse(BaseModel):
 
 class ExternalServiceDetailResponse(ExternalServiceResponse):
     """외부 API 상세 응답"""
-    workflows: List[WorkflowBaseSchema] = []
+    workflows: List[WorkflowBaseSchema] = Field(default_factory=list)
     monitoring_data: Optional[ServiceMonitoringData] = None
 
 
@@ -104,13 +104,62 @@ class ServiceResponse(BaseModel):
     surro_service_id: str  # 외부 API의 UUID
 
 
+# ===== 보강 응답 스키마 (workflows 컴포넌트에서 추출) =====
+
+
+class WorkflowRefSchema(BaseModel):
+    """보강 항목이 어떤 워크플로우에서 사용 중인지 가리키는 참조"""
+    id: str  # workflow UUID
+    name: str
+
+
+class KnowledgeBaseSummary(BaseModel):
+    """서비스 detail에 인라인되는 지식베이스 요약. UI 표시용 핵심 필드만 포함."""
+    id: int  # = surro_knowledge_id (= component.knowledge_base_id)
+    name: str
+    description: Optional[str] = None
+    type: str = "RAG"  # gateway 파생 상수 (upstream 스키마에 type 필드 없음)
+    collection_name: Optional[str] = None
+    embedding_model_id: Optional[int] = None
+    search_method_id: Optional[int] = None
+    created_by: Optional[str] = None  # gateway DB의 member_id
+    created_at: Optional[datetime] = None  # gateway DB
+    workflow_refs: List[WorkflowRefSchema] = Field(default_factory=list)
+
+
+class ModelSummary(BaseModel):
+    """서비스 detail에 인라인되는 모델 요약."""
+    id: int
+    name: str
+    description: Optional[str] = None
+    provider: Optional[str] = None  # provider_info.name 평탄화
+    model_type: Optional[str] = None  # type_info.name
+    format: Optional[str] = None  # format_info.name
+    task: Optional[str] = None
+    visibility: Optional[str] = None
+    created_at: Optional[datetime] = None  # upstream
+    workflow_refs: List[WorkflowRefSchema] = Field(default_factory=list)
+
+
+class PromptSummary(BaseModel):
+    """서비스 detail에 인라인되는 프롬프트 요약."""
+    id: int  # = surro_prompt_id (= component.prompt_id)
+    name: str
+    description: Optional[str] = None
+    content: Optional[str] = None
+    variables: List[str] = Field(default_factory=list)  # prompt_variable.name 평탄화
+    created_at: Optional[datetime] = None  # gateway DB (upstream 응답에 없음)
+    created_by: Optional[str] = None  # gateway DB
+    workflow_refs: List[WorkflowRefSchema] = Field(default_factory=list)
+
+
 # 서비스 상세 응답 (외부 정보 포함)
 class ServiceDetailResponse(BaseModel):
     # 내부 DB 값
     id: int
     name: str
     description: Optional[str]
-    tags: List[str]
+    tags: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     created_by: str
@@ -118,8 +167,13 @@ class ServiceDetailResponse(BaseModel):
 
     # 외부 API 값 (원하는 필드만)
     workflow_count: Optional[int] = 0
-    workflows: List[WorkflowBaseSchema] = []
+    workflows: List[WorkflowBaseSchema] = Field(default_factory=list)
     monitoring_data: Optional[ServiceMonitoringData] = None
+
+    # 워크플로우 컴포넌트 추출 후 보강 (best-effort, 권한 통과 항목만)
+    knowledge_bases: List[KnowledgeBaseSummary] = Field(default_factory=list)
+    models: List[ModelSummary] = Field(default_factory=list)
+    prompts: List[PromptSummary] = Field(default_factory=list)
 
 
 # 서비스 목록 응답

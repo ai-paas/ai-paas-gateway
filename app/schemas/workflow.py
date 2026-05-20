@@ -60,6 +60,7 @@ class ModelDetailSchema(BaseModel):
     task: Optional[str] = None
     parameter: Optional[str] = None
     sample_code: Optional[str] = None
+    visibility: Optional[str] = None  # upstream inline 컴포넌트의 visibility 보존
 
 
 class ExternalComponentSchema(BaseModel):
