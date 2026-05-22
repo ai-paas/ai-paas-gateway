@@ -50,6 +50,22 @@ class DashboardSummary(BaseModel):
     generated_at: datetime
 
 
+class PersonalDashboardSummary(BaseModel):
+    """본인 보유 자산만 집계 (admin용 users/infra 섹션 없음)."""
+    model_config = ConfigDict(from_attributes=True)
+
+    member_id: str
+    services: AssetCount
+    workflows: AssetCount
+    models: AssetCount
+    model_improvements: AssetCount
+    datasets: AssetCount
+    experiments: AssetCount
+    knowledge_bases: AssetCount
+    prompts: AssetCount
+    generated_at: datetime
+
+
 # ---------- Users Top ----------
 
 DomainLiteral = Literal[

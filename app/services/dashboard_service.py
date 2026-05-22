@@ -6,7 +6,7 @@
 - upstream 호출 없음 — 게이트웨이 DB만 사용
 """
 from datetime import datetime, timedelta
-from typing import Dict, List, Type
+from typing import Dict, List, Optional, Type
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -25,6 +25,7 @@ from app.models import (
 from app.schemas.dashboard import (
     AssetCount,
     DashboardSummary,
+    PersonalDashboardSummary,
     UserCounts,
     UserTopItem,
 )
@@ -46,25 +47,29 @@ def _has_soft_delete(model_cls: Type) -> bool:
     return hasattr(model_cls, "deleted_at")
 
 
-def count_asset(db: Session, model_cls: Type) -> AssetCount:
+def count_asset(
+    db: Session, model_cls: Type, member_id: Optional[str] = None
+) -> AssetCount:
     """단일 도메인 카운트.
 
     soft-delete 도메인은 deleted_at + is_active 둘 다 보고 active/inactive/deleted 3분할.
     deleted_at IS NULL 인데도 is_active=False 인 자산이 있어 active=total-deleted로 단순화 불가.
+    `member_id`가 주어지면 `created_by==member_id` 자산만 집계 (개인 대시보드용).
     """
+    def _base():
+        q = db.query(func.count(model_cls.id))
+        if member_id is not None:
+            q = q.filter(model_cls.created_by == member_id)
+        return q
+
     if not _has_soft_delete(model_cls):
-        total = db.query(func.count(model_cls.id)).scalar() or 0
+        total = _base().scalar() or 0
         return AssetCount(total=total, active=total, inactive=0, deleted=0)
 
-    total = db.query(func.count(model_cls.id)).scalar() or 0
-    deleted = (
-        db.query(func.count(model_cls.id))
-        .filter(model_cls.deleted_at.isnot(None))
-        .scalar()
-        or 0
-    )
+    total = _base().scalar() or 0
+    deleted = _base().filter(model_cls.deleted_at.isnot(None)).scalar() or 0
     active = (
-        db.query(func.count(model_cls.id))
+        _base()
         .filter(model_cls.deleted_at.is_(None))
         .filter(model_cls.is_active.is_(True))
         .scalar()
@@ -109,7 +114,7 @@ def count_users(db: Session) -> UserCounts:
 
 
 def build_summary(db: Session) -> DashboardSummary:
-    """대시보드 KPI 일괄 응답."""
+    """관리자 대시보드 KPI 일괄."""
     return DashboardSummary(
         users=count_users(db),
         services=count_asset(db, Service),
@@ -120,6 +125,22 @@ def build_summary(db: Session) -> DashboardSummary:
         experiments=count_asset(db, Experiment),
         knowledge_bases=count_asset(db, KnowledgeBase),
         prompts=count_asset(db, Prompt),
+        generated_at=datetime.utcnow(),
+    )
+
+
+def build_summary_for_member(db: Session, member_id: str) -> PersonalDashboardSummary:
+    """개인 대시보드 KPI — 본인 created_by 자산만."""
+    return PersonalDashboardSummary(
+        member_id=member_id,
+        services=count_asset(db, Service, member_id=member_id),
+        workflows=count_asset(db, Workflow, member_id=member_id),
+        models=count_asset(db, Model, member_id=member_id),
+        model_improvements=count_asset(db, ModelImprovement, member_id=member_id),
+        datasets=count_asset(db, Dataset, member_id=member_id),
+        experiments=count_asset(db, Experiment, member_id=member_id),
+        knowledge_bases=count_asset(db, KnowledgeBase, member_id=member_id),
+        prompts=count_asset(db, Prompt, member_id=member_id),
         generated_at=datetime.utcnow(),
     )
 
