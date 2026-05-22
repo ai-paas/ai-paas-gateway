@@ -8,7 +8,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_admin_user
@@ -23,9 +23,11 @@ from app.schemas.dashboard import (
     InfraResourcesResponse,
     InfraStatusResponse,
     ResourceTypeLiteral,
+    TrendsRefreshResponse,
+    TrendsResponse,
     UsersTopResponse,
 )
-from app.services import dashboard_service, infra_adapter
+from app.services import dashboard_service, infra_adapter, trends_service
 
 logger = logging.getLogger(__name__)
 
@@ -147,3 +149,43 @@ def get_dashboard_events(
         for r in rows
     ]
     return AuditEventListResponse(data=items, total=total, page=page, size=size)
+
+
+# ---------- Trends ----------
+
+@router.get("/trends", response_model=TrendsResponse)
+def get_dashboard_trends(
+    days: int = Query(30, ge=1, le=365, description="과거 N일 범위 (기본 30)"),
+    domain: Optional[str] = Query(None, description="단일 도메인 필터 (service/workflow/.../signup)"),
+    db: Session = Depends(get_db),
+    _: None = Depends(get_current_admin_user),
+):
+    """일별 자산 생성/삭제 + 가입자 추이.
+
+    소스 우선순위: `daily_stats` 테이블 → 실시간 raw 집계.
+    domain 미지정 시 8개 도메인 + signup 모두 series로 반환.
+    """
+    try:
+        return trends_service.get_trends(db, days=days, domain=domain)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@router.post("/trends/refresh", response_model=TrendsRefreshResponse)
+def refresh_dashboard_trends(
+    db: Session = Depends(get_db),
+    _: None = Depends(get_current_admin_user),
+):
+    """관리자 수동 갱신 — raw 집계를 `daily_stats`에 upsert하고 mat view를 REFRESH.
+
+    스케줄러(ENABLE_SCHEDULER=false) 미사용 환경의 보조 갱신 경로.
+    """
+    from datetime import datetime
+
+    rows = trends_service.refresh_daily_stats(db)
+    refreshed_mv = db.bind.dialect.name == "postgresql"
+    return TrendsRefreshResponse(
+        rows_upserted=rows,
+        refreshed_materialized_view=refreshed_mv,
+        finished_at=datetime.utcnow(),
+    )
