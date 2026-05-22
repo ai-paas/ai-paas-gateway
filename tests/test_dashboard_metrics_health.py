@@ -95,8 +95,34 @@ class TestApiMetricsService:
         buckets = [(10, 0), (50, 0), (100, 100), (250, 0), (500, 0), (1000, 0), (5000, 0), (999999, 0)]
         p95 = api_metrics_service._percentile_from_buckets(buckets, 0.95)
         assert p95 is not None
-        # 보간으로 100 이하의 값
         assert 0 < p95 <= 100
+
+    def test_percentile_capped_by_max_observed(self):
+        """sparse bucket이라 보간이 큰 값을 내도 max_observed로 cap."""
+        # 단일 데이터 — 실측 max=275, le=500 bucket
+        buckets = [(500, 1)]
+        p95 = api_metrics_service._percentile_from_buckets(buckets, 0.95, max_observed=275)
+        # 보간 결과 475가 나오더라도 max_observed로 cap
+        assert p95 is not None
+        assert p95 <= 275
+
+    def test_percentile_inf_bucket_uses_max_observed(self):
+        """+Inf bucket(le=999999)에만 데이터 있으면 max_observed가 가장 정확."""
+        buckets = [(999999, 1)]
+        p95 = api_metrics_service._percentile_from_buckets(buckets, 0.95, max_observed=8000)
+        # max_observed를 반환 (prev_le=0 반환하던 버그 회귀 방지)
+        assert p95 == 8000
+
+    def test_percentile_p95_never_exceeds_max(self):
+        """일반 케이스에서도 p95 > max_ms가 절대 발생하지 않는다."""
+        cases = [
+            ([(50, 10)], 30),    # 단일 bucket sparse
+            ([(100, 5), (250, 5)], 240),
+            ([(1000, 1), (5000, 2), (999999, 1)], 7500),
+        ]
+        for buckets, max_obs in cases:
+            p95 = api_metrics_service._percentile_from_buckets(buckets, 0.95, max_observed=max_obs)
+            assert p95 is not None and p95 <= max_obs, f"buckets={buckets} max={max_obs} p95={p95}"
 
 
 # ---------- /api-metrics endpoint ----------

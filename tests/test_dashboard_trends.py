@@ -201,14 +201,57 @@ def test_refresh_endpoint_upserts_rows(db, admin_member, sample_member):
 
 # ---------- scheduler import sanity ----------
 
-def test_scheduler_import_and_disabled_by_default():
-    """ENABLE_SCHEDULER 기본값이면 start_scheduler가 None 반환."""
-    from app.scheduler import start_scheduler, stop_scheduler, get_scheduler
+def test_scheduler_disabled_returns_none(monkeypatch):
+    """ENABLE_SCHEDULER=false면 start_scheduler가 None 반환.
 
+    실행 환경의 .env에서 ENABLE_SCHEDULER=true일 수 있으므로 monkeypatch로 강제 false.
+    """
+    from app import config as cfg_module
+    from app.scheduler import get_scheduler, start_scheduler, stop_scheduler
+
+    monkeypatch.setattr(cfg_module.settings, "ENABLE_SCHEDULER", False)
     sched = start_scheduler()
     try:
-        # 기본 ENABLE_SCHEDULER=false → None
         assert sched is None
         assert get_scheduler() is None
+    finally:
+        stop_scheduler()
+
+
+def test_scheduler_enabled_registers_jobs(monkeypatch):
+    """ENABLE_SCHEDULER=true이면 잡이 등록되고 stop으로 정리된다."""
+    from app import config as cfg_module
+    from app.scheduler import get_scheduler, start_scheduler, stop_scheduler
+
+    monkeypatch.setattr(cfg_module.settings, "ENABLE_SCHEDULER", True)
+    monkeypatch.setattr(cfg_module.settings, "SCHEDULER_INCLUDE_API_METRICS", True)
+    sched = start_scheduler()
+    try:
+        assert sched is not None
+        ids = {j.id for j in sched.get_jobs()}
+        assert "refresh_daily_stats" in ids
+        assert "refresh_mv_daily_trends" in ids
+        assert "flush_api_metrics" in ids
+        assert "probe_providers" in ids
+    finally:
+        stop_scheduler()
+        assert get_scheduler() is None
+
+
+def test_scheduler_skips_api_metrics_when_excluded(monkeypatch):
+    """SCHEDULER_INCLUDE_API_METRICS=false면 api_metrics flush 잡은 건너뛴다 (별도 worker 모드)."""
+    from app import config as cfg_module
+    from app.scheduler import start_scheduler, stop_scheduler
+
+    monkeypatch.setattr(cfg_module.settings, "ENABLE_SCHEDULER", True)
+    monkeypatch.setattr(cfg_module.settings, "SCHEDULER_INCLUDE_API_METRICS", False)
+    sched = start_scheduler()
+    try:
+        assert sched is not None
+        ids = {j.id for j in sched.get_jobs()}
+        assert "flush_api_metrics" not in ids
+        # 나머지는 그대로 등록
+        assert "refresh_daily_stats" in ids
+        assert "probe_providers" in ids
     finally:
         stop_scheduler()

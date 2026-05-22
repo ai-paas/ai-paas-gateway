@@ -104,15 +104,19 @@ def start_scheduler() -> Optional[BackgroundScheduler]:
         max_instances=1,
     )
 
-    # api metrics flush
-    sched.add_job(
-        job_flush_api_metrics,
-        trigger=IntervalTrigger(minutes=settings.SCHEDULER_API_METRICS_FLUSH_MINUTES),
-        id="flush_api_metrics",
-        replace_existing=True,
-        coalesce=True,
-        max_instances=1,
-    )
+    # api metrics flush — middleware의 in-process buffer에 의존하므로
+    # 별도 worker 프로세스에서는 의미 없음 (빈 버퍼만 flush됨). SCHEDULER_INCLUDE_API_METRICS=false면 건너뜀.
+    if settings.SCHEDULER_INCLUDE_API_METRICS:
+        sched.add_job(
+            job_flush_api_metrics,
+            trigger=IntervalTrigger(minutes=settings.SCHEDULER_API_METRICS_FLUSH_MINUTES),
+            id="flush_api_metrics",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+    else:
+        logger.info("[scheduler] api_metrics flush job skipped (SCHEDULER_INCLUDE_API_METRICS=false)")
 
     # provider health probe
     sched.add_job(
