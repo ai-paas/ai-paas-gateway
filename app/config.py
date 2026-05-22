@@ -97,6 +97,14 @@ class Settings:
     HUB_CONNECT_API_USERNAME: str = os.getenv("HUB_CONNECT_API_USERNAME", "")
     HUB_CONNECT_API_PASSWORD: str = os.getenv("HUB_CONNECT_API_PASSWORD", "")
 
+    # 대시보드 배경 작업 스케줄러 (in-process)
+    # 운영(멀티 워커)에서는 별도 worker 프로세스로 띄우고 ENABLE_SCHEDULER=false 권장.
+    ENABLE_SCHEDULER: bool = _get_bool("ENABLE_SCHEDULER", False)
+    SCHEDULER_TRENDS_HOUR: int = int(os.getenv("SCHEDULER_TRENDS_HOUR", "0"))  # 매일 0시 daily_stats 재계산
+    SCHEDULER_MV_REFRESH_MINUTES: int = int(os.getenv("SCHEDULER_MV_REFRESH_MINUTES", "30"))  # mat view refresh
+    SCHEDULER_API_METRICS_FLUSH_MINUTES: int = int(os.getenv("SCHEDULER_API_METRICS_FLUSH_MINUTES", "1"))
+    SCHEDULER_PROVIDER_HEALTH_MINUTES: int = int(os.getenv("SCHEDULER_PROVIDER_HEALTH_MINUTES", "1"))
+
     ANY_CLOUD_ENABLED: bool = _get_bool("ANY_CLOUD_ENABLED", False)
     ANY_CLOUD_TARGET_BASE_URL: str = os.getenv("ANY_CLOUD_TARGET_BASE_URL", "")
     ANY_CLOUD_TIMEOUT: float = float(os.getenv("ANY_CLOUD_TIMEOUT", "30.0"))

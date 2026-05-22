@@ -32,8 +32,13 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting AIPaaS Gateway API")
-    yield
-    logger.info("Shutting down AIPaaS Gateway API")
+    from app.scheduler import start_scheduler, stop_scheduler
+    start_scheduler()  # ENABLE_SCHEDULER=false면 no-op
+    try:
+        yield
+    finally:
+        stop_scheduler()
+        logger.info("Shutting down AIPaaS Gateway API")
 
 
 app = FastAPI(

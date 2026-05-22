@@ -5,7 +5,7 @@
 - 가속기는 accelerators[] 배열 + kind 필드로 GPU/NPU/TPU 확장 대응 (breaking change 없이)
 - upstream(Any Cloud)의 type/key 같은 키워드는 노출 금지 — adapter 내부에서 변환
 """
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -188,3 +188,34 @@ class AuditEventListResponse(BaseModel):
     total: int
     page: int
     size: int
+
+
+# ---------- Trends (Phase 3) ----------
+
+TrendSourceLiteral = Literal["daily_stats", "materialized_view", "live"]
+
+
+class TrendPoint(BaseModel):
+    date: date
+    value: int
+
+
+class TrendSeries(BaseModel):
+    domain: str  # service/workflow/.../signup
+    metric: str  # created/deleted
+    points: List[TrendPoint]
+
+
+class TrendsResponse(BaseModel):
+    start: date
+    end: date
+    days: int
+    source: TrendSourceLiteral
+    series: List[TrendSeries]
+    generated_at: datetime
+
+
+class TrendsRefreshResponse(BaseModel):
+    rows_upserted: int
+    refreshed_materialized_view: bool
+    finished_at: datetime

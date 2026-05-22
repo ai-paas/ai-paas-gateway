@@ -1,6 +1,7 @@
 from .any_cloud import AnyCloudCache, AnyCloudData
 from .audit_log import AuditLog
 from .base import Base
+from .daily_stat import DailyStat
 from .dataset import Dataset
 from .experiment import Experiment
 from .hub_connect import HubConnection
