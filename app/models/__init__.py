@@ -1,4 +1,5 @@
 from .any_cloud import AnyCloudCache, AnyCloudData
+from .api_metric import ApiRequestHistogram, ProviderHealthSnapshot
 from .audit_log import AuditLog
 from .base import Base
 from .daily_stat import DailyStat
