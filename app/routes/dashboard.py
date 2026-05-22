@@ -6,15 +6,18 @@ events는 리스트 응답이라 public pagination 규약(`{data,total,page,size
 """
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_admin_user
 from app.database import get_db
 from app.models.audit_log import AuditLog
 from app.schemas.dashboard import (
+    ApiMetricsPathItem,
+    ApiMetricsResponse,
     AuditEventItem,
     AuditEventListResponse,
     DashboardSummary,
@@ -22,12 +25,21 @@ from app.schemas.dashboard import (
     InfraNodesResponse,
     InfraResourcesResponse,
     InfraStatusResponse,
+    ProviderHealthHistoryPoint,
+    ProviderHealthLatest,
+    ProviderHealthResponse,
     ResourceTypeLiteral,
     TrendsRefreshResponse,
     TrendsResponse,
     UsersTopResponse,
 )
-from app.services import dashboard_service, infra_adapter, trends_service
+from app.services import (
+    api_metrics_service,
+    dashboard_service,
+    infra_adapter,
+    provider_health_service,
+    trends_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -189,3 +201,128 @@ def refresh_dashboard_trends(
         refreshed_materialized_view=refreshed_mv,
         finished_at=datetime.utcnow(),
     )
+
+
+# ---------- API metrics ----------
+
+@router.get("/api-metrics", response_model=ApiMetricsResponse)
+def get_dashboard_api_metrics(
+    hours: int = Query(24, ge=1, le=168, description="최근 N시간 범위 (기본 24)"),
+    path_pattern: Optional[str] = Query(None, description="path_pattern 필터"),
+    db: Session = Depends(get_db),
+    _: None = Depends(get_current_admin_user),
+):
+    """경로별·상태코드별 호출 수 + 평균/최대/p95(근사) 응답시간.
+
+    수집은 RequestLoggingMiddleware → in-memory buffer → 스케줄러 flush(`api_request_histograms`).
+    p95는 Prometheus-like histogram bucket 보간이라 정확값 아님.
+    """
+    from datetime import datetime, timedelta
+
+    since = datetime.utcnow() - timedelta(hours=hours)
+    raw = api_metrics_service.get_api_metrics(db, since=since, path_pattern=path_pattern)
+    return ApiMetricsResponse(
+        since=raw["since"],
+        generated_at=raw["generated_at"],
+        buckets_ms=raw["buckets_ms"],
+        paths=[ApiMetricsPathItem(**p) for p in raw["paths"]],
+    )
+
+
+@router.post("/api-metrics/flush", response_model=dict)
+def flush_dashboard_api_metrics(
+    db: Session = Depends(get_db),
+    _: None = Depends(get_current_admin_user),
+):
+    """관리자 수동 flush — in-memory buffer를 즉시 DB에 반영.
+
+    스케줄러 미사용 환경에서 디버깅/즉시 확인용.
+    """
+    n = api_metrics_service.flush_buffered_buckets(db)
+    return {"flushed": n}
+
+
+# ---------- Provider health ----------
+
+@router.get("/providers/health", response_model=ProviderHealthResponse)
+def get_dashboard_providers_health(
+    history_minutes: int = Query(60, ge=1, le=1440, description="최근 N분 시계열 (기본 60)"),
+    db: Session = Depends(get_db),
+    _: None = Depends(get_current_admin_user),
+):
+    """provider별 최신 헬스 + 최근 N분 시계열.
+
+    스케줄러가 `provider_health_snapshots`를 매 분 기록. 미연동 provider는 status=disabled.
+    """
+    from datetime import datetime, timedelta
+
+    from app.models.api_metric import ProviderHealthSnapshot
+
+    since = datetime.utcnow() - timedelta(minutes=history_minutes)
+
+    # 각 provider별 최신 1건
+    sub = (
+        db.query(
+            ProviderHealthSnapshot.provider,
+            func.max(ProviderHealthSnapshot.ts).label("max_ts"),
+        )
+        .group_by(ProviderHealthSnapshot.provider)
+        .subquery()
+    )
+    latest_rows = (
+        db.query(ProviderHealthSnapshot)
+        .join(
+            sub,
+            (ProviderHealthSnapshot.provider == sub.c.provider)
+            & (ProviderHealthSnapshot.ts == sub.c.max_ts),
+        )
+        .all()
+    )
+
+    latest = [
+        ProviderHealthLatest(
+            provider=r.provider,
+            status=r.status,  # type: ignore[arg-type]
+            latency_ms=r.latency_ms,
+            error=r.error,
+            last_checked_at=r.ts,
+        )
+        for r in latest_rows
+    ]
+
+    # 시계열
+    history_rows = (
+        db.query(ProviderHealthSnapshot)
+        .filter(ProviderHealthSnapshot.ts >= since)
+        .order_by(ProviderHealthSnapshot.provider, ProviderHealthSnapshot.ts)
+        .all()
+    )
+    history: Dict[str, List[ProviderHealthHistoryPoint]] = {}
+    for r in history_rows:
+        history.setdefault(r.provider, []).append(
+            ProviderHealthHistoryPoint(ts=r.ts, status=r.status, latency_ms=r.latency_ms)
+        )
+
+    return ProviderHealthResponse(providers=latest, history=history, generated_at=datetime.utcnow())
+
+
+@router.post("/providers/health/probe", response_model=ProviderHealthResponse)
+def trigger_provider_probe(
+    db: Session = Depends(get_db),
+    _: None = Depends(get_current_admin_user),
+):
+    """관리자 수동 probe — 즉시 호출해 snapshot 1건 기록 후 응답."""
+    from datetime import datetime
+
+    results = provider_health_service.probe_all_and_record(db)
+    latest = [
+        ProviderHealthLatest(
+            provider=r.provider,
+            status=r.status,  # type: ignore[arg-type]
+            latency_ms=r.latency_ms,
+            error=r.error,
+            last_checked_at=datetime.utcnow(),
+        )
+        for r in results
+    ]
+    return ProviderHealthResponse(providers=latest, history={}, generated_at=datetime.utcnow())

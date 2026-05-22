@@ -219,3 +219,48 @@ class TrendsRefreshResponse(BaseModel):
     rows_upserted: int
     refreshed_materialized_view: bool
     finished_at: datetime
+
+
+# ---------- API metrics (Phase 4) ----------
+
+class ApiMetricsPathItem(BaseModel):
+    path_pattern: str
+    status_class: str  # 2xx/3xx/4xx/5xx
+    count: int
+    avg_ms: Optional[float] = None
+    max_ms: int
+    p95_ms: Optional[int] = None  # histogram bucket 보간 근사
+
+
+class ApiMetricsResponse(BaseModel):
+    since: datetime
+    generated_at: datetime
+    buckets_ms: List[int]
+    paths: List[ApiMetricsPathItem]
+
+
+# ---------- Provider health (Phase 4) ----------
+
+ProviderHealthStatusLiteral = Literal["healthy", "unhealthy", "disabled", "error"]
+
+
+class ProviderHealthLatest(BaseModel):
+    provider: str
+    status: ProviderHealthStatusLiteral
+    latency_ms: Optional[int] = None
+    error: Optional[str] = None
+    last_checked_at: Optional[datetime] = None
+
+
+class ProviderHealthHistoryPoint(BaseModel):
+    ts: datetime
+    status: ProviderHealthStatusLiteral
+    latency_ms: Optional[int] = None
+
+
+class ProviderHealthResponse(BaseModel):
+    providers: List[ProviderHealthLatest]
+    history: Dict[str, List[ProviderHealthHistoryPoint]] = Field(
+        default_factory=dict, description="provider별 최근 N건 시계열"
+    )
+    generated_at: datetime
