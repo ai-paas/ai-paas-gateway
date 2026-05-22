@@ -1,7 +1,7 @@
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -21,6 +21,7 @@ from app.schemas.knowledge_base import (
     LanguageListResponse,
     SearchMethodListResponse,
 )
+from app.services.audit_service import Action, ResourceType, emit_from_request
 from app.services.knowledge_base_service import knowledge_base_service
 
 logger = logging.getLogger(__name__)
@@ -394,6 +395,7 @@ async def get_search_methods(
     description=CREATE_KNOWLEDGE_BASE_DESCRIPTION,
 )
 async def create_knowledge_base(
+    request: Request,
     name: str = Form(..., description="Knowledge Base 이름"),
     description: Optional[str] = Form(None, description="Knowledge Base 설명"),
     language_id: int = Form(..., description="언어 ID"),
@@ -446,6 +448,14 @@ async def create_knowledge_base(
             detail=f"Knowledge base created in external API but failed to save: {str(mapping_error)}",
         )
 
+    emit_from_request(
+        db, request,
+        action=Action.CREATE,
+        resource_type=ResourceType.KNOWLEDGE_BASE,
+        actor_member_id=current_user.member_id,
+        resource_id=str(db_kb.surro_knowledge_id),
+        metadata={"name": db_kb.name, "collection": db_kb.collection_name},
+    )
     return KnowledgeBaseResponse(
         id=db_kb.id,
         surro_knowledge_id=db_kb.surro_knowledge_id,
@@ -601,6 +611,7 @@ async def get_knowledge_base(
 async def update_knowledge_base(
     knowledge_base_id: int,
     knowledge_base_update: KnowledgeBaseUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -644,6 +655,13 @@ async def update_knowledge_base(
     except Exception as e:
         logger.error(f"Failed to sync DB with external API: {str(e)}")
 
+    emit_from_request(
+        db, request,
+        action=Action.UPDATE,
+        resource_type=ResourceType.KNOWLEDGE_BASE,
+        actor_member_id=current_user.member_id,
+        resource_id=str(knowledge_base_id),
+    )
     return KnowledgeBaseResponse(
         id=existing_kb.id,
         surro_knowledge_id=existing_kb.surro_knowledge_id,
@@ -668,6 +686,7 @@ async def update_knowledge_base(
 )
 async def delete_knowledge_base(
     knowledge_base_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -701,6 +720,13 @@ async def delete_knowledge_base(
     except Exception as mapping_error:
         logger.error(f"Failed to soft-delete knowledge base mapping: {str(mapping_error)}")
 
+    emit_from_request(
+        db, request,
+        action=Action.DELETE,
+        resource_type=ResourceType.KNOWLEDGE_BASE,
+        actor_member_id=current_user.member_id,
+        resource_id=str(knowledge_base_id),
+    )
     return None
 
 

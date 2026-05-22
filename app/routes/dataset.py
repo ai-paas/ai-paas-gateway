@@ -1,7 +1,7 @@
 import logging
 from typing import List, Optional, Dict, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Path, File, UploadFile, Form
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Path, File, UploadFile, Form, Request
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -15,6 +15,7 @@ from app.schemas.dataset import (
     DatasetListWrapper, DatasetWithMemberInfo, InnoUserInfo,
     DatasetValidationResponse
 )
+from app.services.audit_service import Action, ResourceType, emit_from_request
 from app.services.dataset_service import dataset_service
 
 logger = logging.getLogger(__name__)
@@ -263,6 +264,7 @@ async def get_dataset(
 
 @router.put("/{dataset_id}", response_model=DatasetReadSchema)
 async def update_dataset(
+        request: Request,
         dataset_id: int = Path(..., description="수정할 데이터셋 ID"),
         dataset_data: DatasetUpdateRequest = None,
         db: Session = Depends(get_db),
@@ -346,6 +348,13 @@ async def update_dataset(
         if db_dataset:
             updated_dataset.created_by = db_dataset.created_by or ""
 
+        emit_from_request(
+            db, request,
+            action=Action.UPDATE,
+            resource_type=ResourceType.DATASET,
+            actor_member_id=current_user.member_id,
+            resource_id=str(dataset_id),
+        )
         return updated_dataset
 
     except HTTPException:
@@ -360,6 +369,7 @@ async def update_dataset(
 
 @router.delete("/{dataset_id}")
 async def delete_dataset(
+        request: Request,
         dataset_id: int = Path(..., description="삭제할 데이터셋 ID"),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
@@ -422,6 +432,13 @@ async def delete_dataset(
         except Exception as mapping_error:
             logger.error(f"Failed to delete dataset mapping: {str(mapping_error)}")
 
+        emit_from_request(
+            db, request,
+            action=Action.DELETE,
+            resource_type=ResourceType.DATASET,
+            actor_member_id=current_user.member_id,
+            resource_id=str(dataset_id),
+        )
         return {"message": f"Dataset {dataset_id} deleted successfully"}
 
     except HTTPException:
@@ -499,6 +516,7 @@ async def validate_dataset(
 
 @router.post("", response_model=DatasetReadSchema)
 async def create_dataset(
+        request: Request,
         name: str = Form(..., description="데이터셋을 식별하기 위한 이름"),
         description: Optional[str] = Form(None, description="데이터셋에 대한 상세 설명"),
         file: UploadFile = File(..., description="데이터셋 ZIP 파일. COCO128 형식의 데이터셋이 ZIP으로 압축된 파일"),
@@ -580,6 +598,14 @@ async def create_dataset(
                 f"Dataset {created_dataset.id} created in external API but mapping failed"
             )
 
+        emit_from_request(
+            db, request,
+            action=Action.CREATE,
+            resource_type=ResourceType.DATASET,
+            actor_member_id=current_user.member_id,
+            resource_id=str(created_dataset.id),
+            metadata={"name": created_dataset.name},
+        )
         return created_dataset
 
     except HTTPException:

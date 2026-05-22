@@ -164,3 +164,27 @@ class InfraResourcesResponse(BaseModel):
     cluster: ClusterStatus
     resource_type: ResourceTypeLiteral
     nodes: List[NodeResourceEntry]
+
+
+# ---------- Events (audit_logs) ----------
+
+class AuditEventItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    action: str
+    resource_type: str
+    resource_id: Optional[str] = None
+    actor_member_id: str
+    target_member_id: Optional[str] = None
+    metadata_json: Optional[Dict[str, Any]] = Field(default=None, alias="metadata_json", serialization_alias="metadata")
+    request_id: Optional[str] = None
+    ip: Optional[str] = None
+    created_at: datetime
+
+
+class AuditEventListResponse(BaseModel):
+    data: List[AuditEventItem]
+    total: int
+    page: int
+    size: int

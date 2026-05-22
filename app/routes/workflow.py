@@ -1,7 +1,7 @@
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status, UploadFile, File, Form
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -22,6 +22,7 @@ from app.schemas.workflow import (
     WorkflowValidateRequest,
     WorkflowValidateResponse,
 )
+from app.services.audit_service import Action, ResourceType, emit_from_request
 from app.services.workflow_service import UNSET as _SERVICE_UNSET, workflow_service
 
 logger = logging.getLogger(__name__)
@@ -147,6 +148,7 @@ async def validate_workflow_definition(
 @router.post("/", response_model=WorkflowResponse, status_code=status.HTTP_201_CREATED)
 async def create_workflow(
         workflow_create: WorkflowCreateRequest,
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -276,6 +278,14 @@ async def create_workflow(
             detail=f"Workflow created in external API but failed to save: {str(mapping_error)}"
         )
 
+    emit_from_request(
+        db, request,
+        action=Action.CREATE,
+        resource_type=ResourceType.WORKFLOW,
+        actor_member_id=current_user.member_id,
+        resource_id=str(db_workflow.surro_workflow_id),
+        metadata={"name": db_workflow.name, "service_id": workflow_create.service_id},
+    )
     # 응답: DB 메타정보 + 외부 API 데이터
     return WorkflowResponse(
         id=db_workflow.id,
@@ -1173,6 +1183,7 @@ async def get_workflow(
 async def update_workflow(
         surro_workflow_id: str,
         workflow_update: WorkflowUpdateRequest,
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -1330,6 +1341,13 @@ async def update_workflow(
     except Exception as e:
         logger.error(f"Failed to sync DB with external API: {str(e)}")
 
+    emit_from_request(
+        db, request,
+        action=Action.UPDATE,
+        resource_type=ResourceType.WORKFLOW,
+        actor_member_id=current_user.member_id,
+        resource_id=surro_workflow_id,
+    )
     # 응답
     return WorkflowResponse(
         id=existing_workflow.id,
@@ -1349,6 +1367,7 @@ async def update_workflow(
 @router.delete("/{surro_workflow_id}", status_code=202)
 async def delete_workflow(
         surro_workflow_id: str,
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -1410,6 +1429,14 @@ async def delete_workflow(
         deletion_response = await workflow_service.delete_workflow(
             surro_workflow_id,
             user_info
+        )
+        emit_from_request(
+            db, request,
+            action=Action.DELETE,
+            resource_type=ResourceType.WORKFLOW,
+            actor_member_id=current_user.member_id,
+            resource_id=surro_workflow_id,
+            metadata={"stage": "initiated"},
         )
         return deletion_response
     except Exception as e:

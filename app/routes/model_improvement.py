@@ -1,7 +1,7 @@
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -12,6 +12,7 @@ from app.schemas.model_improvement import (
     ModelImprovementRequest, ModelImprovementResponse,
     ModelImprovementStatusResponse, TaskTypeResponse
 )
+from app.services.audit_service import Action, ResourceType, emit_from_request
 from app.services.model_improvement_service import model_improvement_service
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,7 @@ router = APIRouter(prefix="/model-improvements", tags=["Model Improvements"])
 @router.post("", response_model=ModelImprovementResponse, status_code=status.HTTP_202_ACCEPTED)
 async def submit_improvement(
         request: ModelImprovementRequest,
+        http_request: Request,
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
@@ -80,6 +82,14 @@ async def submit_improvement(
             except Exception as mapping_error:
                 logger.warning(f"Failed to create improvement mapping: {str(mapping_error)}")
 
+            emit_from_request(
+                db, http_request,
+                action=Action.CREATE,
+                resource_type=ResourceType.MODEL_IMPROVEMENT,
+                actor_member_id=current_user.member_id,
+                resource_id=task_id,
+                metadata={"source_model_id": request.source_model_id, "task_type": request.task_type},
+            )
         return result
 
     except HTTPException:

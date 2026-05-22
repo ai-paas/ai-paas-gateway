@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.auth import (
@@ -16,6 +16,7 @@ from app.models.member import Member
 from app.schemas.member import (
     MemberCreate, MemberUpdate, MemberResponse, MemberListResponse
 )
+from app.services.audit_service import Action, ResourceType, emit_from_request
 
 router = APIRouter(prefix="/members", tags=["members"])
 
@@ -174,18 +175,30 @@ def delete_member(
 def toggle_member_status(
         member_id: str,
         is_active: bool,
+        request: Request,
         db: Session = Depends(get_db),
-        _: None = Depends(get_current_admin_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """멤버 활성/비활성 상태 변경"""
     member = member_crud.get_member(db=db, member_id=member_id, include_inactive=True)
     if not member:
         raise HTTPException(status_code=404, detail="Member not found")
 
+    previous = member.is_active
     member.is_active = is_active
     member.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(member)
+
+    emit_from_request(
+        db, request,
+        action=Action.STATUS_CHANGE,
+        resource_type=ResourceType.MEMBER,
+        actor_member_id=current_user.member_id,
+        target_member_id=member.member_id,
+        resource_id=member.member_id,
+        metadata={"from": previous, "to": is_active},
+    )
     return member
 
 

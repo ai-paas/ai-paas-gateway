@@ -1,7 +1,7 @@
 import logging
 from typing import List, Optional, Dict, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Path, File, UploadFile, Form
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Path, File, UploadFile, Form, Request
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -14,6 +14,7 @@ from app.schemas.model import (
     ModelCreateResponse,
     InnoUserInfo
 )
+from app.services.audit_service import Action, ResourceType, emit_from_request
 from app.services.model_service import model_service
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ def _create_pagination_response(data: List[Any], total: int, page: int, size: in
 
 @router.post("", response_model=ModelCreateResponse)
 async def create_model(
+        request: Request,
         name: str = Form(..., description="모델 이름"),
         repo_id: str = Form(..., description="모델 저장소 ID"),
         provider_id: int = Form(..., description="프로바이더 ID"),
@@ -199,6 +201,14 @@ async def create_model(
             # 매핑 저장에 실패해도 Surro API에는 이미 생성되었으므로, 경고만 로그
             logger.warning(f"Model {created_model.id} created in Surro API but mapping failed")
 
+        emit_from_request(
+            db, request,
+            action=Action.CREATE,
+            resource_type=ResourceType.MODEL,
+            actor_member_id=current_user.member_id,
+            resource_id=str(created_model.id),
+            metadata={"name": created_model.name, "is_catalog": is_catalog},
+        )
         return created_model
 
     except Exception as e:
@@ -1168,6 +1178,7 @@ async def get_model(
 
 @router.delete("/{model_id}")
 async def delete_model(
+    request: Request,
     model_id: int = Path(..., description="삭제할 모델 ID"),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
@@ -1231,6 +1242,13 @@ async def delete_model(
         model_crud.delete_model_mapping(db, model_id, current_user.member_id)
 
         logger.info(f"Deleted model {model_id} and mapping for user {current_user.member_id}")
+        emit_from_request(
+            db, request,
+            action=Action.DELETE,
+            resource_type=ResourceType.MODEL,
+            actor_member_id=current_user.member_id,
+            resource_id=str(model_id),
+        )
         return {"message": f"Model {model_id} deleted successfully"}
 
     except HTTPException:

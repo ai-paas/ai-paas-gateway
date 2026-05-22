@@ -1,7 +1,7 @@
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -20,6 +20,7 @@ from app.schemas.prompt import (
     PromptVariableReadSchema,
     PromptVariableTypeListSchema,
 )
+from app.services.audit_service import Action, ResourceType, emit_from_request
 from app.services.prompt_service import prompt_service
 
 logger = logging.getLogger(__name__)
@@ -208,6 +209,7 @@ async def get_variable_types(
 @router.post("/", response_model=PromptResponse)
 async def create_prompt(
         prompt: PromptCreate,
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -266,6 +268,14 @@ async def create_prompt(
             detail=f"Prompt created in external API but failed to save: {mapping_error}",
         )
 
+    emit_from_request(
+        db, request,
+        action=Action.CREATE,
+        resource_type=ResourceType.PROMPT,
+        actor_member_id=current_user.member_id,
+        resource_id=str(db_prompt.surro_prompt_id),
+        metadata={"name": db_prompt.name},
+    )
     return _to_prompt_response(db_prompt, external_prompt)
 
 
@@ -436,6 +446,7 @@ async def get_prompt(
 async def update_prompt(
         surro_prompt_id: int,
         prompt_update: PromptUpdate,
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -507,12 +518,20 @@ async def update_prompt(
         )
 
     db_prompt = _ensure_prompt_mapping(db, current_user, updated_external)
+    emit_from_request(
+        db, request,
+        action=Action.UPDATE,
+        resource_type=ResourceType.PROMPT,
+        actor_member_id=current_user.member_id,
+        resource_id=str(surro_prompt_id),
+    )
     return _to_prompt_response(db_prompt, updated_external)
 
 
 @router.delete("/{surro_prompt_id}", status_code=204)
 async def delete_prompt(
         surro_prompt_id: int,
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -560,5 +579,12 @@ async def delete_prompt(
         db=db,
         surro_prompt_id=surro_prompt_id,
         deleted_by=current_user.member_id,
+    )
+    emit_from_request(
+        db, request,
+        action=Action.DELETE,
+        resource_type=ResourceType.PROMPT,
+        actor_member_id=current_user.member_id,
+        resource_id=str(surro_prompt_id),
     )
     return None
