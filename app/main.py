@@ -16,6 +16,7 @@ from app.routes import (
     hub_connect,
     knowledge_base,
     learning,
+    me_dashboard,
     member,
     model,
     model_improvement,
@@ -73,6 +74,7 @@ app.include_router(any_cloud.router_monit, prefix=settings.API_V1_STR)
 app.include_router(any_cloud.router_package, prefix=settings.API_V1_STR)
 app.include_router(any_cloud.router_catalog, prefix=settings.API_V1_STR)
 app.include_router(dashboard.router, prefix=settings.API_V1_STR)
+app.include_router(me_dashboard.router, prefix=settings.API_V1_STR)
 
 
 @app.get("/")
