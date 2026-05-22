@@ -174,6 +174,9 @@ def _upsert_daily_stats(db: Session, records: List[Dict]) -> int:
 def refresh_daily_stats(db: Session) -> int:
     """raw 집계 → daily_stats upsert. PG에선 mv_daily_trends도 REFRESH.
 
+    raw 집계에 더 이상 나타나지 않는 기존 row(`(date,domain,metric)` 키)는 삭제 — 데이터 복원/하드 삭제 후
+    카운트가 0이 된 stale row가 남는 문제를 막는다.
+
     반환: upsert된 행 수.
     """
     records: List[Dict] = []
@@ -186,6 +189,15 @@ def refresh_daily_stats(db: Session) -> int:
 
     for d, v in _aggregate_signups(db).items():
         records.append({"date": d, "domain": "signup", "metric": "created", "value": v})
+
+    # stale row 정리: raw 키 집합에 없는 기존 row 삭제
+    expected_keys = {(r["date"], r["domain"], r["metric"]) for r in records}
+    existing = db.query(DailyStat.id, DailyStat.date, DailyStat.domain, DailyStat.metric).all()
+    stale_ids = [row.id for row in existing if (row.date, row.domain, row.metric) not in expected_keys]
+    if stale_ids:
+        db.query(DailyStat).filter(DailyStat.id.in_(stale_ids)).delete(synchronize_session=False)
+        db.commit()
+        logger.info("daily_stats stale rows removed: %d", len(stale_ids))
 
     n = _upsert_daily_stats(db, records)
 
@@ -228,9 +240,16 @@ def get_trends(
     source = "daily_stats"
 
     if not rows:
-        # 테이블이 비었으면 raw 집계로 폴백
-        rows = _raw_fallback_rows(db, start, end, domain)
-        source = "live"
+        # daily_stats가 비었을 때: PG에서는 mat view 폴백 → 그것도 없으면 raw 집계
+        if db.bind.dialect.name == "postgresql":
+            mv_rows = _query_mat_view(db, start, end, domain)
+            if mv_rows:
+                rows = mv_rows
+                source = "materialized_view"
+
+        if not rows:
+            rows = _raw_fallback_rows(db, start, end, domain)
+            source = "live"
 
     series_map: Dict[tuple[str, str], List[TrendPoint]] = {}
     for r in rows:
@@ -251,10 +270,35 @@ def get_trends(
     )
 
 
+def _query_mat_view(
+    db: Session, start: date, end: date, domain: Optional[str]
+) -> List[Dict]:
+    """PG materialized view 폴백 — `daily_stats`가 비어있고 mv는 채워져 있을 때 사용.
+
+    mv_daily_trends 컬럼: (bucket date, domain text, metric text, value int)
+    """
+    sql = (
+        "SELECT bucket AS date, domain, metric, value "
+        "FROM mv_daily_trends "
+        "WHERE bucket BETWEEN :start AND :end"
+    )
+    params = {"start": start, "end": end}
+    if domain:
+        sql += " AND domain = :domain"
+        params["domain"] = domain
+    sql += " ORDER BY domain, metric, bucket"
+    try:
+        rows = db.execute(text(sql), params).mappings().all()
+        return [dict(r) for r in rows]
+    except Exception:
+        logger.exception("mv_daily_trends query failed (non-fatal)")
+        return []
+
+
 def _raw_fallback_rows(
     db: Session, start: date, end: date, domain: Optional[str]
 ) -> List[Dict]:
-    """daily_stats가 비어있을 때 실시간 폴백 (raw 집계). 응답 형식 통일을 위해 dict 리스트."""
+    """daily_stats/mv가 모두 비어있을 때 실시간 폴백 (raw 집계). 응답 형식 통일을 위해 dict 리스트."""
     out: List[Dict] = []
     for model_cls, dom, _ in _ASSET_DOMAINS:
         if domain and domain != dom:

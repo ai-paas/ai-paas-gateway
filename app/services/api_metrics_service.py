@@ -133,30 +133,48 @@ def flush_buffered_buckets(db: Session) -> int:
 
 # ---------- 조회 / p95 근사 ----------
 
-def _percentile_from_buckets(bucket_counts: List[Tuple[int, int]], percentile: float) -> Optional[int]:
+def _percentile_from_buckets(
+    bucket_counts: List[Tuple[int, int]],
+    percentile: float,
+    max_observed: Optional[int] = None,
+) -> Optional[int]:
     """bucket_counts: [(le_bucket_ms, count), ...] le 오름차순 가정.
 
-    Prometheus histogram_quantile 식. 정확값 아님.
+    Prometheus histogram_quantile 식의 비누적 bucket 변형. 정확값 아님.
+
+    - +Inf bucket(le=999999)에 데이터가 있으면 `max_observed`(실측 최대)를 우선 반환
+    - 보간 결과가 `max_observed`를 초과하지 않도록 capping (sparse bucket 보호)
     """
     total = sum(c for _, c in bucket_counts)
     if total == 0:
         return None
+
     target = total * percentile
     cumulative = 0
     prev_le = 0
+    result: Optional[int] = None
+
     for le, c in sorted(bucket_counts, key=lambda x: x[0]):
         cumulative += c
         if cumulative >= target:
             if le == 999999:
-                return prev_le  # +Inf bucket이면 직전 경계 반환
-            if cumulative == c:
-                # 첫 bucket — 0~le 사이 보간
-                return int(round(le * (target / cumulative)))
-            # le 와 prev_le 사이 보간
-            ratio = (target - (cumulative - c)) / c
-            return int(round(prev_le + (le - prev_le) * ratio))
+                # +Inf bucket: 실측 max가 정답에 가장 가까움
+                result = max_observed if max_observed is not None else prev_le
+            elif cumulative == c:
+                # 첫 bucket 단독 — bucket 상한이 곧 상한
+                result = le
+            else:
+                # 이전 경계와 현재 경계 사이 선형 보간
+                ratio = (target - (cumulative - c)) / c
+                result = int(round(prev_le + (le - prev_le) * ratio))
+            break
         prev_le = le
-    return None
+
+    if result is None:
+        return None
+    if max_observed is not None:
+        return min(result, max_observed)
+    return result
 
 
 def get_api_metrics(
@@ -215,7 +233,7 @@ def get_api_metrics(
     paths = []
     for g in grouped.values():
         avg_ms = round(g["sum_ms"] / g["count"], 2) if g["count"] else None
-        p95 = _percentile_from_buckets(g["_buckets"], 0.95)
+        p95 = _percentile_from_buckets(g["_buckets"], 0.95, max_observed=g["max_ms"])
         paths.append({
             "path_pattern": g["path_pattern"],
             "status_class": g["status_class"],

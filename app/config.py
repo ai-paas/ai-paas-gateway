@@ -104,6 +104,9 @@ class Settings:
     SCHEDULER_MV_REFRESH_MINUTES: int = int(os.getenv("SCHEDULER_MV_REFRESH_MINUTES", "30"))  # mat view refresh
     SCHEDULER_API_METRICS_FLUSH_MINUTES: int = int(os.getenv("SCHEDULER_API_METRICS_FLUSH_MINUTES", "1"))
     SCHEDULER_PROVIDER_HEALTH_MINUTES: int = int(os.getenv("SCHEDULER_PROVIDER_HEALTH_MINUTES", "1"))
+    # API metrics flush 잡은 middleware의 in-process buffer에 의존 →
+    # 별도 worker 프로세스에서 띄울 때는 false로 두어야 한다 (API 프로세스에만 켤 것).
+    SCHEDULER_INCLUDE_API_METRICS: bool = _get_bool("SCHEDULER_INCLUDE_API_METRICS", True)
 
     ANY_CLOUD_ENABLED: bool = _get_bool("ANY_CLOUD_ENABLED", False)
     ANY_CLOUD_TARGET_BASE_URL: str = os.getenv("ANY_CLOUD_TARGET_BASE_URL", "")
