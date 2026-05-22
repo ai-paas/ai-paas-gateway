@@ -1,7 +1,7 @@
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -16,6 +16,7 @@ from app.schemas.service import (
     ServiceDetailResponse,
     ServiceListResponse
 )
+from app.services.audit_service import Action, ResourceType, emit_from_request
 from app.services.service_service import service_service
 
 _SERVICE_SORT_FIELDS = {
@@ -35,6 +36,7 @@ router = APIRouter(prefix="/services", tags=["services"])
 @router.post("/", response_model=ServiceResponse)
 async def create_service(
         service: ServiceCreate,
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -106,6 +108,14 @@ async def create_service(
             detail=f"Service created in external API but failed to save mapping: {str(mapping_error)}"
         )
 
+    emit_from_request(
+        db, request,
+        action=Action.CREATE,
+        resource_type=ResourceType.SERVICE,
+        actor_member_id=current_user.member_id,
+        resource_id=str(db_service.surro_service_id),
+        metadata={"name": db_service.name},
+    )
     return db_service
 
 
@@ -192,7 +202,7 @@ async def get_service(
     서비스 상세정보 조회
 
     특정 서비스의 상세 정보를 조회합니다.
-    연결된 모든 워크플로우 정보와 최근 1시간의 모니터링 메트릭을 포함합니다.
+    연결된 모든 워크플로우 정보와 **최근 1시간(1h)·1일(1d)·1주(1w)** 기간별 모니터링 메트릭을 포함합니다.
 
     ## Path Parameters
 
@@ -214,22 +224,43 @@ async def get_service(
     | `surro_service_id` | string | 외부 서비스 ID (UUID) |
     | `workflow_count` | integer | 연결된 워크플로우 수 |
     | `workflows` | List[WorkflowBaseSchema] | 연결된 워크플로우 목록 |
-    | `monitoring_data` | ServiceMonitoringData \\| null | 모니터링 데이터 |
+    | `monitoring_data` | ServiceMonitoringData \\| null | 모니터링 데이터 (기간별 집계) |
     | `knowledge_bases` | List[KnowledgeBaseSummary] | 워크플로우 컴포넌트에서 수집한 KB 평탄 리스트(현재 사용자 권한 통과 항목만, id ASC) |
     | `models` | List[ModelSummary] | 컴포넌트의 `model_id`로 수집한 모델 평탄 리스트(본인 소유 + 카탈로그 모델만) |
     | `prompts` | List[PromptSummary] | 컴포넌트의 `prompt_id`로 수집한 프롬프트 평탄 리스트(현재 사용자 권한 통과 항목만) |
 
-    ### monitoring_data.total_metrics (MonitoringMetrics)
+    ### monitoring_data (ServiceMonitoringData)
 
     | 필드 | 타입 | 설명 |
     |------|------|------|
-    | `message_count` | integer | 최근 1시간 총 메시지 수 |
-    | `active_users` | integer | 최근 1시간 활성 사용자 수 |
-    | `token_usage` | integer | 최근 1시간 토큰 사용량 |
-    | `avg_interaction_count` | float | 최근 1시간 평균 사용자 상호작용 수 |
-    | `response_time_ms` | float | 평균 응답 시간(ms) |
-    | `error_count` | integer | 최근 1시간 오류 수 |
-    | `success_rate` | float | 최근 1시간 성공률(%) |
+    | `total_metrics` | MonitoringMetrics | 전체 서비스 기간별 메트릭 |
+    | `workflow_metrics` | List[WorkflowMonitoring] | 워크플로우별 기간별 메트릭 |
+    | `aggregated_at` | datetime | 집계 기준 시각(UTC). 모든 기간이 이 시각을 끝점으로 역산 |
+
+    ### monitoring_data.total_metrics / workflow_metrics[].metrics (MonitoringMetrics)
+
+    | 키 | 타입 | 설명 |
+    |------|------|------|
+    | `1h` | PeriodMetrics | 최근 1시간 집계 (`aggregated_at - 1h ~ aggregated_at`) |
+    | `1d` | PeriodMetrics | 최근 1일 집계 (`aggregated_at - 24h ~ aggregated_at`) |
+    | `1w` | PeriodMetrics | 최근 1주 집계 (`aggregated_at - 7d ~ aggregated_at`) |
+
+    > 세 기간은 동일한 끝점(`aggregated_at`)을 공유하는 **누적(cumulative)** 윈도우. 따라서 `1d`는 `1h`를, `1w`는 `1d`를 포함한다.
+
+    ### PeriodMetrics (단일 기간의 7개 메트릭)
+
+    | 필드 | 타입 | 설명 |
+    |------|------|------|
+    | `message_count` | integer | 해당 기간 총 메시지 수 |
+    | `active_users` | integer | 해당 기간 활성 사용자 수 |
+    | `token_usage` | integer | 해당 기간 토큰 사용량 |
+    | `avg_interaction_count` | float | 해당 기간 평균 사용자 상호작용 수 |
+    | `response_time_ms` | float \\| null | 해당 기간 평균 응답 시간(ms). 데이터 없으면 null |
+    | `error_count` | integer | 해당 기간 오류 수 |
+    | `success_rate` | float \\| null | 해당 기간 성공률(%). 요청 없으면 null |
+
+    > 데이터가 없는 기간은 카운트/합산 메트릭은 `0`, `avg_interaction_count`는 `0.0`,
+    > 평균/비율 메트릭(`response_time_ms`/`success_rate`)은 `null`. 기간 키(`1h`/`1d`/`1w`)는 항상 존재.
 
     ### KnowledgeBaseSummary / ModelSummary / PromptSummary
 
@@ -387,6 +418,7 @@ async def get_service_resource_usages(
 async def update_service(
         surro_service_id: str,  # int -> str (UUID)
         service_update: ServiceUpdate,
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -462,12 +494,20 @@ async def update_service(
         service_update=service_update
     )
 
+    emit_from_request(
+        db, request,
+        action=Action.UPDATE,
+        resource_type=ResourceType.SERVICE,
+        actor_member_id=current_user.member_id,
+        resource_id=surro_service_id,
+    )
     return updated_service
 
 
 @router.delete("/{surro_service_id}", status_code=204)
 async def delete_service(
         surro_service_id: str,  # int -> str (UUID)
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -533,4 +573,11 @@ async def delete_service(
     if not success:
         raise HTTPException(status_code=404, detail="Service not found")
 
+    emit_from_request(
+        db, request,
+        action=Action.DELETE,
+        resource_type=ResourceType.SERVICE,
+        actor_member_id=current_user.member_id,
+        resource_id=surro_service_id,
+    )
     return None  # 204 No Content

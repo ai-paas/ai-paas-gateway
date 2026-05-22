@@ -1,7 +1,7 @@
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_admin_user, get_current_user
@@ -10,6 +10,7 @@ from app.cruds import experiment_crud
 from app.database import get_db
 from app.models import Member
 from app.models.experiment import Experiment
+from app.services.audit_service import Action, ResourceType, emit_from_request
 from app.schemas.experiment import (
     ExperimentDetailResponse,
     ExperimentInternalUpdateRequest,
@@ -242,6 +243,7 @@ async def list_learning(
 @router.post("/training", response_model=TrainingPipelineResponse, summary="Submit Training")
 async def submit_training(
     request: TrainingPipelineRequest,
+    http_request: Request,
     db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
@@ -291,6 +293,14 @@ async def submit_training(
             except Exception as mapping_error:
                 logger.warning(f"Failed to create experiment mapping: {str(mapping_error)}")
 
+            emit_from_request(
+                db, http_request,
+                action=Action.CREATE,
+                resource_type=ResourceType.EXPERIMENT,
+                actor_member_id=current_user.member_id,
+                resource_id=str(experiment_id),
+                metadata={"name": request.train_name, "model_id": request.model_id, "dataset_id": request.dataset_id},
+            )
         return result
 
     except HTTPException:
@@ -539,6 +549,7 @@ async def get_learning(
 
 @router.patch("/{experiment_id}", response_model=ExperimentReadResponse, summary="Update Learning")
 async def update_learning(
+    http_request: Request,
     experiment_id: int = Path(..., description="Learning ID to update"),
     update_data: ExperimentUpdateRequest = ...,
     db: Session = Depends(get_db),
@@ -606,6 +617,13 @@ async def update_learning(
             member_id=current_user.member_id,
             update_data=update_payload,
         )
+        emit_from_request(
+            db, http_request,
+            action=Action.UPDATE,
+            resource_type=ResourceType.EXPERIMENT,
+            actor_member_id=current_user.member_id,
+            resource_id=str(experiment_id),
+        )
         return result
 
     except HTTPException:
@@ -620,6 +638,7 @@ async def update_learning(
 
 @router.delete("/{experiment_id}", summary="Delete Learning")
 async def delete_learning(
+    http_request: Request,
     experiment_id: int = Path(..., description="Learning ID to delete"),
     db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
@@ -665,6 +684,13 @@ async def delete_learning(
         )
 
         experiment_crud.delete_mapping(db, experiment_id, current_user.member_id)
+        emit_from_request(
+            db, http_request,
+            action=Action.DELETE,
+            resource_type=ResourceType.EXPERIMENT,
+            actor_member_id=current_user.member_id,
+            resource_id=str(experiment_id),
+        )
         return result
 
     except HTTPException:
