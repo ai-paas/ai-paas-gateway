@@ -11,6 +11,7 @@ from app.middleware import RequestLoggingMiddleware
 from app.routes import (
     any_cloud,
     auth,
+    dashboard,
     dataset,
     hub_connect,
     knowledge_base,
@@ -71,6 +72,7 @@ app.include_router(any_cloud.router_helm, prefix=settings.API_V1_STR)
 app.include_router(any_cloud.router_monit, prefix=settings.API_V1_STR)
 app.include_router(any_cloud.router_package, prefix=settings.API_V1_STR)
 app.include_router(any_cloud.router_catalog, prefix=settings.API_V1_STR)
+app.include_router(dashboard.router, prefix=settings.API_V1_STR)
 
 
 @app.get("/")
