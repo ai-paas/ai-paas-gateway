@@ -1,13 +1,12 @@
-from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, desc
+from datetime import datetime
 from typing import Optional, List, Dict, Any
-from datetime import datetime, timedelta
-import json
+
+from sqlalchemy import and_
+from sqlalchemy.orm import Session
 
 from app.models.hub_connect import (
     HubConnection
 )
-from app.schemas.hub_connect import HubModelResponse
 
 
 class HubConnectCRUD:

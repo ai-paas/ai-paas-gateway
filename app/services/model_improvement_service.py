@@ -1,9 +1,11 @@
-import httpx
-import logging
 import asyncio
+import logging
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
+
+import httpx
 from fastapi import HTTPException, status
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -141,6 +143,7 @@ class ModelImprovementService:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal error: {str(e)}")
 
     async def get_task_types(self, category: Optional[str] = None,
+                             source_model_id: Optional[int] = None,
                              user_info: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
         """task type 목록 조회"""
         try:
@@ -148,6 +151,8 @@ class ModelImprovementService:
             params = {}
             if category:
                 params["category"] = category
+            if source_model_id is not None:
+                params["source_model_id"] = source_model_id
             logger.info(f"Getting task types from: {url}")
 
             response = await self._make_authenticated_request("GET", url, user_info=user_info, params=params)

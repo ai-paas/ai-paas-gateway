@@ -1,9 +1,14 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.orm import Session
+import logging
 from typing import Optional
-from app.database import get_db
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy.orm import Session
+
+from app.auth import get_current_user
+from app.common.sort import parse_sort, resolve_sort_columns
 from app.cruds.service import service_crud
-from app.auth import get_current_user, get_current_admin_user
+from app.database import get_db
+from app.models.service import Service
 from app.schemas.service import (
     ServiceCreate,
     ServiceUpdate,
@@ -11,8 +16,17 @@ from app.schemas.service import (
     ServiceDetailResponse,
     ServiceListResponse
 )
+from app.services.audit_service import Action, ResourceType, emit_from_request
 from app.services.service_service import service_service
-import logging
+
+_SERVICE_SORT_FIELDS = {
+    "id": Service.id,
+    "name": Service.name,
+    "created_at": Service.created_at,
+    "updated_at": Service.updated_at,
+}
+_SERVICE_SORT_DEFAULT = [(Service.created_at, True)]
+_SERVICE_SORT_TIE_BREAKER = Service.id
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +36,7 @@ router = APIRouter(prefix="/services", tags=["services"])
 @router.post("/", response_model=ServiceResponse)
 async def create_service(
         service: ServiceCreate,
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -93,6 +108,14 @@ async def create_service(
             detail=f"Service created in external API but failed to save mapping: {str(mapping_error)}"
         )
 
+    emit_from_request(
+        db, request,
+        action=Action.CREATE,
+        resource_type=ResourceType.SERVICE,
+        actor_member_id=current_user.member_id,
+        resource_id=str(db_service.surro_service_id),
+        metadata={"name": db_service.name},
+    )
     return db_service
 
 
@@ -101,6 +124,19 @@ async def get_services(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지당 항목 수"),
         search: Optional[str] = Query(None, description="검색어 (이름, 설명)"),
+        sort: Optional[str] = Query(
+            None,
+            description=(
+                "정렬 기준. `,` 로 다중 키, `-` 접두사는 내림차순(DESC). "
+                "미지정 시 `-created_at`. 허용 필드: `id`, `name`, `created_at`, `updated_at`."
+            ),
+            openapi_examples={
+                "default": {"summary": "최신순 (기본)", "value": "-created_at"},
+                "name_asc": {"summary": "이름 오름차순", "value": "name"},
+                "name_desc": {"summary": "이름 내림차순", "value": "-name"},
+                "multi": {"summary": "수정시각 DESC + 이름 ASC", "value": "-updated_at,name"},
+            },
+        ),
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -117,6 +153,7 @@ async def get_services(
     | `page` | integer | — | 1 | 페이지 번호 (1부터 시작) |
     | `size` | integer | — | 20 | 페이지당 항목 수 (1-100) |
     | `search` | string | — | — | 검색어 (이름, 설명) |
+    | `sort` | string | — | `-created_at` | 정렬. `,`로 다중 키, `-` 접두사=DESC. 허용: `id`, `name`, `created_at`, `updated_at` |
 
     ## Response (200) — `ServiceListResponse`
 
@@ -129,14 +166,22 @@ async def get_services(
 
     ## Errors
     - 401: 인증되지 않은 사용자
+    - 422: 허용되지 않은 sort 필드
     - 500: 서버 내부 오류
     """
     skip = (page - 1) * size
+    order_by = resolve_sort_columns(
+        parsed=parse_sort(sort),
+        allowed=_SERVICE_SORT_FIELDS,
+        default=_SERVICE_SORT_DEFAULT,
+        tie_breaker=_SERVICE_SORT_TIE_BREAKER,
+    )
     services, total = service_crud.get_services(
         db=db,
         skip=skip,
         limit=size,
-        search=search
+        search=search,
+        order_by=order_by,
     )
 
     return ServiceListResponse(
@@ -157,7 +202,7 @@ async def get_service(
     서비스 상세정보 조회
 
     특정 서비스의 상세 정보를 조회합니다.
-    연결된 모든 워크플로우 정보와 최근 1시간의 모니터링 메트릭을 포함합니다.
+    연결된 모든 워크플로우 정보와 **최근 1시간(1h)·1일(1d)·1주(1w)** 기간별 모니터링 메트릭을 포함합니다.
 
     ## Path Parameters
 
@@ -179,22 +224,55 @@ async def get_service(
     | `surro_service_id` | string | 외부 서비스 ID (UUID) |
     | `workflow_count` | integer | 연결된 워크플로우 수 |
     | `workflows` | List[WorkflowBaseSchema] | 연결된 워크플로우 목록 |
-    | `monitoring_data` | ServiceMonitoringData \\| null | 모니터링 데이터 |
+    | `monitoring_data` | ServiceMonitoringData \\| null | 모니터링 데이터 (기간별 집계) |
+    | `knowledge_bases` | List[KnowledgeBaseSummary] | 워크플로우 컴포넌트에서 수집한 KB 평탄 리스트(현재 사용자 권한 통과 항목만, id ASC) |
+    | `models` | List[ModelSummary] | 컴포넌트의 `model_id`로 수집한 모델 평탄 리스트(본인 소유 + 카탈로그 모델만) |
+    | `prompts` | List[PromptSummary] | 컴포넌트의 `prompt_id`로 수집한 프롬프트 평탄 리스트(현재 사용자 권한 통과 항목만) |
 
-    ### monitoring_data.total_metrics (MonitoringMetrics)
+    ### monitoring_data (ServiceMonitoringData)
 
     | 필드 | 타입 | 설명 |
     |------|------|------|
-    | `message_count` | integer | 최근 1시간 총 메시지 수 |
-    | `active_users` | integer | 최근 1시간 활성 사용자 수 |
-    | `token_usage` | integer | 최근 1시간 토큰 사용량 |
-    | `avg_interaction_count` | float | 최근 1시간 평균 사용자 상호작용 수 |
-    | `response_time_ms` | float | 평균 응답 시간(ms) |
-    | `error_count` | integer | 최근 1시간 오류 수 |
-    | `success_rate` | float | 최근 1시간 성공률(%) |
+    | `total_metrics` | MonitoringMetrics | 전체 서비스 기간별 메트릭 |
+    | `workflow_metrics` | List[WorkflowMonitoring] | 워크플로우별 기간별 메트릭 |
+    | `aggregated_at` | datetime | 집계 기준 시각(UTC). 모든 기간이 이 시각을 끝점으로 역산 |
+
+    ### monitoring_data.total_metrics / workflow_metrics[].metrics (MonitoringMetrics)
+
+    | 키 | 타입 | 설명 |
+    |------|------|------|
+    | `1h` | PeriodMetrics | 최근 1시간 집계 (`aggregated_at - 1h ~ aggregated_at`) |
+    | `1d` | PeriodMetrics | 최근 1일 집계 (`aggregated_at - 24h ~ aggregated_at`) |
+    | `1w` | PeriodMetrics | 최근 1주 집계 (`aggregated_at - 7d ~ aggregated_at`) |
+
+    > 세 기간은 동일한 끝점(`aggregated_at`)을 공유하는 **누적(cumulative)** 윈도우. 따라서 `1d`는 `1h`를, `1w`는 `1d`를 포함한다.
+
+    ### PeriodMetrics (단일 기간의 7개 메트릭)
+
+    | 필드 | 타입 | 설명 |
+    |------|------|------|
+    | `message_count` | integer | 해당 기간 총 메시지 수 |
+    | `active_users` | integer | 해당 기간 활성 사용자 수 |
+    | `token_usage` | integer | 해당 기간 토큰 사용량 |
+    | `avg_interaction_count` | float | 해당 기간 평균 사용자 상호작용 수 |
+    | `response_time_ms` | float \\| null | 해당 기간 평균 응답 시간(ms). 데이터 없으면 null |
+    | `error_count` | integer | 해당 기간 오류 수 |
+    | `success_rate` | float \\| null | 해당 기간 성공률(%). 요청 없으면 null |
+
+    > 데이터가 없는 기간은 카운트/합산 메트릭은 `0`, `avg_interaction_count`는 `0.0`,
+    > 평균/비율 메트릭(`response_time_ms`/`success_rate`)은 `null`. 기간 키(`1h`/`1d`/`1w`)는 항상 존재.
+
+    ### KnowledgeBaseSummary / ModelSummary / PromptSummary
+
+    각 Summary 항목은 워크플로우 detail의 컴포넌트(`type` = "KNOWLEDGE_BASE" / "MODEL")에서
+    추출한 `knowledge_base_id` / `model_id` / `prompt_id`로 구성된다. 동일 ID가 여러 워크플로우에서
+    참조될 경우 한 번만 노출되고 `workflow_refs: [{id, name}]`에 사용처가 누적된다.
+    gateway DB 매핑이 없거나 현재 로그인 사용자에게 권한이 없는 항목은 best-effort로 누락된다
+    (메인 응답은 200 유지). 카탈로그 모델(`is_catalog=True`)은 소유권 없이도 노출 가능.
 
     ## Errors
     - 401: 인증되지 않은 사용자
+    - 403: 본인 소유 서비스가 아니고 admin도 아님
     - 404: 서비스를 찾을 수 없음
     - 500: 서버 내부 오류
     """
@@ -202,6 +280,10 @@ async def get_service(
     db_service = service_crud.get_service_by_surro_id(db=db, surro_service_id=surro_service_id)
     if not db_service:
         raise HTTPException(status_code=404, detail="Service not found")
+
+    # 1-1. 권한 검증 — 본인 소유 서비스 또는 admin만 접근 가능
+    if current_user.role != "admin" and db_service.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
 
     # 2. 외부 API 조회
     user_info = {
@@ -232,7 +314,12 @@ async def get_service(
             detail=f"Service {surro_service_id} not found in external API"
         )
 
-    # 3. 최종 응답 = 내부 DB + 외부 API 데이터 병합
+    # 3. 워크플로우 컴포넌트 기반 KB/모델/프롬프트 보강 (best-effort)
+    enrichment = await service_service.enrich_service_detail(
+        external_data, db, current_user
+    )
+
+    # 4. 최종 응답 = 내부 DB + 외부 API 데이터 + 보강 데이터 병합
     response = ServiceDetailResponse(
         id=db_service.id,
         name=db_service.name,
@@ -246,7 +333,12 @@ async def get_service(
         # 외부 API 데이터 병합
         workflow_count=getattr(external_data, "workflow_count", 0),
         workflows=getattr(external_data, "workflows", []),
-        monitoring_data=getattr(external_data, "monitoring_data", None)
+        monitoring_data=getattr(external_data, "monitoring_data", None),
+
+        # 보강 데이터 (현재 로그인 사용자 권한 통과 항목만)
+        knowledge_bases=enrichment.get("knowledge_bases", []),
+        models=enrichment.get("models", []),
+        prompts=enrichment.get("prompts", []),
     )
 
     return response
@@ -326,6 +418,7 @@ async def get_service_resource_usages(
 async def update_service(
         surro_service_id: str,  # int -> str (UUID)
         service_update: ServiceUpdate,
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -401,12 +494,20 @@ async def update_service(
         service_update=service_update
     )
 
+    emit_from_request(
+        db, request,
+        action=Action.UPDATE,
+        resource_type=ResourceType.SERVICE,
+        actor_member_id=current_user.member_id,
+        resource_id=surro_service_id,
+    )
     return updated_service
 
 
 @router.delete("/{surro_service_id}", status_code=204)
 async def delete_service(
         surro_service_id: str,  # int -> str (UUID)
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -472,4 +573,11 @@ async def delete_service(
     if not success:
         raise HTTPException(status_code=404, detail="Service not found")
 
+    emit_from_request(
+        db, request,
+        action=Action.DELETE,
+        resource_type=ResourceType.SERVICE,
+        actor_member_id=current_user.member_id,
+        resource_id=surro_service_id,
+    )
     return None  # 204 No Content
