@@ -1,7 +1,8 @@
-from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
-from typing import List, Optional, Dict, Any, TYPE_CHECKING
-from datetime import datetime
 import re
+from datetime import datetime
+from typing import List, Optional, TYPE_CHECKING
+
+from pydantic import BaseModel, ConfigDict, EmailStr, field_validator
 
 # 타입 체킹할 때만 import (순환 참조 방지)
 if TYPE_CHECKING:
