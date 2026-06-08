@@ -264,3 +264,106 @@ class ProviderHealthResponse(BaseModel):
         default_factory=dict, description="provider별 최근 N건 시계열"
     )
     generated_at: datetime
+
+
+# ============================================================
+# 개인 대시보드 — 서비스 카드 / 모니터링 / 활동 히스토리
+# ============================================================
+
+CacheSourceLiteral = Literal["cache", "live", "empty"]
+DASHBOARD_PERIODS = ("1h", "1d", "1w")
+
+
+# ---------- 서비스 현황 카드 ----------
+
+class ServiceCardItem(BaseModel):
+    """서비스 현황 카드 1건. name/description은 gateway DB, 카운트는 캐시(MLOps 파생)."""
+    surro_service_id: str
+    name: str
+    description: Optional[str] = None
+    workflow_count: int = Field(0, description="연결된 워크플로우 수")
+    model_count: Optional[int] = Field(
+        None, description="사용 모델 distinct 수. 미집계(옵션 off)/집계 실패 시 null"
+    )
+
+
+class MyServiceCardsResponse(BaseModel):
+    member_id: str
+    services: List[ServiceCardItem] = Field(default_factory=list)
+    source: CacheSourceLiteral = Field(
+        ..., description="cache=스냅샷 사용, live=이번 요청에서 즉시 집계, empty=보유 서비스 없음"
+    )
+    generated_at: datetime
+
+
+# ---------- 서비스 모니터링 (1h/1d/1w) ----------
+
+class DashboardPeriodMetrics(BaseModel):
+    """단일 기간 메트릭. MLOps PeriodMetrics와 동일 필드(대시보드 응답 전용 사본)."""
+    message_count: int = 0
+    active_users: int = 0
+    token_usage: int = 0
+    avg_interaction_count: float = 0.0
+    response_time_ms: Optional[float] = None
+    error_count: int = 0
+    success_rate: Optional[float] = None
+
+
+class ServiceMonitoringItem(BaseModel):
+    """서비스 1건의 기간별 메트릭."""
+    surro_service_id: str
+    name: str
+    metrics: Dict[str, DashboardPeriodMetrics] = Field(
+        default_factory=dict, description="기간별 메트릭. 키: 1h/1d/1w"
+    )
+    aggregated_at: Optional[datetime] = Field(None, description="MLOps 집계 기준 끝점")
+
+
+class MetricRankItem(BaseModel):
+    surro_service_id: str
+    name: str
+    value: float
+
+
+class PeriodTopMetrics(BaseModel):
+    """한 기간 안에서 메트릭별 Top N 순위."""
+    message_count: List[MetricRankItem] = Field(default_factory=list)
+    active_users: List[MetricRankItem] = Field(default_factory=list)
+    token_usage: List[MetricRankItem] = Field(default_factory=list)
+    avg_interaction_count: List[MetricRankItem] = Field(default_factory=list)
+
+
+class MyServiceMonitoringResponse(BaseModel):
+    member_id: str
+    source: CacheSourceLiteral
+    top_n: int = Field(..., description="순위 항목 수 (top.*[] 길이 상한)")
+    services: List[ServiceMonitoringItem] = Field(
+        default_factory=list, description="본인 서비스별 전체 기간 메트릭"
+    )
+    top: Dict[str, PeriodTopMetrics] = Field(
+        default_factory=dict, description="기간(1h/1d/1w)별 메트릭 Top N 순위"
+    )
+    generated_at: datetime
+
+
+# ---------- 활동 히스토리 (audit_logs 기반, k8s 이벤트 대체) ----------
+
+class MyActivityItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    action: str = Field(description="create/update/delete/restore/status_change 등")
+    resource_type: str = Field(description="service/workflow/model/... 대상 도메인")
+    resource_id: Optional[str] = None
+    metadata_json: Optional[Dict[str, Any]] = Field(
+        default=None, serialization_alias="metadata",
+        description="액션별 부가 JSON (예: {\"name\":\"...\"}, {\"from\":\"DRAFT\",\"to\":\"ACTIVE\"})",
+    )
+    created_at: datetime
+
+
+class MyActivityListResponse(BaseModel):
+    data: List[MyActivityItem]
+    total: int
+    page: int
+    size: int

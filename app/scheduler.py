@@ -71,6 +71,22 @@ def job_probe_providers() -> None:
         db.close()
 
 
+def job_refresh_dashboard_services() -> None:
+    """주기: 전체 서비스 카드/모니터링 스냅샷 pre-warm (MLOps detail N+1 → 캐시).
+
+    MLOps(PROXY) 호출이 필요하므로 PROXY_ENABLED 환경에서만 의미. 멀티 워커면 단일 worker에서만 실행 권장.
+    """
+    from app.services import me_dashboard_service
+    db = SessionLocal()
+    try:
+        n = me_dashboard_service.refresh_all_services_sync(db)
+        logger.info("[scheduler] dashboard service snapshots refreshed services=%d", n)
+    except Exception:
+        logger.exception("[scheduler] dashboard service snapshot refresh failed")
+    finally:
+        db.close()
+
+
 # ---------- lifecycle ----------
 
 def start_scheduler() -> Optional[BackgroundScheduler]:
@@ -127,6 +143,20 @@ def start_scheduler() -> Optional[BackgroundScheduler]:
         coalesce=True,
         max_instances=1,
     )
+
+    # 개인 대시보드 서비스 카드/모니터링 pre-warm — MLOps 호출 필요(SCHEDULER_INCLUDE_DASHBOARD).
+    # 미사용 시에도 endpoint가 TTL 기반 lazy refresh로 동작하므로 default off.
+    if settings.SCHEDULER_INCLUDE_DASHBOARD:
+        sched.add_job(
+            job_refresh_dashboard_services,
+            trigger=IntervalTrigger(minutes=settings.SCHEDULER_DASHBOARD_REFRESH_MINUTES),
+            id="refresh_dashboard_services",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+    else:
+        logger.info("[scheduler] dashboard pre-warm job skipped (SCHEDULER_INCLUDE_DASHBOARD=false)")
 
     sched.start()
     _scheduler = sched

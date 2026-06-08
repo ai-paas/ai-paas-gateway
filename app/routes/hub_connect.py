@@ -24,6 +24,7 @@ _MARKET_EXAMPLES = {
     "huggingface": {"summary": "HuggingFace", "value": "huggingface"},
     "kaggle": {"summary": "Kaggle", "value": "kaggle"},
 }
+_UNSAFE_PATH_SEGMENTS = {"", ".", ".."}
 
 
 def _create_hub_user_info(user: Member) -> HubUserInfo:
@@ -42,6 +43,35 @@ def _create_user_info_dict(user: Member) -> dict:
         'role': user.role,
         'name': user.name
     }
+
+
+def _validate_path_value(value: str, field_name: str) -> str:
+    value = str(value).strip()
+    if (
+        not value
+        or value.startswith("/")
+        or value.startswith("~")
+        or "\\" in value
+        or ":" in value
+        or any(ord(ch) < 32 for ch in value)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid {field_name}",
+        )
+
+    if any(segment in _UNSAFE_PATH_SEGMENTS for segment in value.split("/")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid {field_name}",
+        )
+    return value
+
+
+def _validate_optional_download_dir(download_dir: Optional[str]) -> Optional[str]:
+    if download_dir is None:
+        return None
+    return _validate_path_value(download_dir, "download_dir")
 
 
 @router.get(
@@ -246,7 +276,7 @@ async def get_hub_model_files(
                 "| model_id | path | Y | 모델 저장소 ID입니다. Kaggle은 `owner/model/framework/variation`(4-세그먼트)를 권장합니다. | meta-llama/Llama-3-8B |\n"
                 "| filename | query | Y | 다운로드할 파일명입니다. | config.json |\n"
                 "| market | query | Y | 대상 마켓 이름입니다. | huggingface |\n"
-                "| download_dir | query | N | 서버 내 사용자 지정 다운로드 경로입니다. | C:/downloads/models |\n\n"
+                "| download_dir | query | N | 서버 기준 다운로드 base 디렉터리 하위 상대 경로입니다. | safe/models |\n\n"
                 "### 응답 필드\n"
                 "| 항목 | 설명 |\n"
                 "| --- | --- |\n"
@@ -269,7 +299,7 @@ async def download_hub_model_file(
         model_id: str = Path(..., description="모델 저장소 ID입니다.", examples=["meta-llama/Llama-3-8B"]),
         filename: str = Query(..., description="다운로드할 파일명입니다.", examples=["config.json"]),
         market: str = Query(..., description="대상 마켓 이름입니다.", openapi_examples=_MARKET_EXAMPLES),
-        download_dir: Optional[str] = Query(None, description="서버 내 사용자 지정 다운로드 경로입니다.", examples=["C:/downloads/models"]),
+        download_dir: Optional[str] = Query(None, description="서버 기준 다운로드 base 디렉터리 하위 상대 경로입니다.", examples=["safe/models"]),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -279,9 +309,12 @@ async def download_hub_model_file(
     `download_dir`를 지정하지 않으면 파일 응답으로 바로 다운로드합니다.
     """
     try:
+        model_id = _validate_path_value(str(model_id), "model_id")
+        filename = _validate_path_value(filename, "filename")
+        download_dir = _validate_optional_download_dir(download_dir)
         user_info = _create_user_info_dict(current_user)
         download_result = await hub_connect_service.download_model_file(
-            str(model_id),
+            model_id,
             filename,
             market,
             download_dir,
@@ -712,9 +745,11 @@ async def download_hub_dataset_file(
         current_user: Member = Depends(get_current_user)
 ):
     try:
+        repo_id = _validate_path_value(str(repo_id), "repo_id")
+        filename = _validate_path_value(str(filename), "filename")
         user_info = _create_user_info_dict(current_user)
         download_result = await hub_connect_service.download_dataset_file(
-            str(repo_id), str(filename), market, user_info
+            repo_id, filename, market, user_info
         )
 
         if isinstance(download_result, dict):
@@ -773,15 +808,17 @@ async def download_hub_dataset_file(
 async def download_hub_dataset_snapshot(
         repo_id: str = Path(..., description="데이터셋 저장소 ID입니다.", examples=["stanfordnlp/imdb"]),
         market: str = Query(..., description="대상 마켓 이름입니다.", openapi_examples=_MARKET_EXAMPLES),
-        download_dir: Optional[str] = Query(None, description="서버 내 사용자 지정 다운로드 경로입니다.", examples=["C:/downloads/datasets"]),
+        download_dir: Optional[str] = Query(None, description="서버 기준 다운로드 base 디렉터리 하위 상대 경로입니다.", examples=["safe/datasets"]),
         allow_patterns: Optional[List[str]] = Query(None, description="허용 파일 패턴(여러 개 가능)."),
         ignore_patterns: Optional[List[str]] = Query(None, description="제외 파일 패턴(여러 개 가능)."),
         current_user: Member = Depends(get_current_user)
 ):
     try:
+        repo_id = _validate_path_value(str(repo_id), "repo_id")
+        download_dir = _validate_optional_download_dir(download_dir)
         user_info = _create_user_info_dict(current_user)
         download_result = await hub_connect_service.download_dataset_snapshot(
-            str(repo_id), market,
+            repo_id, market,
             download_dir=download_dir,
             allow_patterns=allow_patterns,
             ignore_patterns=ignore_patterns,

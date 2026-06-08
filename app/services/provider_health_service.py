@@ -40,15 +40,18 @@ class ProviderConfig:
     enabled: bool
     base_url: str
     timeout: float
+    probe_path: str = ""
 
 
 def _provider_configs() -> List[ProviderConfig]:
     return [
         ProviderConfig("mlops", settings.PROXY_ENABLED, settings.PROXY_TARGET_BASE_URL,
-                       settings.PROXY_CONNECT_TIMEOUT or 5.0),
+                       settings.PROXY_CONNECT_TIMEOUT or 5.0,
+                       f"{settings.PROXY_TARGET_PATH_PREFIX.rstrip('/')}/models"),
         ProviderConfig("hub_connect", settings.HUB_CONNECT_ENABLED,
                        settings.HUB_CONNECT_TARGET_BASE_URL,
-                       settings.HUB_CONNECT_CONNECT_TIMEOUT or 5.0),
+                       settings.HUB_CONNECT_CONNECT_TIMEOUT or 5.0,
+                       f"{settings.HUB_CONNECT_TARGET_PATH_PREFIX.rstrip('/')}/auth/login"),
         ProviderConfig("any_cloud", settings.ANY_CLOUD_ENABLED,
                        settings.ANY_CLOUD_TARGET_BASE_URL,
                        settings.ANY_CLOUD_CONNECT_TIMEOUT or 5.0),
@@ -59,13 +62,15 @@ async def _probe_one(cfg: ProviderConfig) -> HealthResult:
     if not cfg.enabled or not cfg.base_url:
         return HealthResult(cfg.name, "disabled", None, None)
 
-    url = cfg.base_url.rstrip("/")
+    url = f"{cfg.base_url.rstrip('/')}{cfg.probe_path}"
     start = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=cfg.timeout) as client:
             resp = await client.get(url, follow_redirects=True)
         latency = int(round((time.perf_counter() - start) * 1000))
-        if 200 <= resp.status_code < 400:
+        # 401/403/405 still prove the provider is reachable; auth/method is a
+        # contract issue for the probe, not provider downtime.
+        if 200 <= resp.status_code < 400 or resp.status_code in (401, 403, 405):
             return HealthResult(cfg.name, "healthy", latency, None)
         return HealthResult(cfg.name, "unhealthy", latency,
                             f"HTTP {resp.status_code}")

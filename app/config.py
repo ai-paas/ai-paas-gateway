@@ -108,6 +108,15 @@ class Settings:
     # 별도 worker 프로세스에서 띄울 때는 false로 두어야 한다 (API 프로세스에만 켤 것).
     SCHEDULER_INCLUDE_API_METRICS: bool = _get_bool("SCHEDULER_INCLUDE_API_METRICS", True)
 
+    # 개인 대시보드 서비스 카드/모니터링 캐시
+    # TTL(분): 캐시가 이보다 오래되면 다음 요청에서 본인 서비스만 즉시(live) 재집계. 0이면 무한 캐시(스케줄러만 갱신).
+    DASHBOARD_CACHE_TTL_MINUTES: int = int(os.getenv("DASHBOARD_CACHE_TTL_MINUTES", "10"))
+    # 사용 모델 distinct 수 집계 여부 — 워크플로우 detail fan-out이라 비용 큼. 부담되면 false.
+    DASHBOARD_INCLUDE_MODEL_COUNT: bool = _get_bool("DASHBOARD_INCLUDE_MODEL_COUNT", True)
+    # 스케줄러 전체 서비스 pre-warm 잡 — MLOps(PROXY) 비활성 환경에선 의미 없으므로 default도 PROXY_ENABLED 의존 권장.
+    SCHEDULER_INCLUDE_DASHBOARD: bool = _get_bool("SCHEDULER_INCLUDE_DASHBOARD", False)
+    SCHEDULER_DASHBOARD_REFRESH_MINUTES: int = int(os.getenv("SCHEDULER_DASHBOARD_REFRESH_MINUTES", "10"))
+
     ANY_CLOUD_ENABLED: bool = _get_bool("ANY_CLOUD_ENABLED", False)
     ANY_CLOUD_TARGET_BASE_URL: str = os.getenv("ANY_CLOUD_TARGET_BASE_URL", "")
     ANY_CLOUD_TIMEOUT: float = float(os.getenv("ANY_CLOUD_TIMEOUT", "30.0"))
