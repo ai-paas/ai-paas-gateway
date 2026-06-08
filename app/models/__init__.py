@@ -3,6 +3,7 @@ from .api_metric import ApiRequestHistogram, ProviderHealthSnapshot
 from .audit_log import AuditLog
 from .base import Base
 from .daily_stat import DailyStat
+from .dashboard_cache import ServiceCardSnapshot, ServiceMetricSnapshot
 from .dataset import Dataset
 from .experiment import Experiment
 from .hub_connect import HubConnection

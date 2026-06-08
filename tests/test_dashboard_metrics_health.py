@@ -1,4 +1,5 @@
 """Phase 4 — api_metrics (histogram) + provider_health 통합 테스트."""
+import asyncio
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from unittest.mock import patch
@@ -204,6 +205,41 @@ def test_probe_all_returns_disabled_when_settings_off(monkeypatch):
     assert statuses["mlops"] == "disabled"
     assert statuses["hub_connect"] == "disabled"
     assert statuses["any_cloud"] == "disabled"
+
+
+def test_probe_one_treats_auth_required_as_healthy(monkeypatch):
+    """401/403/405는 provider reachable로 판단한다."""
+    captured = {}
+
+    class FakeResponse:
+        status_code = 401
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, follow_redirects):
+            captured["url"] = url
+            captured["follow_redirects"] = follow_redirects
+            return FakeResponse()
+
+    monkeypatch.setattr(provider_health_service.httpx, "AsyncClient", FakeClient)
+
+    result = asyncio.run(provider_health_service._probe_one(
+        provider_health_service.ProviderConfig(
+            "mlops", True, "http://provider", 5.0, "/api/v1/models"
+        )
+    ))
+
+    assert result.status == "healthy"
+    assert result.error is None
+    assert captured["url"] == "http://provider/api/v1/models"
 
 
 def test_probe_all_and_record_inserts_snapshots(db, monkeypatch):

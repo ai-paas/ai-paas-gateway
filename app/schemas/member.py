@@ -9,6 +9,29 @@ if TYPE_CHECKING:
     from .service import ServiceResponse
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+_MEMBER_ID_PATTERN = re.compile(r"^[a-z0-9-]{5,45}$")
+_PASSWORD_PATTERN = re.compile(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{8,16}$")
+_PHONE_PATTERN = re.compile(r"^\d+$")
+
+
+def _validate_member_id_value(v: str) -> str:
+    if not _MEMBER_ID_PATTERN.match(v):
+        raise ValueError("아이디는 알파벳 소문자, 숫자, '-' 조합으로 5~45자여야 합니다.")
+    return v
+
+
+def _validate_password_value(v: str) -> str:
+    if not _PASSWORD_PATTERN.match(v):
+        raise ValueError("비밀번호는 8~16자 영문 대소문자, 숫자, 특수문자를 포함해야 합니다.")
+    if len(v.encode("utf-8")) > 72:
+        raise ValueError("비밀번호가 너무 깁니다. 더 짧은 비밀번호를 사용해주세요.")
+    return v
+
+
+def _validate_phone_value(v: Optional[str]) -> Optional[str]:
+    if v and not _PHONE_PATTERN.match(v):
+        raise ValueError("연락처는 숫자만 입력해야 합니다.")
+    return v
 
 # Member 스키마
 class MemberBase(BaseModel):
@@ -28,23 +51,12 @@ class MemberCreate(MemberBase):
     @field_validator("member_id")
     @classmethod
     def validate_member_id(cls, v):
-        # 알파벳 소문자 + 숫자 + '-' 조합, 5~45자
-        if not re.match(r"^[a-z0-9-]{5,45}$", v):
-            raise ValueError("아이디는 알파벳 소문자, 숫자, '-' 조합으로 5~45자여야 합니다.")
-        return v
+        return _validate_member_id_value(v)
 
     @field_validator("password")
     @classmethod
     def validate_password(cls, v):
-        # 8~16자, 영문 대소문자 + 숫자 + 특수문자 조합
-        if not re.match(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\W_]).{8,16}$", v):
-            raise ValueError("비밀번호는 8~16자 영문 대소문자, 숫자, 특수문자를 포함해야 합니다.")
-
-        # bcrypt 72바이트 제한 체크 추가
-        if len(v.encode('utf-8')) > 72:
-            raise ValueError("비밀번호가 너무 깁니다. 더 짧은 비밀번호를 사용해주세요.")
-
-        return v
+        return _validate_password_value(v)
 
     @field_validator("password_confirm")
     @classmethod
@@ -56,9 +68,7 @@ class MemberCreate(MemberBase):
     @field_validator("phone")
     @classmethod
     def validate_phone(cls, v):
-        if v and not re.match(r"^\d+$", v):
-            raise ValueError("연락처는 숫자만 입력해야 합니다.")
-        return v
+        return _validate_phone_value(v)
 
 
 class MemberUpdate(BaseModel):
@@ -70,6 +80,20 @@ class MemberUpdate(BaseModel):
     role: Optional[str] = None
     is_active: Optional[bool] = None
     description: Optional[str] = None
+
+    @field_validator("member_id")
+    @classmethod
+    def validate_member_id(cls, v):
+        if v is None:
+            return v
+        return _validate_member_id_value(v)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, v):
+        if v is None:
+            return v
+        return _validate_password_value(v)
 
 
 class MemberResponse(BaseModel):
