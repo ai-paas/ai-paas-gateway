@@ -4,6 +4,116 @@ from typing import List, Optional, Dict, Any, Union
 from pydantic import BaseModel, Field, ConfigDict, model_validator, field_validator
 
 
+def _normalize_hub_model_fields(values: Any) -> Any:
+    if not isinstance(values, dict):
+        return values
+
+    data = dict(values)
+
+    def first_present(*keys):
+        for key in keys:
+            value = data.get(key)
+            if value is not None:
+                return value
+        return None
+
+    def first_present_in(source: Optional[Dict[str, Any]], *keys):
+        if not isinstance(source, dict):
+            return None
+        for key in keys:
+            value = source.get(key)
+            if value is not None:
+                return value
+        return None
+
+    card_data = first_present("cardData", "card_data")
+    siblings = first_present("siblings", "files")
+    config = first_present("config", "model_config")
+
+    if data.get("_id") is None and data.get("mongo_id") is not None:
+        data["_id"] = data.get("mongo_id")
+
+    if data.get("modelId") is None:
+        data["modelId"] = first_present("model_id", "repo_id", "id")
+
+    if data.get("pipeline_tag") is None:
+        data["pipeline_tag"] = first_present("pipelineTag", "pipeline-tag")
+
+    provider_task = None
+    providers = data.get("availableInferenceProviders") or []
+    if isinstance(providers, list):
+        for provider in providers:
+            if isinstance(provider, dict) and provider.get("task"):
+                provider_task = provider["task"]
+                break
+
+    if data.get("pipeline_tag") is None and provider_task:
+        data["pipeline_tag"] = provider_task
+    if data.get("task") is None:
+        data["task"] = data.get("pipeline_tag") or provider_task
+
+    if data.get("library_name") is None:
+        data["library_name"] = (
+            first_present("libraryName", "library-name")
+            or first_present_in(card_data, "library_name", "library-name", "libraryName")
+            or first_present_in(config, "library_name", "library-name", "libraryName")
+        )
+
+    if data.get("createdAt") is None:
+        data["createdAt"] = first_present(
+            "created_at",
+            "created",
+            "created-at",
+            "createdDate",
+        )
+    if data.get("lastModified") is None:
+        data["lastModified"] = first_present(
+            "last_modified",
+            "lastUpdated",
+            "updatedAt",
+            "last_updated",
+            "modifiedAt",
+        )
+
+    if data.get("numParameters") is None:
+        data["numParameters"] = first_present(
+            "num_parameters",
+            "num_parameters_total",
+            "parameter_count",
+            "parameterCount",
+        )
+    if data.get("parameterDisplay") is None:
+        data["parameterDisplay"] = first_present("parameter_display", "parameter-display")
+    if data.get("parameterRange") is None:
+        data["parameterRange"] = first_present("parameter_range", "parameter-range")
+
+    if data.get("downloads") is None:
+        data["downloads"] = first_present("downloadCount", "download_count")
+    if data.get("likes") is None:
+        data["likes"] = first_present("likeCount", "likes_count", "voteCount", "totalVotes")
+
+    if data.get("sha") is None:
+        data["sha"] = first_present("commit_sha", "commitSha", "revision")
+
+    if data.get("tags") is None:
+        data["tags"] = []
+    elif isinstance(data.get("tags"), list):
+        normalized_tags = []
+        for tag in data["tags"]:
+            if isinstance(tag, str):
+                normalized_tags.append(tag)
+            elif isinstance(tag, dict):
+                tag_value = tag.get("id") or tag.get("name") or tag.get("label")
+                if tag_value:
+                    normalized_tags.append(str(tag_value))
+        data["tags"] = normalized_tags
+
+    if data.get("siblings") is None and isinstance(siblings, list):
+        data["siblings"] = siblings
+
+    return data
+
+
 class ModelListParams(BaseModel):
     """모델 목록 조회 파라미터"""
     market: Optional[str] = Field("huggingface", description="모델 마켓")
@@ -57,6 +167,11 @@ class HubModelResponse(BaseModel):
     sha: Optional[str] = Field(None, description="SHA 해시")
 
     model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_upstream_fields(cls, values):
+        return _normalize_hub_model_fields(values)
 
     @field_validator('modelId', mode='before')
     @classmethod
@@ -166,6 +281,11 @@ class ExtendedHubModelResponse(BaseModel):
 
     # 업스트림 마켓 카드 메타데이터의 추가 필드를 그대로 pass-through (HF/Kaggle 공통 확장 포인트)
     model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_upstream_fields(cls, values):
+        return _normalize_hub_model_fields(values)
 
     def dict(self, *args, **kwargs):
         data = super().dict(*args, **kwargs)
