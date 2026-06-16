@@ -129,9 +129,13 @@ class AnyCloudService:
             # 요청 실행
             response = await getattr(self.client, method.lower())(url, **kwargs)
 
-            if response.status_code == 200:
+            if 200 <= response.status_code < 300:
+                if response.status_code == 204 or not response.content:
+                    return {"data": None}
                 response_data = response.json()
-                # 응답을 data로 래핑
+                # success/data 형태로 감싸 내려오는 응답은 data 만 추출
+                if isinstance(response_data, dict) and "data" in response_data and "success" in response_data:
+                    response_data = response_data["data"]
                 return {"data": response_data}
             else:
                 logger.error(f"Any Cloud API error: {response.status_code} - {response.text}")
@@ -167,12 +171,10 @@ class AnyCloudService:
             user_info: Optional[Dict[str, str]] = None,
             **query_params
     ) -> Any:
-        """범용 GET 요청 (data 래핑 제거) - 단일 조회용"""
+        """GET 요청 — data 필드만 반환"""
         response = await self._make_request(
             "GET", path, user_info=user_info, params=query_params
         )
-
-        # data 필드가 있으면 data 내용만 반환, 없으면 전체 응답 반환
         if isinstance(response, dict) and "data" in response:
             return response["data"]
         return response
@@ -183,7 +185,7 @@ class AnyCloudService:
             user_info: Optional[Dict[str, str]] = None,
             **query_params
     ) -> Dict[str, Any]:
-        """범용 GET 요청 (동적 엔드포인트 지원) - 전체 조회용"""
+        """GET 요청"""
         return await self._make_request(
             "GET", path, user_info=user_info, params=query_params
         )
@@ -195,12 +197,10 @@ class AnyCloudService:
             user_info: Optional[Dict[str, str]] = None,
             **query_params
     ) -> Dict[str, Any]:
-        """범용 PUT 요청"""
+        """PUT 요청"""
         response = await self._make_request(
             "PUT", path, user_info=user_info, json=data, params=query_params
         )
-
-        # data 필드가 있으면 data 내용만 반환, 없으면 전체 응답 반환
         if isinstance(response, dict) and "data" in response:
             return response["data"]
         return response
@@ -211,11 +211,10 @@ class AnyCloudService:
             user_info: Optional[Dict[str, str]] = None,
             **query_params
     ) -> Dict[str, Any]:
-        """범용 DELETE 요청"""
+        """DELETE 요청"""
         response = await self._make_request(
             "DELETE", path, user_info=user_info, params=query_params
         )
-
         if isinstance(response, dict) and "data" in response:
             return response["data"]
         return response
@@ -227,11 +226,10 @@ class AnyCloudService:
             user_info: Optional[Dict[str, str]] = None,
             **query_params
     ) -> Dict[str, Any]:
-        """범용 POST 요청 (동적 엔드포인트 지원)"""
+        """POST 요청"""
         response = await self._make_request(
             "POST", path, user_info=user_info, json=data, params=query_params
         )
-        # data 필드가 있으면 data 내용만 반환, 없으면 전체 응답 반환
         if isinstance(response, dict) and "data" in response:
             return response["data"]
         return response
@@ -242,11 +240,10 @@ class AnyCloudService:
             user_info: Optional[Dict[str, str]] = None,
             **query_params
     ) -> Dict[str, Any]:
-        """데이터 없는 단순 POST 요청 (트리거/액션용)"""
+        """본문 없는 POST 요청"""
         response = await self._make_request(
             "POST", path, user_info=user_info, params=query_params
         )
-        # data 필드가 있으면 data 내용만 반환, 없으면 전체 응답 반환
         if isinstance(response, dict) and "data" in response:
             return response["data"]
         return response
@@ -259,9 +256,7 @@ class AnyCloudService:
             files: Optional[Dict[str, Any]] = None,
             **query_params
     ) -> Dict[str, Any]:
-        """범용 POST 요청 (파일 업로드 지원)"""
-
-        # 파일이 있으면 multipart/form-data로 전송
+        """파일 업로드 가능한 POST 요청"""
         if files or any(key == "valuesFile" for key in data.keys()):
             response = await self._make_multipart_request(
                 "POST", path, data=data, files=files, user_info=user_info, params=query_params
@@ -271,12 +266,10 @@ class AnyCloudService:
                 "POST", path, user_info=user_info, json=data, params=query_params
             )
 
-        # data 필드가 있으면 data 내용만 반환, 없으면 전체 응답 반환
         if isinstance(response, dict) and "data" in response:
             return response["data"]
         return response
 
-    # _make_multipart_request 메소드 추가 (없다면)
     async def _make_multipart_request(
             self,
             method: str,
@@ -286,22 +279,19 @@ class AnyCloudService:
             user_info: Optional[Dict[str, str]] = None,
             params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """멀티파트 요청을 위한 메소드"""
-
+        """멀티파트 요청"""
         headers = self._get_headers(user_info)
-        # multipart 요청시 Content-Type 헤더 제거 (httpx가 자동 설정)
+        # Content-Type 은 httpx 가 boundary 와 함께 자동 설정
         headers.pop('Content-Type', None)
 
         url = f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
 
-        # form data와 files 구성
-        form_data = {}
-        file_data = {}
+        form_data: Dict[str, Any] = {}
+        file_data: Dict[str, Any] = {}
 
         if data:
             for key, value in data.items():
                 if key == "valuesFile" and isinstance(value, str):
-                    # base64 디코딩해서 파일로 전송
                     import base64
                     file_content = base64.b64decode(value)
                     file_data["valuesFile"] = ("values.yaml", file_content, "application/x-yaml")
@@ -311,8 +301,8 @@ class AnyCloudService:
         if files:
             file_data.update(files)
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.request(
+        try:
+            response = await self.client.request(
                 method=method,
                 url=url,
                 headers=headers,
@@ -320,8 +310,21 @@ class AnyCloudService:
                 files=file_data,
                 params=params
             )
+        except httpx.TimeoutException:
+            raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, detail="Any Cloud service timeout")
+        except httpx.ConnectError:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Any Cloud service unavailable")
 
-            return self._handle_response(response)
+        if not (200 <= response.status_code < 300):
+            logger.error(f"Any Cloud API error: {response.status_code} - {response.text}")
+            raise HTTPException(response.status_code, detail=f"Any Cloud API request failed: {response.text}")
+
+        if response.status_code == 204 or not response.content:
+            return {"data": None}
+        body = response.json()
+        if isinstance(body, dict) and "data" in body and "success" in body:
+            return {"data": body["data"]}
+        return {"data": body}
 
     async def get_clusters(
             self,
@@ -330,18 +333,16 @@ class AnyCloudService:
             size: int = 20,
             search: Optional[str] = None
     ) -> AnyCloudPagedResponse:
-        """클러스터 목록 조회 (페이징 적용)"""
+        """클러스터 목록 조회"""
         response = await self.generic_get(
-            path="/system/clusters",
+            path="/v1/clusters",
             user_info=user_info
         )
 
-        # 응답에서 data 추출
         data = response.get("data", [])
         if isinstance(data, dict):
-            data = data.get("clusters", [])
+            data = data.get("items", [])
 
-        # 클라이언트 사이드 페이징 적용
         return self._apply_client_side_pagination(
             data=data,
             page=page,
@@ -351,39 +352,37 @@ class AnyCloudService:
         )
 
     async def check_cluster_exists(self, cluster_id: str, user_info: dict) -> dict:
-        """
-        클러스터 존재 여부 확인 전용 메소드
-        """
-        return await self.generic_get(
-            path="/system/cluster/exists",  # 고정된 경로
-            user_info=user_info,
-            clusterId=cluster_id  # 쿼리 파라미터로 전달
-        )
+        """클러스터 존재 여부 확인 — 별도 엔드포인트가 없어 상세조회의 404 여부로 판정"""
+        try:
+            await self.generic_get_unwrapped(
+                path=f"/v1/clusters/{cluster_id}",
+                user_info=user_info
+            )
+            return {"data": {"exists": True}}
+        except HTTPException as e:
+            if e.status_code == status.HTTP_404_NOT_FOUND:
+                return {"data": {"exists": False}}
+            raise
 
     async def get_cluster_detail(self, cluster_id: str, user_info: dict) -> dict:
-        """
-        클러스터 상세 조회 전용 메소드
-        """
+        """클러스터 상세 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/system/cluster/{cluster_id}",  # 클러스터 ID가 포함된 경로
+            path=f"/v1/clusters/{cluster_id}",
             user_info=user_info
         )
 
     async def get_cluster_test_connection(self, cluster_id: str, user_info: dict) -> dict:
-        """
-        클러스터 연결 테스트 메소드
-        """
-        return await self.generic_get_unwrapped(
-            path=f"/system/cluster/{cluster_id}/test-connection",  # 클러스터 ID가 포함된 경로
+        """클러스터 연결 상태 확인"""
+        return await self.simple_post(
+            path=f"/v1/clusters/{cluster_id}/connectivity-checks",
             user_info=user_info
         )
 
     async def cluster_refresh(self, cluster_id: str, user_info: dict) -> dict:
-        """
-        클러스터 상태 강제 업데이트 메소드
-        """
-        return await self.simple_post(
-            path=f"/system/cluster/{cluster_id}/refresh",  # 클러스터 ID가 포함된 경로
+        """클러스터 상태 강제 갱신"""
+        return await self.generic_post(
+            path=f"/v1/clusters/{cluster_id}/operations",
+            data={"type": "refreshStatus"},
             user_info=user_info
         )
 
@@ -394,15 +393,15 @@ class AnyCloudService:
             size: int = 20,
             search: Optional[str] = None
     ) -> AnyCloudPagedResponse:
-        """헬름 저장소 목록 조회 (페이징 적용)"""
+        """헬름 저장소 목록 조회"""
         response = await self.generic_get(
-            path="/helm-repos",
+            path="/v1/helm-repos",
             user_info=user_info
         )
 
         data = response.get("data", [])
         if isinstance(data, dict):
-            data = data.get("repositories", [])
+            data = data.get("items", [])
 
         return self._apply_client_side_pagination(
             data=data,
@@ -413,20 +412,22 @@ class AnyCloudService:
         )
 
     async def check_helm_repos_exists(self, helm_repo_name: str, user_info: dict) -> dict:
-        """
-        헬름 저장소 존재 여부 확인 전용 메소드
-        """
-        return await self.generic_get(
-            path=f"/helm-repos/{helm_repo_name}/exists",  # 고정된 경로
-            user_info=user_info
-        )
+        """헬름 저장소 존재 여부 확인 — 별도 엔드포인트가 없어 상세조회의 404 여부로 판정"""
+        try:
+            await self.generic_get_unwrapped(
+                path=f"/v1/helm-repos/{helm_repo_name}",
+                user_info=user_info
+            )
+            return {"data": {"exists": True}}
+        except HTTPException as e:
+            if e.status_code == status.HTTP_404_NOT_FOUND:
+                return {"data": {"exists": False}}
+            raise
 
     async def get_helm_repos_detail(self, helm_repo_name: str, user_info: dict) -> dict:
-        """
-        헬름 저장소 상세 조회 전용 메소드
-        """
+        """헬름 저장소 상세 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/helm-repos/{helm_repo_name}",  # 클러스터 ID가 포함된 경로
+            path=f"/v1/helm-repos/{helm_repo_name}",
             user_info=user_info
         )
 
@@ -436,11 +437,9 @@ class AnyCloudService:
             query_params: dict,
             user_info: dict
     ) -> dict:
-        """
-        Prometheus instant query 전용 메소드
-        """
+        """Prometheus instant query"""
         return await self.generic_get_unwrapped(
-            path=f"/monit/{cluster_name}/query",
+            path=f"/v1/clusters/{cluster_name}/metrics/query",
             user_info=user_info,
             **query_params
         )
@@ -451,11 +450,9 @@ class AnyCloudService:
             query_params: dict,
             user_info: dict
     ) -> dict:
-        """
-        Prometheus range query 전용 메소드
-        """
+        """Prometheus range query"""
         return await self.generic_get_unwrapped(
-            path=f"/monit/{cluster_name}/query_range",
+            path=f"/v1/clusters/{cluster_name}/metrics/query_range",
             user_info=user_info,
             **query_params
         )
@@ -468,28 +465,48 @@ class AnyCloudService:
             user_info: dict,
             page: int = 1,
             size: int = 20,
-            search: Optional[str] = None
+            search: Optional[str] = None,
+            pageToken: Optional[str] = None,
+            labelSelector: Optional[str] = None
     ) -> AnyCloudPagedResponse:
-        """쿠버네티스 특정 리소스 조회 (페이징 적용)"""
+        """쿠버네티스 리소스 목록 조회"""
+        # 클러스터 범위 리소스는 namespace 자리에 '-' 를 사용
+        ns_path = namespace if namespace else "-"
+
+        # search 가 명시되면 전체를 받아 메모리에서 필터, 아니면 페이지 단위 그대로 전달
+        if search:
+            backend_params = {"pageSize": 500}
+        else:
+            backend_params = {"pageSize": size}
+            if pageToken:
+                backend_params["pageToken"] = pageToken
+        if labelSelector:
+            backend_params["labelSelector"] = labelSelector
+
         response = await self.generic_get(
-            path=f"/kubernetes/{resource_type}",
-            clusterName=clusterName,
-            namespace=namespace,
-            user_info=user_info
+            path=f"/v1/clusters/{clusterName}/namespaces/{ns_path}/{resource_type}",
+            user_info=user_info,
+            **backend_params
         )
 
         raw_data = response.get("data", [])
-        source_page = page
-        source_size = size
-        source_total = 0
+        next_token = None
 
         if isinstance(raw_data, dict):
-            data = raw_data.get("data")
+            data = raw_data.get("items")
             if data is None:
-                data = raw_data.get("items", [])
-            source_page = raw_data.get("page", page) or page
-            source_size = raw_data.get("size", size) or size
-            source_total = raw_data.get("total", 0) or 0
+                data = raw_data.get("data", [])
+            # 쿠버네티스 응답이 한 번 더 감싸진 형태일 때 안쪽 items 를 사용
+            if isinstance(data, dict):
+                inner_meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+                next_token = (
+                    raw_data.get("continueToken")
+                    or raw_data.get("nextPageToken")
+                    or inner_meta.get("continue")
+                )
+                data = data.get("items", [])
+            else:
+                next_token = raw_data.get("continueToken") or raw_data.get("nextPageToken")
         else:
             data = raw_data
 
@@ -507,90 +524,72 @@ class AnyCloudService:
 
         return AnyCloudPagedResponse.create(
             data=data,
-            total=source_total or len(data),
-            page=source_page,
-            size=source_size
+            total=len(data),
+            page=page,
+            size=size,
+            next_page_token=next_token
         )
 
     async def get_kubernetes_resource_name(self, resource_type: str, resource_name: str, clusterName: str, namespace: str, user_info: dict) -> dict:
-        """
-        쿠버네티스 특정 리소스 조회 전용 메소드
-        """
+        """쿠버네티스 리소스 단건 조회"""
+        ns_path = namespace if namespace else "-"
         return await self.generic_get(
-            path=f"/kubernetes/{resource_type}/{resource_name}",  # 고정된 경로
-            clusterName=clusterName,
-            namespace=namespace,
+            path=f"/v1/clusters/{clusterName}/namespaces/{ns_path}/{resource_type}/{resource_name}",
             user_info=user_info
         )
 
     async def delete_kubernetes_resource(self, resource_type: str, resource_name: str, clusterName: str, namespace: str, user_info: dict) -> dict:
-        """
-        쿠버네티스 특정 리소스 삭제 전용 메소드
-        """
+        """쿠버네티스 리소스 삭제"""
+        ns_path = namespace if namespace else "-"
         return await self.generic_delete(
-            path=f"/kubernetes/{resource_type}/{resource_name}",  # 고정된 경로
-            clusterName=clusterName,
-            namespace=namespace,
+            path=f"/v1/clusters/{clusterName}/namespaces/{ns_path}/{resource_type}/{resource_name}",
             user_info=user_info
         )
 
     async def get_kubernetes_test(self, clusterName: str, user_info: dict) -> dict:
-        """
-        클러스터 연결 상태를 테스트합니다.
-        """
-        return await self.generic_get(
-            path="/kubernetes/test-connection",  # 고정된 경로
-            clusterName=clusterName,
+        """클러스터 연결 상태 확인"""
+        return await self.simple_post(
+            path=f"/v1/clusters/{clusterName}/connectivity-checks",
             user_info=user_info
         )
 
     async def create_cluster(self, data: dict, user_info: dict) -> dict:
-        """
-        클러스터 생성 전용 메소드
-        """
+        """클러스터 생성"""
         return await self.generic_post(
-            path="/system/cluster",  # 고정된 경로
+            path="/v1/clusters",
             data=data,
             user_info=user_info
         )
 
     async def update_cluster(self, data: dict, cluster_id: str, user_info: dict) -> dict:
-        """
-        클러스터 생성 전용 메소드
-        """
-        logger.info(f"Sending data to Any Cloud: {data}")  # 로그 추가
-        return await self.generic_put(
-            path=f"/system/cluster/{cluster_id}",  # 고정된 경로
-            data=data,
-            user_info=user_info
+        """클러스터 수정"""
+        logger.info(f"Sending data to Any Cloud: {data}")
+        response = await self._make_request(
+            "PATCH", f"/v1/clusters/{cluster_id}", user_info=user_info, json=data
         )
+        if isinstance(response, dict) and "data" in response:
+            return response["data"]
+        return response
 
     async def create_helm_repo(self, data: dict, user_info: dict) -> dict:
-        """
-        헬름 저장소 생성 전용 메소드
-        """
+        """헬름 저장소 생성"""
         return await self.generic_post(
-            path="/helm-repos",  # 고정된 경로
-
+            path="/v1/helm-repos",
             data=data,
             user_info=user_info
         )
 
     async def delete_cluster(self, cluster_id: str, user_info: dict) -> dict:
-        """
-        클러스터 삭제 전용 메소드
-        """
+        """클러스터 삭제"""
         return await self.generic_delete(
-            path=f"/system/cluster/{cluster_id}",  # 클러스터 ID가 포함된 경로
+            path=f"/v1/clusters/{cluster_id}",
             user_info=user_info
         )
-    
+
     async def delete_helm_repo(self, helm_repo_name: str, user_info: dict) -> dict:
-        """
-        헬름 저장소 삭제 전용 메소드
-        """
+        """헬름 저장소 삭제"""
         return await self.generic_delete(
-            path=f"/helm-repos/{helm_repo_name}",
+            path=f"/v1/helm-repos/{helm_repo_name}",
             user_info=user_info
         )
 
@@ -603,20 +602,16 @@ class AnyCloudService:
             size: int = 20,
             search: Optional[str] = None
     ) -> AnyCloudPagedResponse:
-        """Helm Release 목록 조회 (페이징 적용)"""
+        """Helm release 목록 조회"""
         response = await self.generic_get(
-            path="/charts/releases",
-            clusterId=clusterId,
+            path=f"/v1/clusters/{clusterId}/helm-releases",
             namespace=namespace,
             user_info=user_info
         )
 
-        # 중첩된 data 구조 처리: {'data': {'data': {'releases': [...]}}}
         data = response.get("data", {})
         if isinstance(data, dict) and "data" in data:
             data = data.get("data", {})
-
-        # releases 필드 추출
         if isinstance(data, dict):
             data = data.get("releases", [])
 
@@ -636,19 +631,15 @@ class AnyCloudService:
             size: int = 20,
             search: Optional[str] = None
     ) -> AnyCloudPagedResponse:
-        """Helm 차트 목록 조회 (페이징 적용)"""
+        """Helm 차트 목록 조회"""
         response = await self.generic_get(
-            path=f"/charts/{repoName}",
-            repoName=repoName,
+            path=f"/v1/helm-repos/{repoName}/charts",
             user_info=user_info
         )
 
-        # 중첩된 data 구조 처리: {'data': {'data': {'charts': [...]}}}
         data = response.get("data", {})
         if isinstance(data, dict) and "data" in data:
             data = data.get("data", {})
-
-        # charts 필드 추출
         if isinstance(data, dict):
             data = data.get("charts", [])
 
@@ -660,69 +651,56 @@ class AnyCloudService:
             search_fields=["name", "description", "version", "appVersion"]
         )
 
-    async def get_catalog_chart(self, repoName: str, chartName: str, version:str, user_info: dict) -> dict:
-        """
-        차트 상세 조회 전용 메소드
-        """
+    async def get_catalog_chart(self, repoName: str, chartName: str, version: Optional[str], user_info: dict) -> dict:
+        """차트 상세 조회"""
+        # 빈 문자열을 보내면 백엔드 검증을 통과하지 못하므로 값이 있을 때만 전달
+        params: Dict[str, Any] = {}
+        if version:
+            params["version"] = version
         return await self.generic_get_unwrapped(
-            path=f"/charts/{repoName}/{chartName}/detail",  # 고정된 경로
-            repoName=repoName,
-            chartName=chartName,
-            version=version,
-            user_info=user_info
+            path=f"/v1/helm-repos/{repoName}/charts/{chartName}",
+            user_info=user_info,
+            **params
         )
 
-    async def get_catalog_readme(self, repoName: str, chartName: str, version: str, user_info: dict) -> dict:
-        """
-        차트 README.md 조회 전용 메소드
-        """
+    async def get_catalog_readme(self, repoName: str, chartName: str, version: Optional[str], user_info: dict) -> dict:
+        """차트 README 조회"""
+        params: Dict[str, Any] = {}
+        if version:
+            params["version"] = version
         return await self.generic_get_unwrapped(
-            path=f"/charts/{repoName}/{chartName}/readme",  # 고정된 경로
-            repoName=repoName,
-            chartName=chartName,
-            version=version,
-            user_info=user_info
+            path=f"/v1/helm-repos/{repoName}/charts/{chartName}/readme",
+            user_info=user_info,
+            **params
         )
 
     async def get_catalog_status(self, repoName: str, chartName: str, releaseName: str, clusterId: str, namespace: str, user_info: dict) -> dict:
-        """
-        차트 status 조회 전용 메소드
-        """
+        """릴리즈 상태 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/charts/{repoName}/{chartName}/status",  # 고정된 경로
-            repoName=repoName,
-            chartName=chartName,
-            releaseName=releaseName,
-            clusterId=clusterId,
+            path=f"/v1/clusters/{clusterId}/helm-releases/{releaseName}",
             namespace=namespace,
-            user_info= user_info
+            user_info=user_info
         )
 
-    async def get_catalog_values(self, repoName: str, chartName: str, version: str, user_info: dict) -> dict:
-        """
-        차트 values 조회 전용 메소드
-        """
+    async def get_catalog_values(self, repoName: str, chartName: str, version: Optional[str], user_info: dict) -> dict:
+        """차트 values 조회"""
+        params: Dict[str, Any] = {}
+        if version:
+            params["version"] = version
         return await self.generic_get_unwrapped(
-            path=f"/charts/{repoName}/{chartName}/values",  # 고정된 경로
-            repoName=repoName,
-            chartName=chartName,
-            version=version,
-            user_info=user_info
+            path=f"/v1/helm-repos/{repoName}/charts/{chartName}/values",
+            user_info=user_info,
+            **params
         )
 
     async def get_catalog_resources(self, clusterId: str, namespace: str, releaseName: str, user_info: dict) -> dict:
-        """
-        releases resources 조회 전용 메소드
-        """
+        """릴리즈 리소스 목록 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/charts/releases/{releaseName}/resources",  # 고정된 경로
-            clusterId=clusterId,
+            path=f"/v1/clusters/{clusterId}/helm-releases/{releaseName}/resources",
             namespace=namespace,
-            releaseName=releaseName,
             user_info=user_info
         )
 
-    # service.py - 서비스 메소드 수정
     async def create_catalog_deploy(
             self,
             repoName: str,
@@ -734,30 +712,246 @@ class AnyCloudService:
             valuesFile: Optional[bytes] = None,
             user_info: dict = None
     ) -> dict:
-        """
-        차트 배포 메소드
-        """
-        # 요청 데이터 구성
+        """차트 배포"""
         deploy_data = {
             "releaseName": releaseName,
-            "clusterId": clusterId,
+            "chartRef": f"{repoName}/{chartName}",
             "namespace": namespace
         }
-
-        # 선택적 필드 추가
         if version:
             deploy_data["version"] = version
-
-        # valuesFile 처리 - 파일이 있으면 base64 인코딩 또는 텍스트로 전송
         if valuesFile:
             import base64
             deploy_data["valuesFile"] = base64.b64encode(valuesFile).decode('utf-8')
 
         return await self.generic_post_file(
-            path=f"/charts/{repoName}/{chartName}/deploy",
+            path=f"/v1/clusters/{clusterId}/helm-releases",
             data=deploy_data,
             user_info=user_info
         )
+
+    async def get_operations(self, user_info: dict, **query_params) -> dict:
+        """작업 이력 목록 조회"""
+        return await self.generic_get(
+            path="/v1/operations",
+            user_info=user_info,
+            **query_params
+        )
+
+    async def get_operation(self, operation_id: str, user_info: dict) -> dict:
+        """작업 단건 조회"""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/operations/{operation_id}",
+            user_info=user_info
+        )
+
+    async def cancel_operation(self, operation_id: str, user_info: dict) -> dict:
+        """진행 중 작업 취소"""
+        return await self.simple_post(
+            path=f"/v1/operations/{operation_id}/cancel",
+            user_info=user_info
+        )
+
+    async def validate_cluster(self, data: dict, user_info: dict) -> dict:
+        """클러스터 생성 사전 검증"""
+        return await self.generic_post(
+            path="/v1/cluster-validations",
+            data=data,
+            user_info=user_info
+        )
+
+    async def preview_cluster(self, data: dict, user_info: dict) -> dict:
+        """클러스터 생성 미리보기"""
+        return await self.generic_post(
+            path="/v1/cluster-validations/preview",
+            data=data,
+            user_info=user_info
+        )
+
+    async def list_providers(self, user_info: dict) -> dict:
+        """지원 CSP 목록 조회"""
+        return await self.generic_get(
+            path="/v1/providers",
+            user_info=user_info
+        )
+
+    async def get_provider_regions(self, provider: str, user_info: dict) -> dict:
+        """CSP 별 region 목록 조회"""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/providers/{provider}/regions",
+            user_info=user_info
+        )
+
+    async def get_provider_specs(self, provider: str, user_info: dict, **query_params) -> dict:
+        """CSP 별 VM spec 목록 조회"""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/providers/{provider}/specs",
+            user_info=user_info,
+            **query_params
+        )
+
+    async def get_provider_config_schema(self, provider: str, user_info: dict) -> dict:
+        """CSP 별 클러스터 설정 스키마 조회"""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/providers/{provider}/config-schema",
+            user_info=user_info
+        )
+
+    async def get_provider_images(self, provider: str, user_info: dict, **query_params) -> dict:
+        """CSP 별 OS 이미지 목록 조회"""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/providers/{provider}/images",
+            user_info=user_info,
+            **query_params
+        )
+
+    async def list_credentials(self, user_info: dict, **query_params) -> dict:
+        """CSP 자격증명 목록 조회"""
+        return await self.generic_get(
+            path="/v1/credentials",
+            user_info=user_info,
+            **query_params
+        )
+
+    async def get_credential(self, credential_id: str, user_info: dict) -> dict:
+        """CSP 자격증명 단건 조회"""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/credentials/{credential_id}",
+            user_info=user_info
+        )
+
+    async def create_credential(self, data: dict, user_info: dict) -> dict:
+        """CSP 자격증명 등록"""
+        return await self.generic_post(
+            path="/v1/credentials",
+            data=data,
+            user_info=user_info
+        )
+
+    async def delete_credential(self, credential_id: str, user_info: dict) -> dict:
+        """CSP 자격증명 삭제"""
+        return await self.generic_delete(
+            path=f"/v1/credentials/{credential_id}",
+            user_info=user_info
+        )
+
+    async def import_kubeconfig(
+            self,
+            file_content: bytes,
+            file_name: str,
+            cluster_name: str,
+            provider: str,
+            user_info: dict,
+            cluster_type: Optional[str] = None,
+            description: Optional[str] = None,
+            validate: bool = True,
+            strict: bool = False
+    ) -> dict:
+        """kubeconfig 파일 업로드로 클러스터 등록"""
+        form_data: Dict[str, Any] = {
+            "clusterName": cluster_name,
+            "provider": provider,
+            "validate": str(validate).lower(),
+            "strict": str(strict).lower()
+        }
+        if cluster_type:
+            form_data["clusterType"] = cluster_type
+        if description:
+            form_data["description"] = description
+
+        headers = self._get_headers(user_info)
+        # Content-Type 은 httpx 가 boundary 와 함께 자동 설정
+        headers.pop('Content-Type', None)
+
+        url = f"{self.base_url}/v1/clusters/importKubeconfig"
+        files = {"kubeconfigFile": (file_name, file_content, "application/yaml")}
+
+        try:
+            response = await self.client.post(url, headers=headers, data=form_data, files=files)
+        except httpx.TimeoutException:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Any Cloud service timeout"
+            )
+        except httpx.ConnectError:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Any Cloud service unavailable"
+            )
+
+        if not (200 <= response.status_code < 300):
+            logger.error(f"Any Cloud API error: {response.status_code} - {response.text}")
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Any Cloud API request failed: {response.text}"
+            )
+
+        if response.status_code == 204 or not response.content:
+            return None
+        body = response.json()
+        if isinstance(body, dict) and "data" in body and "success" in body:
+            return body["data"]
+        return body
+
+    async def list_addon_catalog(self, user_info: dict) -> dict:
+        """설치 가능한 애드온 목록 조회"""
+        return await self.generic_get(
+            path="/v1/addons",
+            user_info=user_info
+        )
+
+    async def list_cluster_addons(self, cluster_name: str, user_info: dict) -> dict:
+        """클러스터에 설치된 애드온 목록 조회"""
+        return await self.generic_get(
+            path=f"/v1/clusters/{cluster_name}/addons",
+            user_info=user_info
+        )
+
+    async def get_cluster_addon(self, cluster_name: str, addon_id: str, user_info: dict) -> dict:
+        """애드온 단건 조회"""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/clusters/{cluster_name}/addons/{addon_id}",
+            user_info=user_info
+        )
+
+    async def install_cluster_addon(self, cluster_name: str, data: dict, user_info: dict) -> dict:
+        """애드온 설치"""
+        return await self.generic_post(
+            path=f"/v1/clusters/{cluster_name}/addons",
+            data=data,
+            user_info=user_info
+        )
+
+    async def uninstall_cluster_addon(self, cluster_name: str, addon_id: str, user_info: dict) -> dict:
+        """애드온 제거"""
+        return await self.generic_delete(
+            path=f"/v1/clusters/{cluster_name}/addons/{addon_id}",
+            user_info=user_info
+        )
+
+    async def retry_cluster_addon(self, cluster_name: str, addon_id: str, user_info: dict) -> dict:
+        """실패한 애드온 재시도"""
+        return await self.simple_post(
+            path=f"/v1/clusters/{cluster_name}/addons/{addon_id}/retry",
+            user_info=user_info
+        )
+
+    async def install_helm_release(self, cluster_name: str, data: dict, user_info: dict) -> dict:
+        """Helm 릴리즈 설치"""
+        return await self.generic_post(
+            path=f"/v1/clusters/{cluster_name}/helm-releases",
+            data=data,
+            user_info=user_info
+        )
+
+    async def get_audit_logs(self, user_info: dict, **query_params) -> dict:
+        """감사 로그 조회"""
+        return await self.generic_get(
+            path="/v1/audit-logs",
+            user_info=user_info,
+            **query_params
+        )
+
 
 # 싱글톤 인스턴스
 any_cloud_service = AnyCloudService()
