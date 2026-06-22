@@ -1,0 +1,121 @@
+# Test-only compose — .env 없이 즉시 기동.
+# 본 파일의 secret/credential 은 로컬 테스트 전용. 운영 환경 절대 사용 금지.
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d --build
+#   docker compose -f docker-compose.test.yml logs -f app
+#   docker compose -f docker-compose.test.yml down -v   # postgres 데이터까지 삭제
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: gateway-postgres-test
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+      POSTGRES_DB: gateway
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gateway-app-test
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    extra_hosts:
+      # macOS Docker Desktop 은 자동, Linux 는 host-gateway 매핑 필요
+      - "host.docker.internal:host-gateway"
+    environment:
+      # ---- Database ----
+      DATABASE_URL: postgresql://gateway:gateway@postgres:5432/gateway
+      # ---- API ----
+      API_V1_STR: /api/v1
+      PROJECT_NAME: AIPaaS Gateway Management API (TEST)
+      HOST: 0.0.0.0
+      PORT: 8000
+      DEBUG: "true"
+      LOG_LEVEL: debug
+      # ---- Logging ----
+      LOG_DIR: var/log
+      LOG_FILE_ENABLED: "false"
+      LOG_ACCESS_ENABLED: "true"
+      LOG_UVICORN_ACCESS_ENABLED: "false"
+      LOG_JSON_FORMAT: "false"
+      LOG_ROTATION_MAX_BYTES: "10485760"
+      LOG_ROTATION_BACKUP_COUNT: "10"
+      LOG_ACCESS_MASK_PATHS: '["/api/v1/auth/login","/api/v1/auth/refresh","/api/v1/auth/logout"]'
+      # ---- CORS (test: 전체 허용) ----
+      CORS_ALLOW_ORIGINS: "*"
+      CORS_ALLOW_ORIGIN_REGEX: ""
+      CORS_ALLOW_CREDENTIALS: "true"
+      CORS_ALLOW_METHODS: "*"
+      CORS_ALLOW_HEADERS: "*"
+      # ---- JWT (TEST ONLY — 운영 사용 금지) ----
+      JWT_SECRET_KEY: test-only-jwt-secret-do-not-use-in-production-0123456789abcdef
+      JWT_ALGORITHM: HS256
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: "60"
+      JWT_REFRESH_TOKEN_EXPIRE_DAYS: "7"
+      # ---- Refresh cookie ----
+      AUTH_REFRESH_COOKIE_NAME: refresh_token
+      AUTH_REFRESH_COOKIE_HTTPONLY: "true"
+      AUTH_REFRESH_COOKIE_SECURE: "false"
+      AUTH_REFRESH_COOKIE_SAMESITE: lax
+      AUTH_REFRESH_COOKIE_DOMAIN: ""
+      AUTH_REFRESH_COOKIE_PATH: /api/v1/auth
+      AUTH_REFRESH_COOKIE_MAX_AGE: "604800"
+      # ---- Password ----
+      PASSWORD_HASH_SCHEMES: bcrypt
+      # ---- Proxy (사용 안 함) ----
+      PROXY_ENABLED: "false"
+      PROXY_TARGET_BASE_URL: ""
+      PROXY_TARGET_PATH_PREFIX: /api/v1
+      PROXY_TIMEOUT: "30.0"
+      PROXY_CONNECT_TIMEOUT: "5.0"
+      PROXY_MAX_CONNECTIONS: "100"
+      PROXY_MAX_KEEPALIVE_CONNECTIONS: "20"
+      EXTERNAL_API_USERNAME: ""
+      EXTERNAL_API_PASSWORD: ""
+      # ---- HUB Connect (사용 안 함) ----
+      HUB_CONNECT_ENABLED: "false"
+      HUB_CONNECT_TARGET_BASE_URL: "http://127.0.0.1:8001"
+      HUB_CONNECT_TARGET_PATH_PREFIX: /api/v1
+      HUB_CONNECT_TIMEOUT: "30.0"
+      HUB_CONNECT_CONNECT_TIMEOUT: "5.0"
+      HUB_CONNECT_MAX_CONNECTIONS: "100"
+      HUB_CONNECT_MAX_KEEPALIVE_CONNECTIONS: "20"
+      HUB_CONNECT_API_USERNAME: admin
+      HUB_CONNECT_API_PASSWORD: change-me
+      # ---- Any Cloud (활성화 — backend 는 host:8888 ) ----
+      ANY_CLOUD_ENABLED: "true"
+      ANY_CLOUD_TARGET_BASE_URL: http://host.docker.internal:8888
+      ANY_CLOUD_TIMEOUT: "30.0"
+      ANY_CLOUD_CONNECT_TIMEOUT: "5.0"
+      ANY_CLOUD_MAX_CONNECTIONS: "100"
+      ANY_CLOUD_MAX_KEEPALIVE_CONNECTIONS: "20"
+      # ---- Lite Model (사용 안 함) ----
+      LITE_MODEL_ENABLED: "false"
+      LITE_MODEL_TARGET_BASE_URL: "http://127.0.0.1:30007/api/v1"
+      LITE_MODEL_TIMEOUT: "30.0"
+      LITE_MODEL_CONNECT_TIMEOUT: "5.0"
+      LITE_MODEL_MAX_CONNECTIONS: "100"
+      LITE_MODEL_MAX_KEEPALIVE_CONNECTIONS: "20"
+    volumes:
+      # 소스 hot reload — Dockerfile 의 uvicorn --reload 와 함께 동작
+      - .:/app
+    restart: unless-stopped
+
+volumes:
+  postgres_test_data:
