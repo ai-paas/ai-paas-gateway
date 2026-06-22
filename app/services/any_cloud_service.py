@@ -386,6 +386,101 @@ class AnyCloudService:
             user_info=user_info
         )
 
+    # ==================== VM resource (/v1/vms) ====================
+
+    async def list_vms(
+            self,
+            user_info: dict,
+            provider: Optional[str] = None,
+            environment: Optional[str] = None,
+            status_filter: Optional[str] = None,
+            page: int = 1,
+            size: int = 20,
+            search: Optional[str] = None
+    ) -> AnyCloudPagedResponse:
+        """VM 인프라 목록"""
+        params: Dict[str, Any] = {}
+        if provider:
+            params["provider"] = provider
+        if environment:
+            params["environment"] = environment
+        if status_filter:
+            params["status"] = status_filter
+        response = await self.generic_get(path="/v1/vms", user_info=user_info, **params)
+        data = response.get("data", [])
+        if isinstance(data, dict):
+            data = data.get("items", [])
+        return self._apply_client_side_pagination(
+            data=data,
+            page=page,
+            size=size,
+            search=search,
+            search_fields=["clusterName", "clusterProvider", "region", "environment", "status"]
+        )
+
+    async def get_vm_detail(self, vm_name: str, user_info: dict) -> dict:
+        """VM 상세 (workflow / stack outputs)"""
+        return await self.generic_get_unwrapped(path=f"/v1/vms/{vm_name}", user_info=user_info)
+
+    async def create_vm(self, request_data: Dict[str, Any], user_info: dict) -> dict:
+        """VM 생성 (Pulumi provision 트리거 — 202 + Operation)"""
+        return await self.generic_post(path="/v1/vms", data=request_data, user_info=user_info)
+
+    async def patch_vm(self, vm_name: str, request_data: Dict[str, Any], user_info: dict) -> dict:
+        """VM scale — workerCount 변경"""
+        response = await self._make_request(
+            "PATCH", f"/v1/vms/{vm_name}", user_info=user_info, json=request_data
+        )
+        if isinstance(response, dict) and "data" in response:
+            return response["data"]
+        return response
+
+    async def delete_vm(self, vm_name: str, user_info: dict) -> dict:
+        """VM 삭제 (Pulumi destroy — 202 + Operation)"""
+        return await self.generic_delete(path=f"/v1/vms/{vm_name}", user_info=user_info)
+
+    async def list_vm_operations(self, vm_name: str, user_info: dict, page_size: int = 50) -> dict:
+        """VM 의 operation 이력"""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/vms/{vm_name}/operations", user_info=user_info, pageSize=page_size
+        )
+
+    async def create_vm_operation(self, vm_name: str, op_type: str, user_info: dict) -> dict:
+        """VM 액션 (retryWorkflow / retryRegistration / refreshStatus)"""
+        return await self.generic_post(
+            path=f"/v1/vms/{vm_name}/operations",
+            data={"type": op_type},
+            user_info=user_info
+        )
+
+    async def get_vm_state_history(self, vm_name: str, user_info: dict, page_size: int = 50) -> dict:
+        """VM workflow state transition history"""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/vms/{vm_name}/state-history", user_info=user_info, pageSize=page_size
+        )
+
+    async def get_vm_nodes(self, vm_name: str, user_info: dict) -> dict:
+        """VM 노드 목록 (role / publicIp / privateIp)"""
+        return await self.generic_get_unwrapped(path=f"/v1/vms/{vm_name}/nodes", user_info=user_info)
+
+    async def issue_vm_ssh_key(self, vm_name: str, user_info: dict, fmt: str = "json") -> Any:
+        """VM SSH private key 발급 (json=metadata, pem=raw file)"""
+        if fmt == "pem":
+            # raw PEM 응답 — text/plain. _make_request 의 JSON 가정 우회 필요하여 직접 처리.
+            return await self._make_request(
+                "POST", f"/v1/vms/{vm_name}/ssh-key",
+                user_info=user_info, params={"format": "pem"}
+            )
+        return await self.generic_post(
+            path=f"/v1/vms/{vm_name}/ssh-key", data={}, user_info=user_info, format=fmt
+        )
+
+    async def download_vm_kubeconfig(self, vm_name: str, user_info: dict, **params) -> Any:
+        """VM 의 kubeconfig YAML 다운로드 (단기 SA token)"""
+        return await self._make_request(
+            "GET", f"/v1/vms/{vm_name}/kubeconfig", user_info=user_info, params=params
+        )
+
     async def get_helm_repos(
             self,
             user_info: dict,
@@ -437,7 +532,7 @@ class AnyCloudService:
             query_params: dict,
             user_info: dict
     ) -> dict:
-        """Prometheus instant query"""
+        """Prometheus instant query (raw passthrough). _make_request 의 outer data wrap 만 strip."""
         return await self.generic_get_unwrapped(
             path=f"/v1/clusters/{cluster_name}/metrics/query",
             user_info=user_info,
@@ -450,11 +545,24 @@ class AnyCloudService:
             query_params: dict,
             user_info: dict
     ) -> dict:
-        """Prometheus range query"""
+        """Prometheus range query (raw passthrough)."""
         return await self.generic_get_unwrapped(
             path=f"/v1/clusters/{cluster_name}/metrics/query_range",
             user_info=user_info,
             **query_params
+        )
+
+    async def multi_query_prometheus(
+            self,
+            cluster_name: str,
+            queries: list,
+            user_info: dict
+    ) -> dict:
+        """N개의 PromQL 을 한 번에 backend 로 위임 — name → Prometheus envelope map."""
+        return await self.generic_post(
+            path=f"/v1/clusters/{cluster_name}/metrics/multi-query",
+            data={"queries": queries},
+            user_info=user_info
         )
 
     async def get_kubernetes_resource(
@@ -546,6 +654,31 @@ class AnyCloudService:
             user_info=user_info
         )
 
+    async def get_kubernetes_resource_events(self, resource_type: str, resource_name: str, clusterName: str, namespace: str, user_info: dict) -> dict:
+        """쿠버네티스 리소스의 K8s Event 목록 (involvedObject 필터)"""
+        ns_path = namespace if namespace else "-"
+        return await self.generic_get(
+            path=f"/v1/clusters/{clusterName}/namespaces/{ns_path}/{resource_type}/{resource_name}/events",
+            user_info=user_info
+        )
+
+    async def restart_kubernetes_resource(self, resource_type: str, resource_name: str, clusterName: str, namespace: str, user_info: dict) -> dict:
+        """쿠버네티스 리소스 재시작 (pods: delete / deployments+: rollout restart annotation)"""
+        ns_path = namespace if namespace else "-"
+        return await self.simple_post(
+            path=f"/v1/clusters/{clusterName}/namespaces/{ns_path}/{resource_type}/{resource_name}/restart",
+            user_info=user_info
+        )
+
+    async def scale_kubernetes_resource(self, resource_type: str, resource_name: str, clusterName: str, namespace: str, replicas: int, user_info: dict) -> dict:
+        """쿠버네티스 리소스 스케일 (replicas 변경) — deployments/replicasets/statefulsets"""
+        ns_path = namespace if namespace else "-"
+        return await self.simple_post(
+            path=f"/v1/clusters/{clusterName}/namespaces/{ns_path}/{resource_type}/{resource_name}/scale",
+            user_info=user_info,
+            replicas=replicas
+        )
+
     async def get_kubernetes_test(self, clusterName: str, user_info: dict) -> dict:
         """클러스터 연결 상태 확인"""
         return await self.simple_post(
@@ -603,9 +736,11 @@ class AnyCloudService:
             search: Optional[str] = None
     ) -> AnyCloudPagedResponse:
         """Helm release 목록 조회"""
+        # backend 가 namespace 를 정규식으로 검증 — 빈 문자열 거절. 전체 namespace 는 '_all'.
+        ns_query = namespace if namespace else "_all"
         response = await self.generic_get(
             path=f"/v1/clusters/{clusterId}/helm-releases",
-            namespace=namespace,
+            namespace=ns_query,
             user_info=user_info
         )
 
@@ -835,64 +970,6 @@ class AnyCloudService:
             user_info=user_info
         )
 
-    async def import_kubeconfig(
-            self,
-            file_content: bytes,
-            file_name: str,
-            cluster_name: str,
-            provider: str,
-            user_info: dict,
-            cluster_type: Optional[str] = None,
-            description: Optional[str] = None,
-            validate: bool = True,
-            strict: bool = False
-    ) -> dict:
-        """kubeconfig 파일 업로드로 클러스터 등록"""
-        form_data: Dict[str, Any] = {
-            "clusterName": cluster_name,
-            "provider": provider,
-            "validate": str(validate).lower(),
-            "strict": str(strict).lower()
-        }
-        if cluster_type:
-            form_data["clusterType"] = cluster_type
-        if description:
-            form_data["description"] = description
-
-        headers = self._get_headers(user_info)
-        # Content-Type 은 httpx 가 boundary 와 함께 자동 설정
-        headers.pop('Content-Type', None)
-
-        url = f"{self.base_url}/v1/clusters/importKubeconfig"
-        files = {"kubeconfigFile": (file_name, file_content, "application/yaml")}
-
-        try:
-            response = await self.client.post(url, headers=headers, data=form_data, files=files)
-        except httpx.TimeoutException:
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail="Any Cloud service timeout"
-            )
-        except httpx.ConnectError:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Any Cloud service unavailable"
-            )
-
-        if not (200 <= response.status_code < 300):
-            logger.error(f"Any Cloud API error: {response.status_code} - {response.text}")
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"Any Cloud API request failed: {response.text}"
-            )
-
-        if response.status_code == 204 or not response.content:
-            return None
-        body = response.json()
-        if isinstance(body, dict) and "data" in body and "success" in body:
-            return body["data"]
-        return body
-
     async def list_addon_catalog(self, user_info: dict) -> dict:
         """설치 가능한 애드온 목록 조회"""
         return await self.generic_get(
@@ -950,6 +1027,402 @@ class AnyCloudService:
             path="/v1/audit-logs",
             user_info=user_info,
             **query_params
+        )
+
+    async def get_cluster_kubeconfig(self, cluster_name: str, user_info: dict) -> str:
+        """클러스터 kubeconfig 다운로드 (YAML 텍스트)"""
+        headers = self._get_headers(user_info)
+        headers['Accept'] = 'application/yaml'
+        url = f"{self.base_url}/v1/clusters/{cluster_name}/kubeconfig"
+        try:
+            response = await self.client.get(url, headers=headers)
+        except httpx.TimeoutException:
+            raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, detail="Any Cloud service timeout")
+        except httpx.ConnectError:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Any Cloud service unavailable")
+        if not (200 <= response.status_code < 300):
+            logger.error(f"Any Cloud API error: {response.status_code} - {response.text}")
+            raise HTTPException(response.status_code, detail=f"Any Cloud API request failed: {response.text}")
+        return response.text
+
+    async def get_cluster_agent_manifest(self, cluster_name: str, user_info: dict) -> str:
+        """클러스터 agent 설치 manifest 다운로드 (YAML 텍스트)"""
+        headers = self._get_headers(user_info)
+        headers['Accept'] = 'application/yaml'
+        url = f"{self.base_url}/v1/clusters/{cluster_name}/agent-manifest.yaml"
+        try:
+            response = await self.client.get(url, headers=headers)
+        except httpx.TimeoutException:
+            raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, detail="Any Cloud service timeout")
+        except httpx.ConnectError:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Any Cloud service unavailable")
+        if not (200 <= response.status_code < 300):
+            logger.error(f"Any Cloud API error: {response.status_code} - {response.text}")
+            raise HTTPException(response.status_code, detail=f"Any Cloud API request failed: {response.text}")
+        return response.text
+
+    async def get_cluster_health(self, cluster_name: str, user_info: dict) -> dict:
+        """클러스터 종합 health 조회"""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/clusters/{cluster_name}/health",
+            user_info=user_info
+        )
+
+    async def get_agents_health(self, user_info: dict, **query_params) -> dict:
+        """Fleet-wide 에이전트 health 요약"""
+        return await self.generic_get(
+            path="/v1/agents/health",
+            user_info=user_info,
+            **query_params
+        )
+
+    async def get_cluster_operations(self, cluster_name: str, user_info: dict, **query_params) -> dict:
+        """클러스터별 작업 이력 조회"""
+        return await self.generic_get(
+            path=f"/v1/clusters/{cluster_name}/operations",
+            user_info=user_info,
+            **query_params
+        )
+
+    async def get_cluster_state_history(self, cluster_name: str, user_info: dict, **query_params) -> dict:
+        """VM 클러스터 workflow state 변경 이력"""
+        return await self.generic_get(
+            path=f"/v1/clusters/{cluster_name}/state-history",
+            user_info=user_info,
+            **query_params
+        )
+
+    async def post_cluster_ssh_key(self, cluster_name: str, user_info: dict, data: Optional[dict] = None) -> dict:
+        """VM 클러스터 SSH 키 발급/조회"""
+        return await self.generic_post(
+            path=f"/v1/clusters/{cluster_name}/ssh-key",
+            data=data or {},
+            user_info=user_info
+        )
+
+    async def get_cluster_resource_kinds(self, cluster_name: str, user_info: dict) -> dict:
+        """클러스터가 지원하는 K8s kind 목록"""
+        return await self.generic_get(
+            path=f"/v1/clusters/{cluster_name}/resource-kinds",
+            user_info=user_info
+        )
+
+    # === observability ===
+
+    async def get_observability_targets(self, cluster_name: str, user_info: dict) -> dict:
+        """Prometheus scrape target 상태"""
+        return await self.generic_get(
+            path=f"/v1/clusters/{cluster_name}/observability/targets",
+            user_info=user_info
+        )
+
+    async def get_observability_alerts(self, cluster_name: str, user_info: dict, **query_params) -> dict:
+        """발생 중 alert 목록"""
+        return await self.generic_get(
+            path=f"/v1/clusters/{cluster_name}/observability/alerts",
+            user_info=user_info,
+            **query_params
+        )
+
+    async def get_observability_alert_silences(self, cluster_name: str, user_info: dict) -> dict:
+        """alert silence 목록"""
+        return await self.generic_get(
+            path=f"/v1/clusters/{cluster_name}/observability/alert-silences",
+            user_info=user_info
+        )
+
+    async def create_observability_alert_silence(self, cluster_name: str, data: dict, user_info: dict) -> dict:
+        """alert silence 생성"""
+        return await self.generic_post(
+            path=f"/v1/clusters/{cluster_name}/observability/alert-silences",
+            data=data,
+            user_info=user_info
+        )
+
+    async def delete_observability_alert_silence(self, cluster_name: str, silence_id: str, user_info: dict) -> dict:
+        """alert silence 제거"""
+        return await self.generic_delete(
+            path=f"/v1/clusters/{cluster_name}/observability/alert-silences/{silence_id}",
+            user_info=user_info
+        )
+
+    async def list_alert_rules(self, user_info: dict) -> dict:
+        """alert rule 카탈로그 (전역)"""
+        return await self.generic_get(
+            path="/v1/observability/alert-rules",
+            user_info=user_info
+        )
+
+    async def install_alert_rule(self, cluster_name: str, rule_set_id: str, user_info: dict) -> dict:
+        """alert rule set 설치"""
+        return await self.simple_post(
+            path=f"/v1/clusters/{cluster_name}/observability/alert-rules/{rule_set_id}",
+            user_info=user_info
+        )
+
+    async def install_all_alert_rules(self, cluster_name: str, user_info: dict) -> dict:
+        """alert rule 전체 설치"""
+        return await self.simple_post(
+            path=f"/v1/clusters/{cluster_name}/observability/alert-rules/install-all",
+            user_info=user_info
+        )
+
+    async def delete_alert_rule(self, cluster_name: str, rule_set_id: str, user_info: dict) -> dict:
+        """alert rule set 제거"""
+        return await self.generic_delete(
+            path=f"/v1/clusters/{cluster_name}/observability/alert-rules/{rule_set_id}",
+            user_info=user_info
+        )
+
+    async def get_observability_dashboard(self, cluster_name: str, user_info: dict) -> dict:
+        """클러스터 대시보드 메타"""
+        return await self.generic_get(
+            path=f"/v1/clusters/{cluster_name}/observability/dashboard",
+            user_info=user_info
+        )
+
+    async def list_standard_queries(self, user_info: dict) -> dict:
+        """표준 query 카탈로그 (전역)"""
+        return await self.generic_get(
+            path="/v1/observability/standard-queries",
+            user_info=user_info
+        )
+
+    async def get_observability_aggregate(self, user_info: dict, **query_params) -> dict:
+        """다 클러스터 통합 지표"""
+        return await self.generic_get(
+            path="/v1/observability/aggregate",
+            user_info=user_info,
+            **query_params
+        )
+
+    # === standard metrics (Prometheus 표준 query — 시계열) ===
+
+    async def get_standard_metric(
+            self, cluster_name: str, metric: str, user_info: dict, **query_params
+    ) -> dict:
+        """표준 metric — metric 종류: node-cpu / node-memory / namespace-cpu / namespace-memory / pod-phases / top-cpu"""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/clusters/{cluster_name}/metrics/standard/{metric}",
+            user_info=user_info,
+            **query_params
+        )
+
+    # === workflow (RabbitMQ queues / DLQ) ===
+
+    async def list_workflow_queues(self, user_info: dict, **query_params) -> dict:
+        """워크플로우 큐 상태 조회"""
+        return await self.generic_get(
+            path="/v1/workflow/queues",
+            user_info=user_info,
+            **query_params
+        )
+
+    async def list_dead_letter_messages(self, user_info: dict, **query_params) -> dict:
+        """DLQ 메시지 목록"""
+        return await self.generic_get(
+            path="/v1/workflow/dead-letter-messages",
+            user_info=user_info,
+            **query_params
+        )
+
+    async def operate_dead_letter_message(self, message_id: str, data: dict, user_info: dict) -> dict:
+        """DLQ 메시지 처리 (재시도 / 폐기)"""
+        return await self.generic_post(
+            path=f"/v1/workflow/dead-letter-messages/{message_id}/operations",
+            data=data,
+            user_info=user_info
+        )
+
+    # === admin: cleanup / drift / refresh ===
+
+    async def admin_force_delete_cluster(self, cluster_name: str, user_info: dict) -> dict:
+        """클러스터 강제 삭제 (admin)"""
+        return await self.generic_delete(
+            path=f"/v1/admin/clusters/{cluster_name}/force",
+            user_info=user_info
+        )
+
+    async def admin_delete_orphan_state(self, stack_name: str, user_info: dict) -> dict:
+        """오펀 Pulumi state 삭제 (admin)"""
+        return await self.generic_delete(
+            path=f"/v1/admin/clusters/{stack_name}/orphan-state",
+            user_info=user_info
+        )
+
+    async def admin_get_cluster_drift(self, cluster_name: str, user_info: dict) -> dict:
+        """클러스터 drift 조회"""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/admin/clusters/{cluster_name}/drift",
+            user_info=user_info
+        )
+
+    async def admin_refresh_cluster_state(self, cluster_name: str, user_info: dict) -> dict:
+        """클러스터 state 강제 갱신"""
+        return await self.simple_post(
+            path=f"/v1/admin/clusters/{cluster_name}/refresh-state",
+            user_info=user_info
+        )
+
+    # === fleet upgrade ===
+
+    async def fleet_upgrade_preview(self, user_info: dict, **query_params) -> dict:
+        """fleet upgrade 미리보기"""
+        return await self.generic_get(
+            path="/v1/fleet/upgrade/preview",
+            user_info=user_info,
+            **query_params
+        )
+
+    async def fleet_upgrade_runs(self, user_info: dict, **query_params) -> dict:
+        """fleet upgrade 실행 이력"""
+        return await self.generic_get(
+            path="/v1/fleet/upgrade/runs",
+            user_info=user_info,
+            **query_params
+        )
+
+    async def patch_cluster_upgrade_wave(self, cluster_name: str, data: dict, user_info: dict) -> dict:
+        """클러스터 업그레이드 그룹 변경"""
+        response = await self._make_request(
+            "PATCH", f"/v1/clusters/{cluster_name}/upgrade-wave", user_info=user_info, json=data
+        )
+        if isinstance(response, dict) and "data" in response:
+            return response["data"]
+        return response
+
+    async def trigger_cluster_upgrade(self, cluster_name: str, data: dict, user_info: dict) -> dict:
+        """클러스터 업그레이드 실행"""
+        return await self.generic_post(
+            path=f"/v1/clusters/{cluster_name}/upgrade",
+            data=data,
+            user_info=user_info
+        )
+
+    # === admin agent ===
+
+    async def get_admin_agents(
+            self,
+            user_info: dict,
+            status: Optional[str] = None,
+            clusterName: Optional[str] = None,
+            versionPrefix: Optional[str] = None,
+            lastSeenOlderThanSec: Optional[int] = None,
+            page: int = 0,
+            size: int = 50,
+    ) -> AnyCloudPagedResponse:
+        """Admin fleet — cluster-agent 전체 목록 조회"""
+        query_params: Dict[str, Any] = {"page": page, "size": size}
+        if status:
+            query_params["status"] = status
+        if clusterName:
+            query_params["clusterName"] = clusterName
+        if versionPrefix:
+            query_params["versionPrefix"] = versionPrefix
+        if lastSeenOlderThanSec is not None:
+            query_params["lastSeenOlderThanSec"] = lastSeenOlderThanSec
+
+        response = await self.generic_get(
+            path="/v1/admin/agents",
+            user_info=user_info,
+            **query_params,
+        )
+        data = response.get("data", {})
+        items = data.get("items", []) if isinstance(data, dict) else []
+        total = data.get("total", 0) if isinstance(data, dict) else 0
+        return AnyCloudPagedResponse.create(
+            data=items,
+            total=total,
+            page=page,
+            size=size,
+        )
+
+    async def admin_agent_heartbeat_staleness(self, user_info: dict) -> dict:
+        """에이전트 heartbeat 정체 상태 조회"""
+        return await self.generic_get(
+            path="/v1/admin/agent/heartbeat-staleness",
+            user_info=user_info
+        )
+
+    async def admin_agent_heartbeat_staleness_run(self, data: dict, user_info: dict) -> dict:
+        """heartbeat 정체 처리 실행"""
+        return await self.generic_post(
+            path="/v1/admin/agent/heartbeat-staleness",
+            data=data,
+            user_info=user_info
+        )
+
+    async def admin_agent_policy_preview(self, user_info: dict, **query_params) -> dict:
+        """에이전트 정책 미리보기"""
+        return await self.generic_get(
+            path="/v1/admin/agent/policy/preview",
+            user_info=user_info,
+            **query_params
+        )
+
+    async def admin_agent_policy_audit(self, user_info: dict, **query_params) -> dict:
+        """에이전트 정책 audit"""
+        return await self.generic_get(
+            path="/v1/admin/agent/policy/audit",
+            user_info=user_info,
+            **query_params
+        )
+
+    async def admin_put_cluster_agent_policy(self, cluster_name: str, data: dict, user_info: dict) -> dict:
+        """클러스터 에이전트 정책 적용"""
+        return await self.generic_put(
+            path=f"/v1/admin/clusters/{cluster_name}/agent-policy",
+            data=data,
+            user_info=user_info
+        )
+
+    async def admin_patch_cluster_agent_policy(self, cluster_name: str, data: dict, user_info: dict) -> dict:
+        """클러스터 에이전트 정책 부분 변경"""
+        response = await self._make_request(
+            "PATCH", f"/v1/admin/clusters/{cluster_name}/agent-policy", user_info=user_info, json=data
+        )
+        if isinstance(response, dict) and "data" in response:
+            return response["data"]
+        return response
+
+    async def admin_reinstall_cluster_agent(self, cluster_name: str, data: dict, user_info: dict) -> dict:
+        """클러스터 에이전트 재설치"""
+        return await self.generic_post(
+            path=f"/v1/admin/clusters/{cluster_name}/agent/reinstall",
+            data=data,
+            user_info=user_info
+        )
+
+    # === k8s pod logs (text/plain) + k8s resource 생성 ===
+
+    async def get_pod_logs(
+            self, cluster_name: str, namespace: str, pod_name: str, user_info: dict, **query_params
+    ) -> str:
+        """파드 로그 (text/plain)"""
+        ns_path = namespace if namespace else "-"
+        headers = self._get_headers(user_info)
+        headers['Accept'] = 'text/plain'
+        url = f"{self.base_url}/v1/clusters/{cluster_name}/namespaces/{ns_path}/pods/{pod_name}/logs"
+        try:
+            response = await self.client.get(url, headers=headers, params=query_params)
+        except httpx.TimeoutException:
+            raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, detail="Any Cloud service timeout")
+        except httpx.ConnectError:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Any Cloud service unavailable")
+        if not (200 <= response.status_code < 300):
+            logger.error(f"Any Cloud API error: {response.status_code} - {response.text}")
+            raise HTTPException(response.status_code, detail=f"Any Cloud API request failed: {response.text}")
+        return response.text
+
+    async def create_kubernetes_resource(
+            self, resource_type: str, clusterName: str, namespace: str, data: dict, user_info: dict
+    ) -> dict:
+        """쿠버네티스 리소스 생성 (apply JSON body)"""
+        ns_path = namespace if namespace else "-"
+        return await self.generic_post(
+            path=f"/v1/clusters/{clusterName}/namespaces/{ns_path}/{resource_type}",
+            data=data,
+            user_info=user_info
         )
 
 

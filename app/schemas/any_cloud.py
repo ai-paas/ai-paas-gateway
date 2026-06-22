@@ -12,7 +12,7 @@ class VmClusterSpec(BaseModel):
     model_config = ConfigDict(extra="allow")
     provider: str = Field(
         ...,
-        description='CSP — "aws" | "gcp" | "azure" | "alibaba" | "oci" | "digitalocean" | "openstack" | "proxmox"',
+        description='CSP — "aws" | "gcp" | "azure" | "alibaba" | "oci" | "digitalocean" | "openstack"',
         examples=["aws"]
     )
     region: str = Field(..., description="리전", examples=["ap-northeast-2"])
@@ -87,6 +87,41 @@ ClusterCreateRequest = Annotated[
 ]
 
 
+class VmGatewayCreateRequest(BaseModel):
+    """POST /any-cloud/vms body — VM 인프라 생성 (백엔드 /v1/vms 직접 매핑, source discriminator 없음)."""
+    vmGroupName: str = Field(
+        ...,
+        description="VM 그룹 이름 (RFC 1123 label) — master + worker 인스턴스 집합 식별자. "
+                    "K8s cluster registration 시에도 동일 이름이 cluster.id 로 사용됨 (1:1).",
+        examples=["demo-aws-01"]
+    )
+    provider: str = Field(
+        ...,
+        description='CSP — "aws" | "gcp" | "azure" | "openstack" | "alibaba" | "oci" | "digitalocean"',
+        examples=["aws"]
+    )
+    region: str = Field(..., description="CSP 리전", examples=["ap-northeast-2"])
+    environment: Optional[str] = Field(None, description="환경 태그", examples=["dev"])
+    credentialId: str = Field(..., description="사전 등록된 CSP credential id", examples=["cred-aws-001"])
+    description: Optional[str] = Field(None, description="설명 (선택)")
+    config: Optional[Dict[str, str]] = Field(
+        default_factory=dict,
+        description="Pulumi config — workerCount/instanceType 등",
+        examples=[{"workerCount": "3", "instanceType": "t3.medium"}]
+    )
+    hasGpuNodes: Optional[bool] = Field(False, description="GPU 노드 포함 여부")
+
+
+class VmPatchSpec(BaseModel):
+    """VM scale spec."""
+    workerCount: Optional[int] = Field(None, ge=1, le=50, description="워커 노드 수", examples=[5])
+
+
+class VmGatewayPatchRequest(BaseModel):
+    """PATCH /any-cloud/vms/{name} body — scale 만 지원."""
+    spec: VmPatchSpec = Field(..., description="변경 항목")
+
+
 class HelmRepoCreateRequest(BaseModel):
     """헬름 저장소 등록 요청"""
     model_config = ConfigDict(extra="allow")
@@ -157,22 +192,14 @@ class AnyCloudPagedResponse(BaseModel):
 
 
 class CredentialCreateRequest(BaseModel):
-    """CSP 자격증명 등록 요청
-
-    sourceType=MANUAL 시 credentials 에 키/값 직접 입력, ENV 시 backend 환경변수 사용
-    """
+    """CSP 자격증명 등록 요청 — credentials 는 키/값으로 직접 입력 후 backend 에서 암호화 저장."""
     model_config = ConfigDict(extra="allow")
     provider: str = Field(..., description="CSP 식별자 (대문자)", examples=["AWS"])
     name: str = Field(..., description="자격증명 이름", examples=["aws-dev-credential"])
     description: Optional[str] = Field(None, description="설명", examples=["AWS development account"])
-    sourceType: Optional[str] = Field(
-        None,
-        description='저장 방식 — "MANUAL" | "ENV"',
-        examples=["MANUAL"]
-    )
     credentials: Optional[Dict[str, str]] = Field(
         None,
-        description="MANUAL 시 키/값 (provider 별 키 이름)",
+        description="CSP 별 키/값 (ProvisioningCredentialRules.requiredCredentialKeys 참조)",
         examples=[{"AWS_ACCESS_KEY_ID": "AKIA...", "AWS_SECRET_ACCESS_KEY": "***"}]
     )
 

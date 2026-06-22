@@ -1,8 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Path, Body, Request, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Path, Body, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from typing import Optional, Any, Dict
+import asyncio
 import logging
 
 from app.auth import get_current_user
+from app.config import settings
 from app.schemas.any_cloud import AnyCloudResponse, ClusterCreateRequest, \
     HelmRepoCreateRequest, ClusterUpdateRequest, AnyCloudPagedResponse, \
     CredentialCreateRequest, ClusterValidationRequest, AddonInstallRequest, \
@@ -23,6 +25,85 @@ router_provider = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Providers"])
 router_credential = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Credentials"])
 router_addon = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Addons"])
 router_admin = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Admin"])
+router_obs = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Observability"])
+router_workflow = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Workflow"])
+router_admin_cluster = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Admin Cluster"])
+router_admin_agent = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Admin Agent"])
+router_fleet = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Fleet Upgrade"])
+router_vm = APIRouter(prefix="/any-cloud/vms", tags=["Any Cloud - VM"])
+
+
+import os
+import websockets as ws_lib
+
+
+def _backend_ws_base() -> str:
+    """ANY_CLOUD_TARGET_WS_URL override 가 있으면 사용, 아니면 HTTP base 의 scheme 만 ws/wss 로 치환."""
+    override = os.environ.get("ANY_CLOUD_TARGET_WS_URL", "").strip()
+    if override:
+        return override.rstrip("/")
+    base = (settings.ANY_CLOUD_TARGET_BASE_URL or "").rstrip("/")
+    if base.startswith("https://"):
+        return "wss://" + base[len("https://"):]
+    if base.startswith("http://"):
+        return "ws://" + base[len("http://"):]
+    return base
+
+
+async def _ws_forward_client_to_backend(client: WebSocket, backend) -> None:
+    while True:
+        msg = await client.receive()
+        if msg.get("type") == "websocket.disconnect":
+            return
+        if msg.get("bytes") is not None:
+            await backend.send(msg["bytes"])
+        elif msg.get("text") is not None:
+            await backend.send(msg["text"])
+
+
+async def _ws_forward_backend_to_client(client: WebSocket, backend) -> None:
+    async for msg in backend:
+        if isinstance(msg, bytes):
+            await client.send_bytes(msg)
+        else:
+            await client.send_text(msg)
+
+
+@router_package.websocket("/kubernetes/clusters/{cluster_name}/pods/{namespace}/{pod_name}/exec")
+async def pod_exec_proxy(
+        websocket: WebSocket,
+        cluster_name: str,
+        namespace: str,
+        pod_name: str,
+        container: str = Query("", description="컨테이너 이름 (비우면 첫 컨테이너)"),
+        command: str = Query("/bin/sh", description="실행 명령"),
+        tty: bool = Query(True, description="TTY 할당 여부"),
+        stdin: bool = Query(True, description="stdin 연결 여부"),
+):
+    """Pod exec WebSocket proxy. backend WS handler 로 frame 양방향 전달. 인증은 미적용."""
+    await websocket.accept()
+    qs = "&".join([
+        *([f"container={container}"] if container else []),
+        *([f"command={command}"] if command else []),
+        f"tty={'true' if tty else 'false'}",
+        f"stdin={'true' if stdin else 'false'}",
+    ])
+    backend_url = f"{_backend_ws_base()}/v1/clusters/{cluster_name}/pods/{namespace}/{pod_name}/exec?{qs}"
+
+    try:
+        async with ws_lib.connect(backend_url) as backend_ws:
+            tasks = [
+                asyncio.create_task(_ws_forward_client_to_backend(websocket, backend_ws)),
+                asyncio.create_task(_ws_forward_backend_to_client(websocket, backend_ws)),
+            ]
+            _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+    except (WebSocketDisconnect, ws_lib.ConnectionClosed):
+        pass
+    except Exception as e:
+        logger.warning(f"pod_exec_proxy: {e}")
+    await websocket.close()
 
 def _create_user_info_dict(user: Member) -> Dict[str, str]:
     """Member 객체에서 user_info 딕셔너리 생성"""
@@ -278,15 +359,22 @@ async def create_any_cloud_cluster(
         ),
         current_user: Member = Depends(get_current_user)
 ):
-    """클러스터 생성
+    """클러스터 등록 (외부 K8s cluster 만).
 
-    source=vm 이면 신규 VM 생성, source=registered 면 외부 클러스터 등록.
-    kubeconfig 파일로 등록하려면 POST /system/clusters/importKubeconfig 사용.
+    VM 인프라 신규 생성은 별도 namespace 사용 — POST /any-cloud/vms.
+    응답 BootstrapInfo 의 helm/kubectl install 명령을 사용자가 자신의 kubectl context 에서 실행.
     """
     try:
         user_info = _create_user_info_dict(current_user)
 
         cluster_dict = cluster_data.model_dump(exclude_none=True)
+
+        # VM 생성은 /vms namespace 로 이동했다 — gateway 단에서 빠르게 명시 에러.
+        if cluster_dict.get("source") == "vm":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="VM provisioning moved to POST /any-cloud/vms — use that endpoint instead."
+            )
 
         response = await any_cloud_service.create_cluster(
             data=cluster_dict,
@@ -620,6 +708,31 @@ async def get_prometheus_query(
         )
 
 
+@router_monit.post("/monit/{cluster_name}/multi-query", response_model=AnyCloudResponse)
+async def post_prometheus_multi_query(
+        cluster_name: str = Path(..., description="대상 클러스터 이름", examples=["on-prem-01"]),
+        body: dict = Body(..., description='{"queries": [{"name", "type", "query", "start?", "end?", "step?", "time?"}]}'),
+        current_user: Member = Depends(get_current_user)
+):
+    """Prometheus N PromQL 병렬 fan-out — 모니터링 페이지의 27 요청을 1 요청으로 묶기 위한 batch."""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        queries = body.get("queries", []) if isinstance(body, dict) else []
+        return await any_cloud_service.multi_query_prometheus(
+            cluster_name=cluster_name,
+            queries=queries,
+            user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error multi-query for {cluster_name}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to multi-query Prometheus"
+        )
+
+
 @router_monit.get("/monit/{cluster_name}/query_range")
 async def get_prometheus_query_range(
         cluster_name: str = Path(..., description="대상 클러스터 이름", examples=["on-prem-01"]),
@@ -763,6 +876,107 @@ async def get_kubernetes_resource_name(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve kubernetes cluster resource"
         )
+
+# 클러스터 특정 리소스의 K8s Event 목록
+@router_package.get("/kubernetes/{resource_type}/{resource_name}/events", response_model=AnyCloudResponse)
+async def list_kubernetes_resource_events(
+        resource_type: str = Path(..., description="Resource 타입 (예: pods, deployments)", examples=["pods"]),
+        resource_name: str = Path(..., description="Resource 이름", examples=["my-pod-abc123"]),
+        clusterName: str = Query(..., description="조회할 cluster 이름", examples=["aws-kubernetes-001"]),
+        namespace: str = Query("", description="namespace (cluster-scoped 면 무시)", examples=["default"]),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    지정 리소스에 연관된 K8s Event 목록 (involvedObject.kind/name 으로 fieldSelector 필터링).
+    core/v1 Event 만 지원.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.get_kubernetes_resource_events(
+            resource_type=resource_type,
+            resource_name=resource_name,
+            clusterName=clusterName,
+            namespace=namespace,
+            user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing kubernetes resource events for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list kubernetes resource events"
+        )
+
+
+# 클러스터 특정 리소스 재시작
+@router_package.post("/kubernetes/{resource_type}/{resource_name}/restart", response_model=AnyCloudResponse)
+async def restart_kubernetes_resource(
+        resource_type: str = Path(..., description="Resource 타입 (pods/deployments/statefulsets/daemonsets)", examples=["deployments"]),
+        resource_name: str = Path(..., description="Resource 이름", examples=["my-deployment"]),
+        clusterName: str = Query(..., description="조회할 cluster 이름", examples=["aws-kubernetes-001"]),
+        namespace: str = Query("", description="namespace", examples=["default"]),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    리소스 재시작.
+
+    - pods: 단순 delete (컨트롤러가 재생성).
+    - deployments/statefulsets/daemonsets: spec.template.metadata.annotations 의
+      kubectl.kubernetes.io/restartedAt 갱신으로 rollout restart.
+    - 그 외 kind 는 400.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.restart_kubernetes_resource(
+            resource_type=resource_type,
+            resource_name=resource_name,
+            clusterName=clusterName,
+            namespace=namespace,
+            user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error restarting kubernetes resource for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to restart kubernetes resource"
+        )
+
+
+# 클러스터 특정 리소스 스케일
+@router_package.post("/kubernetes/{resource_type}/{resource_name}/scale", response_model=AnyCloudResponse)
+async def scale_kubernetes_resource(
+        resource_type: str = Path(..., description="Resource 타입 (deployments/replicasets/statefulsets)", examples=["deployments"]),
+        resource_name: str = Path(..., description="Resource 이름", examples=["my-deployment"]),
+        clusterName: str = Query(..., description="조회할 cluster 이름", examples=["aws-kubernetes-001"]),
+        namespace: str = Query("", description="namespace", examples=["default"]),
+        replicas: int = Query(..., ge=0, le=1000, description="목표 replicas (0..1000)", examples=[3]),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    replicas 변경. deployments/replicasets/statefulsets 만 지원. 그 외 kind 는 400.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.scale_kubernetes_resource(
+            resource_type=resource_type,
+            resource_name=resource_name,
+            clusterName=clusterName,
+            namespace=namespace,
+            replicas=replicas,
+            user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error scaling kubernetes resource for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to scale kubernetes resource"
+        )
+
 
 # 클러스터 특정 리소스 삭제 API
 @router_package.delete("/kubernetes/{resource_type}/{resource_name}", response_model=AnyCloudResponse)
@@ -1295,67 +1509,6 @@ async def preview_cluster(
         )
 
 
-# Kubeconfig 업로드로 외부 클러스터 등록 (multipart)
-@router_cluster.post("/clusters/importKubeconfig")
-async def import_kubeconfig(
-        kubeconfigFile: UploadFile = File(
-            ...,
-            description="kubeconfig YAML 파일 (current-context 사용)"
-        ),
-        clusterName: str = Form(
-            ...,
-            description="등록할 클러스터 이름 (RFC 1123 label)",
-            examples=["imported-aws-01"]
-        ),
-        provider: str = Form(
-            ...,
-            description='CSP — "AWS" | "GCP" | "AZURE" | "OPENSTACK" 등',
-            examples=["AWS"]
-        ),
-        clusterType: Optional[str] = Form(
-            None,
-            description='클러스터 타입 — "EKS" | "GKE" | "AKS" | "Self-managed" 등 (기본값 "Imported")',
-            examples=["EKS"]
-        ),
-        description: Optional[str] = Form(None, description="설명"),
-        validate: bool = Form(
-            True,
-            description="등록 직후 연결성 검증 수행 (기본 true)"
-        ),
-        strict: bool = Form(
-            False,
-            description="true 면 검증 실패 시 등록 롤백, false 면 결과만 기록"
-        ),
-        current_user: Member = Depends(get_current_user)
-):
-    """kubeconfig 파일 업로드로 외부 클러스터 등록
-
-    수동 입력 흐름은 POST /system/cluster (source=registered) 사용.
-    """
-    try:
-        user_info = _create_user_info_dict(current_user)
-        content = await kubeconfigFile.read()
-        return await any_cloud_service.import_kubeconfig(
-            file_content=content,
-            file_name=kubeconfigFile.filename or "kubeconfig",
-            cluster_name=clusterName,
-            provider=provider,
-            user_info=user_info,
-            cluster_type=clusterType,
-            description=description,
-            validate=validate,
-            strict=strict
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error importing kubeconfig for {current_user.member_id}: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to import kubeconfig: {str(e)}"
-        )
-
-
 # 지원 CSP 목록
 @router_provider.get("/providers")
 async def list_providers(current_user: Member = Depends(get_current_user)):
@@ -1506,61 +1659,47 @@ async def create_credential(
         body: CredentialCreateRequest = Body(
             ...,
             openapi_examples={
-                "aws-manual": {
-                    "summary": "AWS MANUAL — access key 직접 저장",
+                "aws": {
+                    "summary": "AWS access key",
                     "value": {
                         "provider": "AWS",
                         "name": "aws-dev",
                         "description": "AWS dev account",
-                        "sourceType": "MANUAL",
                         "credentials": {
-                            "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
-                            "AWS_SECRET_ACCESS_KEY": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+                            "AWS_ACCESS_KEY_ID": "AKIA...",
+                            "AWS_SECRET_ACCESS_KEY": "..."
                         }
                     }
                 },
-                "gcp-manual": {
-                    "summary": "GCP MANUAL — service account JSON",
+                "gcp": {
+                    "summary": "GCP service account",
                     "value": {
                         "provider": "GCP",
                         "name": "gcp-dev",
-                        "sourceType": "MANUAL",
                         "credentials": {
-                            "GOOGLE_APPLICATION_CREDENTIALS_JSON": "{\"type\":\"service_account\",...}"
+                            "GOOGLE_CREDENTIALS": "{\"type\":\"service_account\",...}"
                         }
                     }
                 },
-                "openstack-manual": {
-                    "summary": "OpenStack MANUAL — application credential",
+                "openstack": {
+                    "summary": "OpenStack application credential",
                     "value": {
                         "provider": "OPENSTACK",
                         "name": "os-dev",
-                        "sourceType": "MANUAL",
                         "credentials": {
                             "OS_AUTH_URL": "https://keystone.local:5000/v3",
-                            "OS_APPLICATION_CREDENTIAL_ID": "abc...",
+                            "OS_APPLICATION_CREDENTIAL_ID": "...",
                             "OS_APPLICATION_CREDENTIAL_SECRET": "***"
                         }
-                    }
-                },
-                "aws-env": {
-                    "summary": "AWS ENV — 환경변수 사용",
-                    "value": {
-                        "provider": "AWS",
-                        "name": "aws-from-env",
-                        "sourceType": "ENV"
                     }
                 }
             }
         ),
         current_user: Member = Depends(get_current_user)
 ):
-    """CSP 자격증명 등록
+    """CSP 자격증명 등록 — credentials 에 키/값 직접 입력 (백엔드에서 암호화 저장).
 
-    MANUAL: credentials 에 키/값 직접 입력 (백엔드에서 암호화 저장)
-    ENV: 백엔드 환경변수 사용 (credentials 생략)
-
-    생성된 credentialId 는 클러스터 생성/검증 시 spec.credentialId 로 사용.
+    생성된 credentialId 는 VM 생성/검증 시 사용.
     """
     try:
         user_info = _create_user_info_dict(current_user)
@@ -1862,3 +2001,1044 @@ async def list_audit_logs(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to list audit logs"
         )
+
+
+# ============================================================================
+# P1 추가 — kubeconfig / agent-manifest 다운로드, health, state-history, cluster operations,
+#          ssh-key, resource-kinds
+# ============================================================================
+
+from fastapi.responses import PlainTextResponse
+
+
+# kubeconfig 다운로드 (YAML)
+@router_cluster.get(
+    "/cluster/{cluster_name}/kubeconfig",
+    response_class=PlainTextResponse,
+)
+async def download_cluster_kubeconfig(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        current_user: Member = Depends(get_current_user)
+):
+    """클러스터 kubeconfig 다운로드 (YAML)"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        content = await any_cloud_service.get_cluster_kubeconfig(
+            cluster_name=cluster_name,
+            user_info=user_info
+        )
+        return PlainTextResponse(
+            content,
+            media_type="application/yaml",
+            headers={"Content-Disposition": f'attachment; filename="{cluster_name}-kubeconfig.yaml"'}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error downloading kubeconfig for {cluster_name}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to download kubeconfig"
+        )
+
+
+# agent-bootstrap (JSON) — helm/kubectl install command + token + 만료시각.
+# Cluster 상세에서 modal 로 재발급 시 사용. 매 호출 새 token.
+@router_cluster.get("/cluster/{cluster_name}/agent-bootstrap")
+async def get_cluster_agent_bootstrap(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        current_user: Member = Depends(get_current_user),
+):
+    """Cluster-agent bootstrap 정보 (helmInstallCommand / kubectlApplyCommand / token / expiresAt)"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.generic_get_unwrapped(
+            path=f"/v1/clusters/{cluster_name}/agent-bootstrap",
+            user_info=user_info,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching agent bootstrap for {cluster_name}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch agent bootstrap"
+        )
+
+
+# agent-manifest 다운로드 (YAML) — registered cluster 의 agent install
+@router_cluster.get(
+    "/cluster/{cluster_name}/agent-manifest",
+    response_class=PlainTextResponse,
+)
+async def download_cluster_agent_manifest(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        current_user: Member = Depends(get_current_user)
+):
+    """클러스터 agent install manifest 다운로드 (YAML)"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        content = await any_cloud_service.get_cluster_agent_manifest(
+            cluster_name=cluster_name,
+            user_info=user_info
+        )
+        return PlainTextResponse(
+            content,
+            media_type="application/yaml",
+            headers={"Content-Disposition": f'attachment; filename="{cluster_name}-agent-manifest.yaml"'}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error downloading agent manifest for {cluster_name}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to download agent manifest"
+        )
+
+
+# 클러스터 종합 health
+@router_cluster.get("/cluster/{cluster_name}/health")
+async def get_cluster_health(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        current_user: Member = Depends(get_current_user)
+):
+    """클러스터 종합 health 조회"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.get_cluster_health(
+            cluster_name=cluster_name,
+            user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting health for {cluster_name}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get cluster health"
+        )
+
+
+# fleet-wide 에이전트 health 요약
+@router_cluster.get("/agents/health")
+async def get_agents_health(
+        request: Request,
+        current_user: Member = Depends(get_current_user)
+):
+    """모든 클러스터의 에이전트 health 요약"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        query_params = dict(request.query_params)
+        return await any_cloud_service.get_agents_health(user_info=user_info, **query_params)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting agents health: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get agents health"
+        )
+
+
+# 클러스터별 작업 이력
+@router_cluster.get("/cluster/{cluster_name}/operations")
+async def get_cluster_operations(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        request: Request = None,
+        current_user: Member = Depends(get_current_user)
+):
+    """특정 클러스터의 작업 이력 조회"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        query_params = dict(request.query_params) if request else {}
+        return await any_cloud_service.get_cluster_operations(
+            cluster_name=cluster_name,
+            user_info=user_info,
+            **query_params
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting operations for {cluster_name}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get cluster operations"
+        )
+
+
+# 클러스터 state history
+@router_cluster.get("/cluster/{cluster_name}/state-history")
+async def get_cluster_state_history(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        request: Request = None,
+        current_user: Member = Depends(get_current_user)
+):
+    """VM 클러스터 workflow state 변경 이력"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        query_params = dict(request.query_params) if request else {}
+        return await any_cloud_service.get_cluster_state_history(
+            cluster_name=cluster_name,
+            user_info=user_info,
+            **query_params
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting state history for {cluster_name}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get cluster state history"
+        )
+
+
+# SSH 키 발급
+@router_cluster.post("/cluster/{cluster_name}/ssh-key")
+async def post_cluster_ssh_key(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        body: Optional[Dict[str, Any]] = Body(default=None),
+        current_user: Member = Depends(get_current_user)
+):
+    """VM 클러스터 SSH 키 발급/조회"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.post_cluster_ssh_key(
+            cluster_name=cluster_name,
+            user_info=user_info,
+            data=body or {}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error issuing ssh-key for {cluster_name}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to issue ssh key"
+        )
+
+
+# 클러스터 지원 kind 목록
+@router_cluster.get("/cluster/{cluster_name}/resource-kinds")
+async def get_cluster_resource_kinds(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        current_user: Member = Depends(get_current_user)
+):
+    """클러스터가 지원하는 K8s kind 목록 (CRD 포함)"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.get_cluster_resource_kinds(
+            cluster_name=cluster_name,
+            user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting resource-kinds for {cluster_name}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get resource kinds"
+        )
+
+
+# ============================================================================
+# P2 추가 — observability (alerts / silences / rules / dashboard) + standard metrics
+# ============================================================================
+
+@router_obs.get("/clusters/{cluster_name}/observability/targets")
+async def get_observability_targets(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        current_user: Member = Depends(get_current_user)
+):
+    """Prometheus scrape target 상태"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.get_observability_targets(cluster_name, user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting targets for {cluster_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get observability targets")
+
+
+@router_obs.get("/clusters/{cluster_name}/observability/alerts")
+async def get_observability_alerts(
+        request: Request,
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        current_user: Member = Depends(get_current_user)
+):
+    """발생 중 alert 목록"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        query_params = dict(request.query_params)
+        return await any_cloud_service.get_observability_alerts(
+            cluster_name=cluster_name, user_info=user_info, **query_params
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting alerts for {cluster_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get alerts")
+
+
+@router_obs.get("/clusters/{cluster_name}/observability/alert-silences")
+async def list_alert_silences(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        current_user: Member = Depends(get_current_user)
+):
+    """alert silence 목록"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.get_observability_alert_silences(cluster_name, user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing silences for {cluster_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list alert silences")
+
+
+@router_obs.post("/clusters/{cluster_name}/observability/alert-silences")
+async def create_alert_silence(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        body: Dict[str, Any] = Body(...),
+        current_user: Member = Depends(get_current_user)
+):
+    """alert silence 생성"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.create_observability_alert_silence(
+            cluster_name=cluster_name, data=body, user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating silence for {cluster_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create alert silence")
+
+
+@router_obs.delete("/clusters/{cluster_name}/observability/alert-silences/{silence_id}")
+async def delete_alert_silence(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        silence_id: str = Path(..., description="silence id"),
+        current_user: Member = Depends(get_current_user)
+):
+    """alert silence 제거"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.delete_observability_alert_silence(
+            cluster_name=cluster_name, silence_id=silence_id, user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting silence {silence_id}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete alert silence")
+
+
+@router_obs.get("/observability/alert-rules")
+async def list_alert_rules(current_user: Member = Depends(get_current_user)):
+    """alert rule 카탈로그 (전역)"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.list_alert_rules(user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing alert rules: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list alert rules")
+
+
+@router_obs.post("/clusters/{cluster_name}/observability/alert-rules/{rule_set_id}")
+async def install_alert_rule(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        rule_set_id: str = Path(..., description="rule set id"),
+        current_user: Member = Depends(get_current_user)
+):
+    """alert rule set 설치"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.install_alert_rule(
+            cluster_name=cluster_name, rule_set_id=rule_set_id, user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error installing rule {rule_set_id}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to install alert rule")
+
+
+@router_obs.post("/clusters/{cluster_name}/observability/alert-rules/install-all")
+async def install_all_alert_rules(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        current_user: Member = Depends(get_current_user)
+):
+    """alert rule 전체 설치"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.install_all_alert_rules(cluster_name, user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error installing all rules: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to install all alert rules")
+
+
+@router_obs.delete("/clusters/{cluster_name}/observability/alert-rules/{rule_set_id}")
+async def delete_alert_rule(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        rule_set_id: str = Path(..., description="rule set id"),
+        current_user: Member = Depends(get_current_user)
+):
+    """alert rule set 제거"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.delete_alert_rule(
+            cluster_name=cluster_name, rule_set_id=rule_set_id, user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting rule {rule_set_id}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete alert rule")
+
+
+@router_obs.get("/clusters/{cluster_name}/observability/dashboard")
+async def get_observability_dashboard(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        current_user: Member = Depends(get_current_user)
+):
+    """클러스터 대시보드 메타"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.get_observability_dashboard(cluster_name, user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting dashboard for {cluster_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get dashboard")
+
+
+@router_obs.get("/observability/standard-queries")
+async def list_standard_queries(current_user: Member = Depends(get_current_user)):
+    """표준 query 카탈로그 (전역)"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.list_standard_queries(user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing standard queries: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list standard queries")
+
+
+@router_obs.get("/observability/aggregate")
+async def get_observability_aggregate(
+        request: Request,
+        current_user: Member = Depends(get_current_user)
+):
+    """다 클러스터 통합 지표"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        query_params = dict(request.query_params)
+        return await any_cloud_service.get_observability_aggregate(user_info=user_info, **query_params)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting aggregate: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get aggregate")
+
+
+# 표준 metric — node-cpu / node-memory / namespace-cpu / namespace-memory / pod-phases / top-cpu
+@router_monit.get("/monit/{cluster_name}/standard/{metric}")
+async def get_standard_metric(
+        request: Request,
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        metric: str = Path(..., description="표준 metric 종류"),
+        current_user: Member = Depends(get_current_user)
+):
+    """Prometheus 표준 metric — 사전 정의된 query 묶음"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        query_params = dict(request.query_params)
+        return await any_cloud_service.get_standard_metric(
+            cluster_name=cluster_name, metric=metric, user_info=user_info, **query_params
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting standard metric {metric} for {cluster_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get standard metric")
+
+
+# ============================================================================
+# P3 추가 — workflow / admin (cluster cleanup / drift / agent) / fleet upgrade / pod logs
+# ============================================================================
+
+@router_workflow.get("/workflow/queues")
+async def list_workflow_queues(
+        request: Request,
+        current_user: Member = Depends(get_current_user)
+):
+    """워크플로우 큐 상태"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        query_params = dict(request.query_params)
+        return await any_cloud_service.list_workflow_queues(user_info=user_info, **query_params)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing workflow queues: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list workflow queues")
+
+
+@router_workflow.get("/workflow/dead-letter-messages")
+async def list_dead_letter_messages(
+        request: Request,
+        current_user: Member = Depends(get_current_user)
+):
+    """DLQ 메시지 목록"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        query_params = dict(request.query_params)
+        return await any_cloud_service.list_dead_letter_messages(user_info=user_info, **query_params)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing DLQ messages: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list DLQ messages")
+
+
+@router_workflow.post("/workflow/dead-letter-messages/{message_id}/operations")
+async def operate_dead_letter_message(
+        message_id: str = Path(..., description="DLQ 메시지 id"),
+        body: Dict[str, Any] = Body(...),
+        current_user: Member = Depends(get_current_user)
+):
+    """DLQ 메시지 처리 (재시도 / 폐기)"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.operate_dead_letter_message(
+            message_id=message_id, data=body, user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error operating DLQ {message_id}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to operate DLQ message")
+
+
+@router_admin_cluster.delete("/admin/clusters/{cluster_name}/force")
+async def admin_force_delete_cluster(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        current_user: Member = Depends(get_current_user)
+):
+    """클러스터 강제 삭제 (admin)"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.admin_force_delete_cluster(cluster_name, user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error force-deleting {cluster_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to force delete cluster")
+
+
+@router_admin_cluster.delete("/admin/clusters/{stack_name}/orphan-state")
+async def admin_delete_orphan_state(
+        stack_name: str = Path(..., description="Pulumi stack 이름"),
+        current_user: Member = Depends(get_current_user)
+):
+    """오펀 Pulumi state 삭제 (admin)"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.admin_delete_orphan_state(stack_name, user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting orphan state {stack_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete orphan state")
+
+
+@router_admin_cluster.get("/admin/clusters/{cluster_name}/drift")
+async def admin_get_cluster_drift(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        current_user: Member = Depends(get_current_user)
+):
+    """클러스터 drift 조회"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.admin_get_cluster_drift(cluster_name, user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting drift for {cluster_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get drift")
+
+
+@router_admin_cluster.post("/admin/clusters/{cluster_name}/refresh-state")
+async def admin_refresh_cluster_state(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        current_user: Member = Depends(get_current_user)
+):
+    """클러스터 state 강제 갱신"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.admin_refresh_cluster_state(cluster_name, user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error refreshing state for {cluster_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to refresh state")
+
+
+@router_fleet.get("/fleet/upgrade/preview")
+async def fleet_upgrade_preview(
+        request: Request,
+        current_user: Member = Depends(get_current_user)
+):
+    """fleet upgrade 미리보기"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        query_params = dict(request.query_params)
+        return await any_cloud_service.fleet_upgrade_preview(user_info=user_info, **query_params)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting fleet upgrade preview: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get fleet upgrade preview")
+
+
+@router_fleet.get("/fleet/upgrade/runs")
+async def fleet_upgrade_runs(
+        request: Request,
+        current_user: Member = Depends(get_current_user)
+):
+    """fleet upgrade 실행 이력"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        query_params = dict(request.query_params)
+        return await any_cloud_service.fleet_upgrade_runs(user_info=user_info, **query_params)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting fleet upgrade runs: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get fleet upgrade runs")
+
+
+@router_fleet.put("/clusters/{cluster_name}/upgrade-wave")
+async def patch_cluster_upgrade_wave(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        body: Dict[str, Any] = Body(...),
+        current_user: Member = Depends(get_current_user)
+):
+    """클러스터 upgrade wave 변경"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.patch_cluster_upgrade_wave(cluster_name, body, user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error patching upgrade-wave for {cluster_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to patch upgrade wave")
+
+
+@router_fleet.post("/clusters/{cluster_name}/upgrade")
+async def trigger_cluster_upgrade(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        body: Dict[str, Any] = Body(...),
+        current_user: Member = Depends(get_current_user)
+):
+    """클러스터 upgrade 실행"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.trigger_cluster_upgrade(cluster_name, body, user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error triggering upgrade for {cluster_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to trigger upgrade")
+
+
+@router_admin_agent.get("/admin/agents", response_model=AnyCloudPagedResponse)
+async def list_admin_agents(
+        status: Optional[str] = Query(None, description="콤마 multi (REGISTERING/REGISTERED/ACTIVE/DEGRADED/FAILED/REVOKED)"),
+        clusterName: Optional[str] = Query(None, description="콤마 multi"),
+        versionPrefix: Optional[str] = Query(None),
+        lastSeenOlderThanSec: Optional[int] = Query(None, ge=0),
+        page: int = Query(0, ge=0),
+        size: int = Query(50, ge=1, le=200),
+        current_user: Member = Depends(get_current_user),
+):
+    """Admin fleet — cluster-agent 전체 목록"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.get_admin_agents(
+            user_info=user_info,
+            status=status,
+            clusterName=clusterName,
+            versionPrefix=versionPrefix,
+            lastSeenOlderThanSec=lastSeenOlderThanSec,
+            page=page,
+            size=size,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing admin agents for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to list admin agents",
+        )
+
+
+@router_admin_agent.get("/admin/agent/heartbeat-staleness")
+async def admin_agent_heartbeat_staleness(
+        current_user: Member = Depends(get_current_user)
+):
+    """에이전트 heartbeat 정체 상태"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.admin_agent_heartbeat_staleness(user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting agent heartbeat staleness: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get heartbeat staleness")
+
+
+@router_admin_agent.post("/admin/agent/heartbeat-staleness")
+async def admin_agent_heartbeat_staleness_run(
+        body: Dict[str, Any] = Body(default={}),
+        current_user: Member = Depends(get_current_user)
+):
+    """heartbeat 정체 처리 실행"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.admin_agent_heartbeat_staleness_run(body or {}, user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error running heartbeat staleness: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to run heartbeat staleness")
+
+
+@router_admin_agent.get("/admin/agent/policy/preview")
+async def admin_agent_policy_preview(
+        request: Request,
+        current_user: Member = Depends(get_current_user)
+):
+    """에이전트 정책 미리보기"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        query_params = dict(request.query_params)
+        return await any_cloud_service.admin_agent_policy_preview(user_info=user_info, **query_params)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error previewing agent policy: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to preview agent policy")
+
+
+@router_admin_agent.get("/admin/agent/policy/audit")
+async def admin_agent_policy_audit(
+        request: Request,
+        current_user: Member = Depends(get_current_user)
+):
+    """에이전트 정책 audit"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        query_params = dict(request.query_params)
+        return await any_cloud_service.admin_agent_policy_audit(user_info=user_info, **query_params)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error auditing agent policy: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to audit agent policy")
+
+
+@router_admin_agent.put("/admin/clusters/{cluster_name}/agent-policy")
+async def admin_put_cluster_agent_policy(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        body: Dict[str, Any] = Body(...),
+        current_user: Member = Depends(get_current_user)
+):
+    """클러스터 에이전트 정책 적용"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.admin_put_cluster_agent_policy(cluster_name, body, user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error applying agent policy for {cluster_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to apply agent policy")
+
+
+@router_admin_agent.patch("/admin/clusters/{cluster_name}/agent-policy")
+async def admin_patch_cluster_agent_policy(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        body: Dict[str, Any] = Body(...),
+        current_user: Member = Depends(get_current_user)
+):
+    """클러스터 에이전트 정책 부분 변경"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.admin_patch_cluster_agent_policy(cluster_name, body, user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error patching agent policy for {cluster_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to patch agent policy")
+
+
+@router_admin_agent.post("/admin/clusters/{cluster_name}/agent/reinstall")
+async def admin_reinstall_cluster_agent(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        body: Dict[str, Any] = Body(default={}),
+        current_user: Member = Depends(get_current_user)
+):
+    """클러스터 에이전트 재설치"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.admin_reinstall_cluster_agent(cluster_name, body or {}, user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error reinstalling agent for {cluster_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to reinstall agent")
+
+
+@router_package.get(
+    "/kubernetes/pods/{pod_name}/logs",
+    response_class=PlainTextResponse,
+)
+async def get_pod_logs(
+        request: Request,
+        pod_name: str = Path(..., description="파드 이름"),
+        clusterName: str = Query(..., description="클러스터 이름"),
+        namespace: str = Query("", description="네임스페이스"),
+        current_user: Member = Depends(get_current_user)
+):
+    """파드 로그 (text/plain — SSE 아닌 단일 조회)"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        # 컨트롤 query 제외
+        excluded = {"clusterName", "namespace"}
+        extra_params = {
+            k: v for k, v in dict(request.query_params).items() if k not in excluded
+        }
+        text = await any_cloud_service.get_pod_logs(
+            cluster_name=clusterName,
+            namespace=namespace,
+            pod_name=pod_name,
+            user_info=user_info,
+            **extra_params,
+        )
+        return PlainTextResponse(text, media_type="text/plain")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting pod logs {pod_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get pod logs")
+
+
+@router_package.post("/kubernetes/{resource_type}", response_model=AnyCloudResponse)
+async def create_kubernetes_resource(
+        resource_type: str = Path(..., description="리소스 타입"),
+        body: Dict[str, Any] = Body(...),
+        clusterName: str = Query(..., description="클러스터 이름"),
+        namespace: str = Query("", description="네임스페이스"),
+        current_user: Member = Depends(get_current_user)
+):
+    """쿠버네티스 리소스 생성 (JSON 또는 YAML 객체 형태)"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.create_kubernetes_resource(
+            resource_type=resource_type,
+            clusterName=clusterName,
+            namespace=namespace,
+            data=body,
+            user_info=user_info,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating k8s resource {resource_type}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create kubernetes resource")
+
+
+# ==================== VM resource (/v1/vms backend) ====================
+
+from app.schemas.any_cloud import VmGatewayCreateRequest, VmGatewayPatchRequest
+
+
+@router_vm.get("", response_model=AnyCloudPagedResponse)
+async def list_vms(
+        page: int = Query(1, ge=1),
+        size: int = Query(20, ge=1, le=100),
+        provider: Optional[str] = Query(None, description="CSP filter"),
+        environment: Optional[str] = Query(None, description="환경 filter"),
+        status_filter: Optional[str] = Query(None, alias="status", description="VM 상태 filter"),
+        search: Optional[str] = Query(None, description="검색어"),
+        current_user: Member = Depends(get_current_user),
+):
+    """VM 인프라 목록"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.list_vms(
+            user_info=user_info,
+            provider=provider,
+            environment=environment,
+            status_filter=status_filter,
+            page=page,
+            size=size,
+            search=search,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing vms: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list VMs")
+
+
+@router_vm.get("/{vm_name}")
+async def get_vm(
+        vm_name: str = Path(..., description="VM cluster 이름"),
+        current_user: Member = Depends(get_current_user),
+):
+    """VM 상세 (workflow / stack outputs / 진행 상태)"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.get_vm_detail(vm_name=vm_name, user_info=user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting vm {vm_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get VM")
+
+
+@router_vm.post("")
+async def create_vm(
+        request: VmGatewayCreateRequest = Body(...),
+        current_user: Member = Depends(get_current_user),
+):
+    """VM 생성 (Pulumi provision) — 202 + Operation"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.create_vm(
+            request_data=request.model_dump(exclude_none=True),
+            user_info=user_info,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating vm: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create VM")
+
+
+@router_vm.patch("/{vm_name}")
+async def patch_vm(
+        vm_name: str = Path(...),
+        request: VmGatewayPatchRequest = Body(...),
+        current_user: Member = Depends(get_current_user),
+):
+    """VM scale (workerCount 변경) — 202 + Operation"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.patch_vm(
+            vm_name=vm_name,
+            request_data=request.model_dump(exclude_none=True),
+            user_info=user_info,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error patching vm {vm_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to patch VM")
+
+
+@router_vm.delete("/{vm_name}")
+async def delete_vm(
+        vm_name: str = Path(...),
+        current_user: Member = Depends(get_current_user),
+):
+    """VM 삭제 (Pulumi destroy) — 202 + Operation"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.delete_vm(vm_name=vm_name, user_info=user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting vm {vm_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete VM")
+
+
+@router_vm.get("/{vm_name}/operations")
+async def list_vm_operations(
+        vm_name: str = Path(...),
+        page_size: int = Query(50, alias="pageSize", ge=1, le=500),
+        current_user: Member = Depends(get_current_user),
+):
+    """이 VM 의 operation 이력"""
+    user_info = _create_user_info_dict(current_user)
+    return await any_cloud_service.list_vm_operations(vm_name=vm_name, user_info=user_info, page_size=page_size)
+
+
+@router_vm.post("/{vm_name}/operations")
+async def create_vm_operation(
+        vm_name: str = Path(...),
+        op_type: str = Body(..., embed=True, alias="type"),
+        current_user: Member = Depends(get_current_user),
+):
+    """VM 액션 (retryWorkflow / retryRegistration / refreshStatus)"""
+    user_info = _create_user_info_dict(current_user)
+    return await any_cloud_service.create_vm_operation(vm_name=vm_name, op_type=op_type, user_info=user_info)
+
+
+@router_vm.get("/{vm_name}/state-history")
+async def get_vm_state_history(
+        vm_name: str = Path(...),
+        page_size: int = Query(50, alias="pageSize", ge=1, le=500),
+        current_user: Member = Depends(get_current_user),
+):
+    """VM workflow state transition 이력"""
+    user_info = _create_user_info_dict(current_user)
+    return await any_cloud_service.get_vm_state_history(vm_name=vm_name, user_info=user_info, page_size=page_size)
+
+
+@router_vm.get("/{vm_name}/nodes")
+async def get_vm_nodes(
+        vm_name: str = Path(...),
+        current_user: Member = Depends(get_current_user),
+):
+    """VM 노드 목록 (role / publicIp / privateIp + SSH 사용자)"""
+    user_info = _create_user_info_dict(current_user)
+    return await any_cloud_service.get_vm_nodes(vm_name=vm_name, user_info=user_info)
+
+
+@router_vm.post("/{vm_name}/ssh-key")
+async def issue_vm_ssh_key(
+        vm_name: str = Path(...),
+        format: str = Query("json", regex="^(json|pem)$"),
+        current_user: Member = Depends(get_current_user),
+):
+    """VM SSH private key 발급. format=pem 이면 raw PEM."""
+    user_info = _create_user_info_dict(current_user)
+    return await any_cloud_service.issue_vm_ssh_key(vm_name=vm_name, user_info=user_info, fmt=format)
+
+
+@router_vm.get("/{vm_name}/kubeconfig")
+async def download_vm_kubeconfig(
+        vm_name: str = Path(...),
+        serviceAccount: Optional[str] = Query(None),
+        namespace: Optional[str] = Query(None),
+        ttlSeconds: Optional[int] = Query(None),
+        current_user: Member = Depends(get_current_user),
+):
+    """VM 의 kubeconfig YAML 다운로드 (단기 SA token)"""
+    user_info = _create_user_info_dict(current_user)
+    params = {k: v for k, v in {
+        "serviceAccount": serviceAccount,
+        "namespace": namespace,
+        "ttlSeconds": ttlSeconds,
+    }.items() if v is not None}
+    return await any_cloud_service.download_vm_kubeconfig(vm_name=vm_name, user_info=user_info, **params)
