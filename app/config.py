@@ -78,6 +78,9 @@ class Settings:
     PROXY_TARGET_PATH_PREFIX: str = os.getenv("PROXY_TARGET_PATH_PREFIX", "/api/v1")
     PROXY_TIMEOUT: float = float(os.getenv("PROXY_TIMEOUT", "30.0"))
     PROXY_CONNECT_TIMEOUT: float = float(os.getenv("PROXY_CONNECT_TIMEOUT", "5.0"))
+    PROXY_STRUCTURE_PREDICTION_TIMEOUT: float = float(
+        os.getenv("PROXY_STRUCTURE_PREDICTION_TIMEOUT", "300.0")
+    )
     PROXY_MAX_CONNECTIONS: int = int(os.getenv("PROXY_MAX_CONNECTIONS", "100"))
     PROXY_MAX_KEEPALIVE_CONNECTIONS: int = int(os.getenv("PROXY_MAX_KEEPALIVE_CONNECTIONS", "20"))
     EXTERNAL_API_USERNAME: str = os.getenv("EXTERNAL_API_USERNAME", "")

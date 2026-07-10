@@ -61,7 +61,14 @@ async def create_model(
         format_id: int = Form(..., description="모델 포맷 ID"),
         description: Optional[str] = Form(None, description="모델 설명"),
         parent_model_id: Optional[int] = Form(None, description="부모 모델 ID (내부 시스템 전용)"),
-        task: Optional[str] = Form(None, max_length=500, description="모델 태스크"),
+        task: Optional[str] = Form(
+            None,
+            max_length=500,
+            description=(
+                "모델 태스크: embedding | text-generation | object-detection | fill-mask | "
+                "protein-classification | protein-structure-prediction | vqa"
+            ),
+        ),
         parameter: Optional[str] = Form(None, max_length=100, description="모델 파라미터"),
         sample_code: Optional[str] = Form(None, description="샘플 코드"),
         model_registry_schema: Optional[str] = Form(None, description="모델 레지스트리 스키마 (내부 시스템 전용)"),
@@ -96,8 +103,8 @@ async def create_model(
     - **parent_model_id** (int, optional): 부모 모델 ID
         - 내부 시스템 전용 — 프론트엔드에서 전달 금지
     - **task** (str, optional): 모델 태스크
-        - 허용 값: "embedding", "text-generation", "object-detection" 중 하나
-        - 다른 값 입력 시 422 에러 발생
+        - 지원 값: `embedding`, `text-generation`, `object-detection`, `fill-mask`,
+          `protein-classification`, `protein-structure-prediction`, `vqa`
     - **parameter** (str, optional): 모델 파라미터 (최대 100자)
     - **sample_code** (str, optional): 샘플 코드
     - **file** (UploadFile, optional): 커스텀 모델 파일 (binary)
@@ -118,7 +125,7 @@ async def create_model(
     - **format_info** (ModelFormatReadSchema): 모델 포맷 정보
         - id / name / description
     - **parent_model_id** (int, optional): 부모 모델 ID
-    - **task** (str, optional): 모델 태스크
+    - **task** (str, optional): 모델 태스크 (지원 값 7종은 Request Body 설명 참고)
     - **parameter** (str, optional): 모델 파라미터
     - **sample_code** (str, optional): 샘플 코드
     - **registry** (ModelRegistryReadSchema): 모델 레지스트리 정보
@@ -1101,7 +1108,9 @@ async def get_model(
         - id / name / description
     - **parent_model_id** (int, optional): 부모 모델 ID
         - 파인튜닝된 모델인 경우 원본 모델 ID
-    - **task** (str, optional): 모델 태스크
+    - **task** (str, optional): 모델 태스크 (`embedding`, `text-generation`,
+      `object-detection`, `fill-mask`, `protein-classification`,
+      `protein-structure-prediction`, `vqa`)
     - **parameter** (str, optional): 모델 파라미터
     - **sample_code** (str, optional): 샘플 코드
     - **registry** (ModelRegistryReadSchema): 모델 레지스트리 정보
@@ -1113,9 +1122,11 @@ async def get_model(
         - created_at / updated_at (datetime)
     - **parent_model** (ModelReadParentSchema, optional): 부모 모델 정보
         - id / name / description
+        - visibility (str, optional): 부모 모델 분류 (`CATALOG` 또는 `CUSTOM`) — 게이트웨이 보강
         - parent_model (ModelReadParentSchema, optional): 상위 부모 모델 (재귀적)
     - **child_models** (List[ModelReadChildSchema], optional): 자식 모델 목록
         - id / name / description
+        - visibility (str, optional): 자식 모델 분류 (`CATALOG` 또는 `CUSTOM`) — 게이트웨이 보강
         - child_models (List[ModelReadChildSchema], optional): 하위 자식 모델 (재귀적)
     - **created_at** (datetime): 모델 생성 시각
     - **updated_at** (datetime): 모델 수정 시각
@@ -1123,7 +1134,9 @@ async def get_model(
     ## Notes
     - 모델의 모든 관련 정보(제공자, 타입, 포맷, 레지스트리)를 포함하여 반환
     - 부모/자식 모델 관계는 재귀적으로 조회
-    - 게이트웨이는 접근 권한 체크 후 MLOps 응답을 그대로 전달
+    - 게이트웨이는 접근 권한 체크 후 MLOps 응답을 전달하되, parent_model/child_models의
+      각 노드에 `visibility`를 보강한다. MLOps 원본 노드에는 visibility가 없어, 게이트웨이가
+      관련 모델을 best-effort 단건 조회해 주입한다 (조회 실패 시 해당 노드는 `null`)
 
     ## Errors
     - **401**: 인증되지 않은 사용자
@@ -1149,8 +1162,8 @@ async def get_model(
                 detail=f"Model {model_id} not found or access denied"
             )
 
-        # 2. Surro API에서 모델 상세 정보 조회
-        model = await model_service.get_model(
+        # 2. Surro API에서 모델 상세 정보 조회 (parent/child 노드에 visibility 보강)
+        model = await model_service.get_model_with_relation_visibility(
             model_id=model_id,
             user_info={
                 'member_id': current_user.member_id,

@@ -75,7 +75,14 @@ class ModelCreateRequest(BaseModel):
     type_id: int = Field(..., description="모델 타입 ID")
     format_id: int = Field(..., description="모델 포맷 ID")
     parent_model_id: Optional[int] = Field(None, description="부모 모델 ID (내부 시스템 전용)")
-    task: Optional[str] = Field(None, max_length=500, description="모델 태스크")
+    task: Optional[str] = Field(
+        None,
+        max_length=500,
+        description=(
+            "모델 태스크: embedding | text-generation | object-detection | fill-mask | "
+            "protein-classification | protein-structure-prediction | vqa"
+        ),
+    )
     parameter: Optional[str] = Field(None, max_length=100, description="모델 파라미터")
     sample_code: Optional[str] = Field(None, description="샘플 코드")
     model_registry_schema: Optional[str] = Field(None, description="모델 레지스트리 스키마 (내부 시스템 전용)")
@@ -106,7 +113,13 @@ class ModelResponse(BaseModel):
     type_info: Optional[TypeInfo] = None
     format_info: Optional[FormatInfo] = None
     parent_model_id: Optional[int] = None
-    task: Optional[str] = None  # 새 필드 추가
+    task: Optional[str] = Field(
+        None,
+        description=(
+            "모델 태스크: embedding | text-generation | object-detection | fill-mask | "
+            "protein-classification | protein-structure-prediction | vqa"
+        ),
+    )
     parameter: Optional[str] = None  # 새 필드 추가
     sample_code: Optional[str] = None  # 새 필드 추가
     registry: Optional[ModelRegistry] = None

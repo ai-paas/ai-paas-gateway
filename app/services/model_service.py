@@ -15,6 +15,36 @@ from app.schemas.model import (
 logger = logging.getLogger(__name__)
 
 
+def _collect_relation_model_ids(model: ModelResponse) -> set:
+    """parent_model 체인 + child_models 트리의 모든 모델 id 수집."""
+    ids: set = set()
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        nid = node.get("id")
+        if isinstance(nid, int):
+            ids.add(nid)
+        for child in (node.get("child_models") or []):
+            walk(child)
+        walk(node.get("parent_model"))
+
+    walk(model.parent_model)
+    for child in (model.child_models or []):
+        walk(child)
+    return ids
+
+
+def _inject_relation_visibility(node: Any, vis_map: Dict[int, Optional[str]]) -> None:
+    """node 및 하위 트리의 각 dict에 visibility 키 주입 (조회 실패분은 None)."""
+    if not isinstance(node, dict):
+        return
+    node["visibility"] = vis_map.get(node.get("id"))
+    for child in (node.get("child_models") or []):
+        _inject_relation_visibility(child, vis_map)
+    _inject_relation_visibility(node.get("parent_model"), vis_map)
+
+
 class ModelService:
     """모델 관련 외부 API 서비스 (인증 포함) - 사용자별 필터링 지원"""
 
@@ -350,6 +380,42 @@ class ModelService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal error: {str(e)}"
             )
+
+    async def get_model_with_relation_visibility(
+            self,
+            model_id: int,
+            user_info: Optional[Dict[str, str]] = None
+    ) -> Optional[ModelResponse]:
+        """모델 상세 + parent_model/child_models 각 노드에 visibility 보강.
+
+        upstream(MLOps) 상세 응답의 parent_model/child_models 노드는
+        id/name/description만 포함하고 visibility가 없다. 게이트웨이는 관련 모델을
+        best-effort 단건 조회해 각 노드에 visibility를 주입한다 (조회 실패분은 None).
+        """
+        model = await self.get_model(model_id, user_info)
+        if not model:
+            return None
+
+        related_ids = list(_collect_relation_model_ids(model))
+        if not related_ids:
+            return model
+
+        results = await asyncio.gather(
+            *[self.get_model(mid, user_info) for mid in related_ids],
+            return_exceptions=True,
+        )
+        vis_map: Dict[int, Optional[str]] = {}
+        for mid, res in zip(related_ids, results):
+            if isinstance(res, ModelResponse):
+                vis_map[mid] = res.visibility
+            elif isinstance(res, Exception):
+                logger.warning(f"Failed to fetch visibility for related model {mid}: {res}")
+
+        _inject_relation_visibility(model.parent_model, vis_map)
+        for child in (model.child_models or []):
+            _inject_relation_visibility(child, vis_map)
+
+        return model
 
     async def create_model(
             self,
