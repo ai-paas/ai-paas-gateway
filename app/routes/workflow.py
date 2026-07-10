@@ -21,6 +21,12 @@ from app.schemas.workflow import (
     WorkflowTestResponse,
     WorkflowValidateRequest,
     WorkflowValidateResponse,
+    WorkflowProteinClassificationTestRequest,
+    WorkflowProteinClassificationTestResponse,
+    WorkflowFillMaskTestRequest,
+    WorkflowFillMaskTestResponse,
+    WorkflowProteinStructurePredictionTestRequest,
+    WorkflowProteinStructurePredictionTestResponse,
 )
 from app.services.audit_service import Action, ResourceType, emit_from_request
 from app.services.workflow_service import UNSET as _SERVICE_UNSET, workflow_service
@@ -118,13 +124,24 @@ async def validate_workflow_definition(
     ## Response (WorkflowValidateResponse)
     - **valid** (bool): 모든 규칙 통과 여부
     - **checks** (List[ValidationCheckResponse]): 규칙별 결과
-        - rule (str): 규칙 식별자
+        - rule (str): 규칙 식별자 (아래 "주요 검증 규칙" 참고)
         - passed (bool): 통과 여부
         - message (str, optional): 실패 시 상세 메시지
+
+    ## 주요 검증 규칙 (rule 키 — MLOps가 최종 판정, 아래는 일부)
+    모델 타입은 **OD(object-detection) / LLM(text-generation·vqa) / BFM(생체분자 서열)** 로 분류됩니다.
+    BFM은 esm2/esmc/esmfold2/molformer/rnafm 등 생체분자 서열 모델군(구 `pLM`)입니다.
+    - **no_incompatible_model_type_mix**: 한 워크플로우에 OD/LLM/BFM 중 2종 이상 모델 공존 불가 (상호 배타)
+    - **no_bfm_with_kb**: BFM 워크플로우에는 KNOWLEDGE_BASE 컴포넌트 포함 불가
+    - **no_bfm_with_prompt**: BFM 모델 컴포넌트에 `prompt_id` 사용 불가
+    - **bfm_single_task**: 한 워크플로우의 BFM 모델은 모두 같은 `task` 여야 함 (fill-mask + protein-structure-prediction 등 혼합 불가)
+    - **structure_prediction_backbone_registered**: 구조예측(ESMFold2, `task=protein-structure-prediction`)
+      포함 시 백본 모델 `biohub/ESMC-6B`가 먼저 등록돼 있어야 함
 
     ## Notes
     - 저장하지 않음 — 순수 사전 검증용
     - 본 검사를 통과해도 실제 생성(`POST /workflows`) 시 추가 정합성 검사가 있을 수 있음
+    - 위 규칙은 생성/수정 요청에서도 동일하게 실행되며, 위반 시 생성/수정은 `400`으로 거부됨
 
     ## Errors
     - **401**: 인증되지 않은 사용자
@@ -213,9 +230,12 @@ async def create_workflow(
     - 생성 직후 상태는 DRAFT
     - is_template은 항상 false로 설정됨 (템플릿 생성은 `/workflows/templates` API 사용)
     - 상세 정보(components, connections, creator 등)는 `GET /workflows/{workflow_id}`로 조회 가능
+    - 워크플로우 정의는 `POST /workflows/validate`와 동일한 규칙으로 검증됨. 특히 모델 타입
+      **OD/LLM/BFM은 상호 배타**이고, BFM 워크플로우는 KNOWLEDGE_BASE·prompt_id 불가·단일 task만
+      허용됩니다 (규칙 상세는 `/workflows/validate` 참고). 위반 시 400.
 
     ## Errors
-    - **400**: 잘못된 요청 (정의 오류 등)
+    - **400**: 잘못된 요청 (정의 오류, 검증 규칙 위반 — 모델 타입 혼합/BFM 제약 등)
     - **401**: 인증되지 않은 사용자
     - **403**: service_id가 다른 사용자 소유의 service일 때 (admin 제외)
     - **404**: service_id가 게이트웨이 DB에 존재하지 않을 때
@@ -1251,8 +1271,11 @@ async def update_workflow(
     - 템플릿 수정은 `/workflows/templates/{template_id}` API 사용
     - 배포된 워크플로우의 구조 변경 시 재배포 필요
     - 게이트웨이 권한 검사: admin 이거나 해당 워크플로우의 `created_by` 사용자만 수정 가능
+    - workflow_definition 변경 시 `POST /workflows/validate`와 동일한 규칙으로 검증됨
+      (OD/LLM/BFM 상호 배타, BFM은 KNOWLEDGE_BASE·prompt_id 불가·단일 task). 위반 시 400.
 
     ## Errors
+    - **400**: 정의 검증 규칙 위반 (모델 타입 혼합 / BFM 제약 등)
     - **401**: 인증되지 않은 사용자
     - **403**: 권한 없음 (워크플로우가 본인 소유가 아니며 admin도 아님 / service_id가 다른 사용자 service일 때)
     - **404**: 워크플로우 또는 service_id를 찾을 수 없음
@@ -1835,6 +1858,7 @@ async def test_rag_workflow(
         - 상세 정보는 results 배열의 각 컴포넌트 결과에서 확인 가능
 
     ## Notes
+    - admin 또는 게이트웨이 DB의 `created_by` 사용자만 실행 가능
     - 워크플로우는 배포되어 있어야 함 (ACTIVE 상태)
     - 워크플로우에 최소 하나의 LLM MODEL 컴포넌트 또는 KNOWLEDGE_BASE 컴포넌트가 있어야 함
     - Knowledge Base 컴포넌트는 선택 사항 (있으면 검색 후 결과를 LLM에 전달)
@@ -1850,6 +1874,7 @@ async def test_rag_workflow(
     ## Errors
     - **400**: 잘못된 요청 (RAG 워크플로우가 아님, 필수 파라미터 누락 등)
     - **401**: 인증되지 않은 사용자
+    - **403**: 워크플로우 실행 권한 없음
     - **404**: 워크플로우를 찾을 수 없음
     - **503**: 모델 서비스가 준비되지 않음
     - **500**: 서버 내부 오류
@@ -1861,6 +1886,8 @@ async def test_rag_workflow(
     )
     if not existing_workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
 
     # 외부 API 테스트
     user_info = {
@@ -1933,6 +1960,7 @@ async def test_ml_workflow(
         - 상세 정보 (predictions, image_info 등)는 results 배열의 각 컴포넌트 결과에서 확인 가능
 
     ## Notes
+    - admin 또는 게이트웨이 DB의 `created_by` 사용자만 실행 가능
     - 워크플로우는 배포되어 있어야 함 (ACTIVE 상태)
     - 워크플로우에 최소 하나의 ODM MODEL 컴포넌트가 있어야 함
     - KNOWLEDGE_BASE 컴포넌트는 포함될 수 없음 (ML 워크플로우는 ODM만 지원)
@@ -1945,6 +1973,7 @@ async def test_ml_workflow(
     ## Errors
     - **400**: 잘못된 요청 (ML 워크플로우가 아님, 필수 파라미터 누락 등)
     - **401**: 인증되지 않은 사용자
+    - **403**: 워크플로우 실행 권한 없음
     - **404**: 워크플로우를 찾을 수 없음
     - **503**: 모델 서비스가 준비되지 않음
     - **500**: 서버 내부 오류
@@ -1956,6 +1985,8 @@ async def test_ml_workflow(
     )
     if not existing_workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
 
     # 외부 API 테스트
     user_info = {
@@ -1971,6 +2002,232 @@ async def test_ml_workflow(
     )
 
     return test_response
+
+
+# ===== BFM(task 기반) 추론 테스트 (api-spec 2026-07-01) =====
+# model_type=BFM(생체분자 서열 모델군) 전용. task ↔ 엔드포인트 1:1.
+# 프론트는 GET /workflows/{id}/models (또는 배포 응답)의 model_type=="BFM" 을 가드한 뒤,
+# task 로 아래 세 엔드포인트를 선택한다:
+#   protein-classification → /test/protein-classification
+#   fill-mask              → /test/fill-mask
+#   protein-structure-prediction → /test/protein-structure-prediction
+
+@router.post(
+    "/{surro_workflow_id}/test/protein-classification",
+    response_model=WorkflowProteinClassificationTestResponse,
+)
+async def test_protein_classification_workflow(
+        surro_workflow_id: str,
+        request_body: WorkflowProteinClassificationTestRequest,
+        db: Session = Depends(get_db),
+        current_user=Depends(get_current_user)
+):
+    """
+    단백질 분류(protein-classification) 워크플로우 테스트 — **BFM 전용**
+
+    파인튜닝된 ESM2 자식 모델(`model_type=BFM`, `task=protein-classification`)에
+    `{epitope, cdr3b}`를 보내 **TCR-Epitope 결합 이진 분류**를 추론합니다.
+    (구 `/test/plm`을 대체 — MLOps 리네임에 맞춘 신규 게이트웨이 엔드포인트)
+
+    ## Path Parameters
+    - **workflow_id** (str): 테스트할 워크플로우 UUID (ACTIVE 상태여야 함)
+
+    ## Request Body (application/json)
+    - **epitope** (str, required): 단백질 epitope 서열
+    - **cdr3b** (str, required): TCR β-chain CDR3 서열
+
+    ## Response (WorkflowProteinClassificationTestResponse)
+    - **workflow_id** (str): 워크플로우 UUID
+    - **execution_order** (List[str]): 실행된 컴포넌트 ID 순서
+    - **results** (List): 각 BFM 컴포넌트 실행 결과
+        - **component_id / component_name / component_type** (str)
+        - **model_type** (str): `BFM`
+        - **task** (str): `protein-classification`
+        - **result** (object): 추론 결과
+            - **predictions** (List[object]): 각 원소 `label`(0|1), `score`(float),
+              `probabilities`(객체 `{"0": p0, "1": p1}`)
+            - **input_info** (object, optional): `{epitope, cdr3b}`
+        - **error** (str, optional): 컴포넌트 오류 시 메시지
+
+    ## Notes
+    - admin 또는 게이트웨이 DB의 `created_by` 사용자만 실행 가능
+    - 게이트웨이는 워크플로우가 DB에 매핑돼 있는지 확인 후 MLOps로 전달 (프론트는 `model_type=="BFM"` 가드 필요)
+    - 워크플로우는 `ACTIVE` 상태여야 하며, `task=protein-classification` 모델만 포함해야 함
+    - base(파인튜닝 안 된) 모델(`parent_model_id IS NULL`)은 어댑터가 없어 서빙 불가 → 400
+
+    ## Errors
+    - **400**: ACTIVE 아님 / 해당 task 아닌 MODEL 포함 / 해당 task 모델 없음 / base 모델 지정 / 필수 입력 누락
+    - **401**: 인증되지 않은 사용자
+    - **403**: 워크플로우 실행 권한 없음
+    - **404**: 워크플로우를 찾을 수 없음
+    - **500 / 502 / 504**: 서버 내부 오류 / upstream 오류(KServe 미준비 포함) / upstream 타임아웃
+    """
+    existing_workflow = workflow_crud.get_workflow_by_surro_id(
+        db=db, surro_workflow_id=surro_workflow_id
+    )
+    if not existing_workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name
+    }
+
+    return await workflow_service.test_protein_classification_workflow(
+        surro_workflow_id,
+        request_body.epitope,
+        request_body.cdr3b,
+        user_info,
+    )
+
+
+@router.post(
+    "/{surro_workflow_id}/test/fill-mask",
+    response_model=WorkflowFillMaskTestResponse,
+)
+async def test_fill_mask_workflow(
+        surro_workflow_id: str,
+        request_body: WorkflowFillMaskTestRequest,
+        db: Session = Depends(get_db),
+        current_user=Depends(get_current_user)
+):
+    """
+    마스크 채우기(fill-mask) 워크플로우 테스트 — **BFM 전용**
+
+    `task=fill-mask` 모델(base ESM2/ESMC · MolFormer · RNA-FM)에 **마스크 토큰을 포함한
+    단일 서열**을 보내 마스크 위치별 top-k 토큰을 예측합니다.
+
+    ## Path Parameters
+    - **workflow_id** (str): 테스트할 워크플로우 UUID (ACTIVE 상태여야 함)
+
+    ## Request Body (application/json)
+    - **sequence** (str, required): 마스크 토큰(`<mask>`)을 1개 이상 포함한 서열.
+      modality별 알파벳(단백질 아미노산 / SMILES / RNA 염기). 서버가 모델별 mask 토큰으로 처리.
+    - **top_k** (int, optional): 마스크 위치별 반환 후보 수 (기본 `5`, 권장 1–50).
+      범위 검증은 upstream이 수행하며, 범위를 벗어나면 400.
+
+    ## Response (WorkflowFillMaskTestResponse)
+    - **workflow_id** (str): 워크플로우 UUID
+    - **execution_order** (List[str]): 실행된 컴포넌트 ID 순서
+    - **results** (List): 각 BFM 컴포넌트 실행 결과
+        - **model_type** (str): `BFM` / **task** (str): `fill-mask`
+        - **result** (object):
+            - **predictions** (List[object]): 마스크 위치별 결과
+                - **position** (int): 서열 내 마스크 위치(토큰 인덱스)
+                - **predictions** (List[object]): 후보 목록(top-k) — `token`(str), `score`(float)
+            - **input_info** (object, optional): `{sequence, top_k}`
+        - **error** (str, optional): 컴포넌트 오류 시 메시지
+
+    ## Notes
+    - admin 또는 게이트웨이 DB의 `created_by` 사용자만 실행 가능
+    - 워크플로우는 `ACTIVE` 상태여야 하며, `task=fill-mask` 모델만 포함해야 함
+    - `sequence`에 `<mask>` 토큰이 최소 1개 있어야 함 (없으면 400)
+
+    ## Errors
+    - **400**: ACTIVE 아님 / 해당 task 아닌 MODEL 포함 / 해당 task 모델 없음 / sequence 누락·마스크 없음·top_k 범위 밖
+    - **401**: 인증되지 않은 사용자
+    - **403**: 워크플로우 실행 권한 없음
+    - **404**: 워크플로우를 찾을 수 없음
+    - **500 / 502 / 504**: 서버 내부 오류 / upstream 오류(KServe 미준비 포함) / upstream 타임아웃
+    """
+    existing_workflow = workflow_crud.get_workflow_by_surro_id(
+        db=db, surro_workflow_id=surro_workflow_id
+    )
+    if not existing_workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name
+    }
+
+    return await workflow_service.test_fill_mask_workflow(
+        surro_workflow_id,
+        request_body.sequence,
+        request_body.top_k,
+        user_info,
+    )
+
+
+@router.post(
+    "/{surro_workflow_id}/test/protein-structure-prediction",
+    response_model=WorkflowProteinStructurePredictionTestResponse,
+)
+async def test_protein_structure_prediction_workflow(
+        surro_workflow_id: str,
+        request_body: WorkflowProteinStructurePredictionTestRequest,
+        db: Session = Depends(get_db),
+        current_user=Depends(get_current_user)
+):
+    """
+    단백질 구조 예측(protein-structure-prediction) 워크플로우 테스트 — **BFM 전용**
+
+    `task=protein-structure-prediction` 모델(ESMFold2)에 서열을 보내
+    **3D 구조(전원자 좌표 + confidence)**를 예측합니다.
+
+    ## Path Parameters
+    - **workflow_id** (str): 테스트할 워크플로우 UUID (ACTIVE 상태여야 함)
+
+    ## Request Body (application/json)
+    - **sequence** (str, required): 단일 단백질 아미노산 서열
+    - **num_loops** (int, optional): ESMFold2 recycling loop 수 (기본 `3`)
+    - **num_sampling_steps** (int, optional): 확산 샘플링 스텝 수 (기본 `50`)
+
+    ## Response (WorkflowProteinStructurePredictionTestResponse)
+    - **workflow_id** (str): 워크플로우 UUID
+    - **execution_order** (List[str]): 실행된 컴포넌트 ID 순서
+    - **results** (List): 각 BFM 컴포넌트 실행 결과
+        - **model_type** (str): `BFM` / **task** (str): `protein-structure-prediction`
+        - **result** (object):
+            - **predictions** (List[object]): 예측 구조 목록(현재 서열 1건당 1개)
+                - **pdb** (str): 전원자 3D 구조(PDB 문자열, `ATOM` 레코드 포함)
+                - **plddt_mean** (float, nullable): 평균 pLDDT (0–1 스케일)
+                - **ptm** (float, nullable): pTM
+                - **iptm** (float, nullable): ipTM (단일 사슬은 `0`)
+            - **input_info** (object, optional): `{sequence, num_loops, num_sampling_steps}`
+        - **error** (str, optional): 컴포넌트 오류 시 메시지
+
+    ## Notes
+    - admin 또는 게이트웨이 DB의 `created_by` 사용자만 실행 가능
+    - 워크플로우는 `ACTIVE` 상태여야 하며, `task=protein-structure-prediction` 모델만 포함해야 함
+    - 구조예측(ESMFold2)은 백본 `biohub/ESMC-6B`가 먼저 등록돼 있어야 배포 가능 (배포/검증 단계 규칙)
+    - 추론이 오래 걸릴 수 있음 — 게이트웨이 타임아웃 초과 시 504 반환
+
+    ## Errors
+    - **400**: ACTIVE 아님 / 해당 task 아닌 MODEL 포함 / 해당 task 모델 없음 / sequence 누락·빈 값
+    - **401**: 인증되지 않은 사용자
+    - **403**: 워크플로우 실행 권한 없음
+    - **404**: 워크플로우를 찾을 수 없음
+    - **500 / 502 / 504**: 서버 내부 오류 / upstream 오류(KServe 미준비 포함) / upstream 타임아웃
+    """
+    existing_workflow = workflow_crud.get_workflow_by_surro_id(
+        db=db, surro_workflow_id=surro_workflow_id
+    )
+    if not existing_workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name
+    }
+
+    return await workflow_service.test_protein_structure_prediction_workflow(
+        surro_workflow_id,
+        request_body.sequence,
+        request_body.num_loops,
+        request_body.num_sampling_steps,
+        user_info,
+    )
+
 
 # ===== Workflow 모델 추론 (Removed in MLOps v2) =====
 

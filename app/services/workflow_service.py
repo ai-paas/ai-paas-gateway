@@ -17,9 +17,22 @@ from app.schemas.workflow import (
     WorkflowExecuteResponse,
     WorkflowTestResponse,
     WorkflowValidateResponse,
+    WorkflowProteinClassificationTestResponse,
+    WorkflowFillMaskTestResponse,
+    WorkflowProteinStructurePredictionTestResponse,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _raise_bfm_upstream_error(response: httpx.Response, operation: str) -> None:
+    """BFM 추론 upstream 오류를 gateway HTTP 계약으로 변환."""
+    if response.status_code >= 500:
+        logger.error(
+            f"upstream error: {operation}, status={response.status_code}"
+        )
+        raise HTTPException(status_code=502, detail="upstream service error")
+    raise HTTPException(status_code=response.status_code, detail=response.text)
 
 
 class WorkflowService:
@@ -447,6 +460,105 @@ class WorkflowService:
         except Exception as e:
             logger.error(f"Error testing ML workflow: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
+
+    # ===== BFM(task 기반) 추론 (api-spec 2026-07-01) =====
+    # upstream은 세 엔드포인트 모두 application/json 을 받는다 (rag=form, ml=multipart 과 다름).
+    # 추론이 느릴 수 있어(특히 ESMFold2) TimeoutException 은 504 로 매핑한다.
+
+    async def test_protein_classification_workflow(
+            self, workflow_id: str, epitope: str, cdr3b: str,
+            user_info: Optional[Dict] = None
+    ) -> WorkflowProteinClassificationTestResponse:
+        """BFM protein-classification 워크플로우 테스트 (TCR-Epitope 결합 이진 분류)."""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}/test/protein-classification"
+            payload = {"epitope": epitope, "cdr3b": cdr3b}
+
+            response = await self._make_authenticated_request(
+                "POST", url, user_info=user_info, json=payload
+            )
+
+            if response.status_code == 200:
+                return WorkflowProteinClassificationTestResponse(**response.json())
+            _raise_bfm_upstream_error(response, "protein-classification")
+        except HTTPException:
+            raise
+        except httpx.TimeoutException:
+            logger.warning(f"upstream timeout: protein-classification, workflow_id={workflow_id}")
+            raise HTTPException(status_code=504, detail="upstream service timeout")
+        except httpx.RequestError as e:
+            logger.error(f"upstream request failed: protein-classification, {e}")
+            raise HTTPException(status_code=502, detail="upstream connection error")
+        except Exception:
+            logger.exception(f"Error testing protein-classification workflow: {workflow_id}")
+            raise HTTPException(status_code=500, detail="internal server error")
+
+    async def test_fill_mask_workflow(
+            self, workflow_id: str, sequence: str, top_k: int = 5,
+            user_info: Optional[Dict] = None
+    ) -> WorkflowFillMaskTestResponse:
+        """BFM fill-mask 워크플로우 테스트 (마스크 위치별 top-k 토큰 예측)."""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}/test/fill-mask"
+            payload = {"sequence": sequence, "top_k": top_k}
+
+            response = await self._make_authenticated_request(
+                "POST", url, user_info=user_info, json=payload
+            )
+
+            if response.status_code == 200:
+                return WorkflowFillMaskTestResponse(**response.json())
+            _raise_bfm_upstream_error(response, "fill-mask")
+        except HTTPException:
+            raise
+        except httpx.TimeoutException:
+            logger.warning(f"upstream timeout: fill-mask, workflow_id={workflow_id}")
+            raise HTTPException(status_code=504, detail="upstream service timeout")
+        except httpx.RequestError as e:
+            logger.error(f"upstream request failed: fill-mask, {e}")
+            raise HTTPException(status_code=502, detail="upstream connection error")
+        except Exception:
+            logger.exception(f"Error testing fill-mask workflow: {workflow_id}")
+            raise HTTPException(status_code=500, detail="internal server error")
+
+    async def test_protein_structure_prediction_workflow(
+            self, workflow_id: str, sequence: str, num_loops: int = 3,
+            num_sampling_steps: int = 50, user_info: Optional[Dict] = None
+    ) -> WorkflowProteinStructurePredictionTestResponse:
+        """BFM protein-structure-prediction 워크플로우 테스트 (ESMFold2 3D 구조 예측)."""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}/test/protein-structure-prediction"
+            payload = {
+                "sequence": sequence,
+                "num_loops": num_loops,
+                "num_sampling_steps": num_sampling_steps,
+            }
+
+            response = await self._make_authenticated_request(
+                "POST",
+                url,
+                user_info=user_info,
+                json=payload,
+                timeout=httpx.Timeout(
+                    timeout=settings.PROXY_STRUCTURE_PREDICTION_TIMEOUT,
+                    connect=settings.PROXY_CONNECT_TIMEOUT,
+                ),
+            )
+
+            if response.status_code == 200:
+                return WorkflowProteinStructurePredictionTestResponse(**response.json())
+            _raise_bfm_upstream_error(response, "protein-structure-prediction")
+        except HTTPException:
+            raise
+        except httpx.TimeoutException:
+            logger.warning(f"upstream timeout: protein-structure-prediction, workflow_id={workflow_id}")
+            raise HTTPException(status_code=504, detail="upstream service timeout")
+        except httpx.RequestError as e:
+            logger.error(f"upstream request failed: protein-structure-prediction, {e}")
+            raise HTTPException(status_code=502, detail="upstream connection error")
+        except Exception:
+            logger.exception(f"Error testing protein-structure-prediction workflow: {workflow_id}")
+            raise HTTPException(status_code=500, detail="internal server error")
 
     # ===== Template 관련 =====
 
