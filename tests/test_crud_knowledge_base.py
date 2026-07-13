@@ -28,16 +28,19 @@ class TestKnowledgeBaseCRUD:
         assert kb.is_active is True
         assert kb.deleted_at is None
 
-    def test_create_duplicate_updates_stale_mapping(self, db, sample_member):
-        """중복 매핑 시 stale 데이터 업데이트 (MLOps 재설치 대응)"""
+    def test_create_duplicate_separates_reused_external_id(self, db, sample_member):
+        """MLOps 재설치로 ID가 재사용되면 기존 소유권 이력을 분리한다."""
         kb1 = self._create_kb(db, sample_member.member_id, surro_id=20, name="old-kb")
         kb2 = self._create_kb(db, sample_member.member_id, surro_id=20, name="new-kb")
 
-        assert kb2.id == kb1.id  # 같은 레코드
-        assert kb2.name == "new-kb"  # 이름 업데이트됨
+        assert kb2.id != kb1.id
+        assert kb1.deleted_at is not None
+        assert kb1.is_active is False
+        assert kb1.deleted_by == "system:upstream-id-reused"
+        assert kb2.name == "new-kb"
 
-    def test_create_duplicate_restores_soft_deleted(self, db, sample_member):
-        """소프트 삭제된 매핑에 재생성 시 복원"""
+    def test_create_duplicate_keeps_soft_deleted_history(self, db, sample_member):
+        """소프트 삭제된 숫자 ID가 재등장해도 기존 행을 복원하지 않는다."""
         kb = self._create_kb(db, sample_member.member_id, surro_id=25, name="deleted-kb")
         knowledge_base_crud.delete_knowledge_base_by_surro_id(
             db, 25, deleted_by=sample_member.member_id
@@ -47,11 +50,13 @@ class TestKnowledgeBaseCRUD:
         active = knowledge_base_crud.get_active_knowledge_base_by_surro_id(db, 25)
         assert active is None
 
-        # 재생성 → 복원
-        restored = self._create_kb(db, sample_member.member_id, surro_id=25, name="restored-kb")
-        assert restored.is_active is True
-        assert restored.deleted_at is None
-        assert restored.name == "restored-kb"
+        replacement = self._create_kb(
+            db, sample_member.member_id, surro_id=25, name="restored-kb"
+        )
+        assert replacement.id != kb.id
+        assert replacement.is_active is True
+        assert replacement.deleted_at is None
+        assert kb.deleted_at is not None
 
     def test_get_knowledge_base_by_surro_id(self, db, sample_member):
         """surro_id로 조회"""

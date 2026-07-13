@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Path, File, UploadFile, Form, Request
 from sqlalchemy.orm import Session
@@ -258,7 +258,10 @@ async def get_all_models(
         model_type_id: Optional[int] = Query(None, description="모델 타입 ID로 필터링"),
         model_provider_id: Optional[int] = Query(None, description="모델 제공자 ID로 필터링"),
         model_format_id: Optional[int] = Query(None, description="모델 포맷 ID로 필터링"),
-        filter_type: Optional[str] = Query(None, description="필터 타입: 'custom'(내 모델만), 'catalog'(카탈로그만), None(전체)"),
+        filter_type: Optional[Literal["custom", "catalog"]] = Query(
+            None,
+            description="필터 타입: 'custom'(내 모델만), 'catalog'(카탈로그만), None(전체)",
+        ),
         sort: Optional[str] = Query(
             None,
             description=(
@@ -361,14 +364,16 @@ async def get_all_models(
         if filter_type != 'catalog':  # catalog만 조회하는 경우가 아니면 user 모델도 조회
             user_models = db.query(Model).filter(
                 Model.created_by == current_user.member_id,
-                Model.deleted_at.is_(None)
+                Model.deleted_at.is_(None),
+                Model.is_active.is_(True),
             ).all()
             user_model_ids = [model.surro_model_id for model in user_models if model.surro_model_id]
 
         if filter_type != 'custom':  # custom만 조회하는 경우가 아니면 catalog 모델도 조회
             catalog_models = db.query(Model).filter(
                 Model.is_catalog == True,
-                Model.deleted_at.is_(None)
+                Model.deleted_at.is_(None),
+                Model.is_active.is_(True),
             ).all()
             catalog_model_ids = [model.surro_model_id for model in catalog_models if model.surro_model_id]
 
@@ -489,7 +494,8 @@ async def get_user_models(
         # 1. 사용자 커스텀 모델 ID 목록 조회 (전체)
         user_models = db.query(Model).filter(
             Model.created_by == current_user.member_id,
-            Model.deleted_at.is_(None)
+            Model.deleted_at.is_(None),
+            Model.is_active.is_(True),
         ).all()
 
         user_model_ids = [model.surro_model_id for model in user_models if model.surro_model_id]
@@ -608,7 +614,8 @@ async def get_catalog_models(
         # 1. 카탈로그 모델 ID 목록 조회 (전체)
         catalog_models = db.query(Model).filter(
             Model.is_catalog == True,
-            Model.deleted_at.is_(None)
+            Model.deleted_at.is_(None),
+            Model.is_active.is_(True),
         ).all()
 
         catalog_model_ids = [model.surro_model_id for model in catalog_models if model.surro_model_id]

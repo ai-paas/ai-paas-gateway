@@ -25,6 +25,29 @@ from app.schemas.workflow import (
 logger = logging.getLogger(__name__)
 
 
+def _upstream_error_detail(response: httpx.Response) -> Any:
+    try:
+        error_body = response.json()
+    except ValueError:
+        error_body = None
+    detail = error_body.get("detail") if isinstance(error_body, dict) else None
+    return detail if isinstance(detail, (str, list, dict)) else "upstream request rejected"
+
+
+def _raise_workflow_proxy_error(
+        response: httpx.Response,
+        operation: str,
+) -> NoReturn:
+    """일반 workflow proxy 오류를 상태·구조를 보존해 변환한다."""
+    if 400 <= response.status_code < 500:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=_upstream_error_detail(response),
+        )
+    logger.error("upstream error: %s, status=%s", operation, response.status_code)
+    raise HTTPException(status_code=502, detail="upstream service error")
+
+
 def _raise_workflow_upstream_error(
         response: httpx.Response,
         operation: str,
@@ -40,14 +63,10 @@ def _raise_workflow_upstream_error(
         )
         raise HTTPException(status_code=502, detail="upstream service error")
 
-    try:
-        error_body = response.json()
-    except ValueError:
-        error_body = None
-    detail = error_body.get("detail") if isinstance(error_body, dict) else None
-    if not isinstance(detail, (str, list, dict)):
-        detail = "upstream request rejected"
-    raise HTTPException(status_code=response.status_code, detail=detail)
+    raise HTTPException(
+        status_code=response.status_code,
+        detail=_upstream_error_detail(response),
+    )
 
 
 class WorkflowService:
@@ -93,9 +112,17 @@ class WorkflowService:
                     self.token_expires_at = datetime.now() + timedelta(seconds=expires_in - 300)
                     return access_token
             raise HTTPException(status_code=response.status_code, detail="Authentication failed")
-        except Exception as e:
-            logger.error(f"Authentication error: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Authentication failed: {str(e)}")
+        except HTTPException:
+            raise
+        except httpx.TimeoutException as e:
+            logger.warning("MLOps authentication timeout: %r", e)
+            raise HTTPException(status_code=504, detail="upstream service timeout")
+        except httpx.RequestError as e:
+            logger.error("MLOps authentication request failed: %s", e)
+            raise HTTPException(status_code=502, detail="upstream connection error")
+        except Exception:
+            logger.exception("Unexpected MLOps authentication error")
+            raise HTTPException(status_code=500, detail="internal server error")
 
     async def _get_valid_token(self) -> str:
         async with self._auth_lock:
@@ -117,24 +144,33 @@ class WorkflowService:
 
     async def _make_authenticated_request(self, method: str, url: str, user_info: Optional[Dict] = None,
                                           **kwargs) -> httpx.Response:
-        token = await self._get_valid_token()
-        headers = self._get_headers(user_info)
-        headers['Authorization'] = f"Bearer {token}"
-
-        if 'headers' in kwargs:
-            kwargs['headers'].update(headers)
-        else:
-            kwargs['headers'] = headers
-
-        response = await getattr(self.client, method.lower())(url, **kwargs)
-
-        if response.status_code == 401:
-            self.access_token = None
+        try:
             token = await self._get_valid_token()
-            kwargs['headers']['Authorization'] = f"Bearer {token}"
+            headers = self._get_headers(user_info)
+            headers['Authorization'] = f"Bearer {token}"
+
+            if 'headers' in kwargs:
+                kwargs['headers'].update(headers)
+            else:
+                kwargs['headers'] = headers
+
             response = await getattr(self.client, method.lower())(url, **kwargs)
 
-        return response
+            if response.status_code == 401:
+                self.access_token = None
+                token = await self._get_valid_token()
+                kwargs['headers']['Authorization'] = f"Bearer {token}"
+                response = await getattr(self.client, method.lower())(url, **kwargs)
+
+            return response
+        except HTTPException:
+            raise
+        except httpx.TimeoutException as e:
+            logger.warning("MLOps workflow request timeout: %s %s: %r", method, url, e)
+            raise HTTPException(status_code=504, detail="upstream service timeout")
+        except httpx.RequestError as e:
+            logger.error("MLOps workflow request failed: %s %s: %s", method, url, e)
+            raise HTTPException(status_code=502, detail="upstream connection error")
 
     # ===== Workflow Definition 검증 (MLOps v2) =====
 
@@ -157,7 +193,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return WorkflowValidateResponse(**response.json())
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -194,7 +230,7 @@ class WorkflowService:
             if response.status_code in [200, 201]:
                 workflow_data = response.json()
                 return ExternalWorkflowDetailResponse(**workflow_data)
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -229,7 +265,7 @@ class WorkflowService:
                 elif isinstance(data, list):
                     return [ExternalWorkflowBriefResponse(**item) for item in data]
                 return []
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -248,7 +284,7 @@ class WorkflowService:
                 return ExternalWorkflowDetailResponse(**response.json())
             elif response.status_code == 404:
                 return None
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -290,7 +326,7 @@ class WorkflowService:
                 return ExternalWorkflowDetailResponse(**response.json())
             elif response.status_code == 404:
                 return None
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -309,7 +345,7 @@ class WorkflowService:
                 return response.json()
             elif response.status_code == 404:
                 raise HTTPException(status_code=404, detail="Workflow not found")
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -329,7 +365,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -352,7 +388,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return WorkflowExecuteResponse(**response.json())
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -371,7 +407,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -388,7 +424,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -407,7 +443,7 @@ class WorkflowService:
 
             if response.status_code in [200, 202]:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -424,7 +460,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -602,7 +638,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -621,7 +657,7 @@ class WorkflowService:
                 return response.json()
             elif response.status_code == 404:
                 return None
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -647,7 +683,7 @@ class WorkflowService:
 
             if response.status_code in [200, 201]:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -678,7 +714,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -697,7 +733,7 @@ class WorkflowService:
                 return True
             elif response.status_code == 404:
                 return False
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -724,7 +760,7 @@ class WorkflowService:
 
             if response.status_code in [200, 201]:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -743,7 +779,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -776,7 +812,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:

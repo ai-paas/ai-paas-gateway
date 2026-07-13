@@ -422,32 +422,16 @@ async def get_workflows(
     # 템플릿 제외 (이 엔드포인트는 템플릿 반환 안 함)
     external_list = [w for w in external_list if not w.is_template]
     external_by_id = {w.id: w for w in external_list}
-
-    # 2) DB ↔ MLOps 동기화
+    # 2) DB ↔ MLOps 매핑 확인
     db_all, _ = workflow_crud.get_workflows(
         db=db, skip=None, limit=None,
         search=None, creator_id=None, status=None
     )
     db_surro_ids = {w.surro_workflow_id for w in db_all}
 
-    # 2a) MLOps에서 사라진 워크플로우는 DB에서 제거
-    #     (Workflow 모델에 soft-delete 컬럼이 없어 현재는 hard-delete)
-    for dbw in db_all:
-        if dbw.surro_workflow_id not in external_by_id:
-            try:
-                workflow_crud.delete_workflow_by_surro_id(
-                    db=db, surro_workflow_id=dbw.surro_workflow_id
-                )
-                logger.info(
-                    f"Removed orphan workflow from DB (not in MLOps): "
-                    f"surro_id={dbw.surro_workflow_id}"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to remove orphan workflow {dbw.surro_workflow_id}: {e}"
-                )
-
-    # 2b) MLOps에만 있는 워크플로우는 admin 소유로 등록
+    # 조회 API에서는 stale 매핑을 변경하지 않는다. 원격 장애나 service/status
+    # 필터가 빈 결과를 만들 수 있으므로 soft-delete는 별도 reconciliation에서만 수행한다.
+    # MLOps에만 있는 워크플로우는 admin 소유로 등록한다.
     missing = [w for w in external_list if w.id not in db_surro_ids]
     if missing:
         admin = db.query(Member).filter(
@@ -1467,6 +1451,8 @@ async def delete_workflow(
             metadata={"stage": "initiated"},
         )
         return deletion_response
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -1553,12 +1539,15 @@ async def finalize_workflow_deletion(
         if finalize_response.get('status') == 'completed' and finalize_response.get('deleted_from_db'):
             success = workflow_crud.delete_workflow_by_surro_id(
                 db=db,
-                surro_workflow_id=surro_workflow_id
+                surro_workflow_id=surro_workflow_id,
+                deleted_by=current_user.member_id,
             )
             if not success:
                 logger.warning(f"Workflow {surro_workflow_id} already deleted from DB")
 
         return finalize_response
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -2412,6 +2401,8 @@ async def cleanup_workflow(
             user_info
         )
         return cleanup_response
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -2512,6 +2503,8 @@ async def finalize_workflow_cleanup(
             user_info
         )
         return finalize_response
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,

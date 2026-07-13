@@ -98,7 +98,8 @@ class ModelCRUD:
         models = db.query(Model).filter(
             and_(
                 Model.created_by == member_id,
-                Model.deleted_at.is_(None)
+                Model.deleted_at.is_(None),
+                Model.is_active == True,
             )
         ).offset(skip).limit(limit).all()
 
@@ -109,14 +110,16 @@ class ModelCRUD:
         """사용자가 소유한 모델 총 개수 반환"""
         return db.query(Model).filter(
             Model.created_by == member_id,
-            Model.deleted_at.is_(None)
+            Model.deleted_at.is_(None),
+            Model.is_active == True,
         ).count()
 
     def count_catalog_models(self, db: Session) -> int:
         """카탈로그 모델 총 개수 반환"""
         return db.query(Model).filter(
             Model.is_catalog == True,
-            Model.deleted_at.is_(None)
+            Model.deleted_at.is_(None),
+            Model.is_active == True,
         ).count()
 
     def get_catalog_models_paginated(
@@ -128,7 +131,8 @@ class ModelCRUD:
         """카탈로그 모델을 페이지네이션으로 조회"""
         return db.query(Model).filter(
             Model.is_catalog == True,
-            Model.deleted_at.is_(None)
+            Model.deleted_at.is_(None),
+            Model.is_active == True,
         ).offset(skip).limit(limit).all()
 
     def get_user_models_paginated(
@@ -141,7 +145,8 @@ class ModelCRUD:
         """사용자 모델을 페이지네이션으로 조회"""
         return db.query(Model).filter(
             Model.created_by == member_id,
-            Model.deleted_at.is_(None)
+            Model.deleted_at.is_(None),
+            Model.is_active == True,
         ).offset(skip).limit(limit).all()
 
     def get_model_by_surro_id(self, db: Session, surro_model_id: int, member_id: str) -> Optional[Model]:
@@ -150,7 +155,8 @@ class ModelCRUD:
             and_(
                 Model.surro_model_id == surro_model_id,
                 Model.created_by == member_id,
-                Model.deleted_at.is_(None)
+                Model.deleted_at.is_(None),
+                Model.is_active == True,
             )
         ).first()
 
@@ -194,20 +200,12 @@ class ModelCRUD:
             model_name: str = None,
             is_catalog: bool = False
     ) -> Model:
-        """삭제 여부와 관계없이 매핑을 생성하거나 재활성화한다."""
-        existing = db.query(Model).filter(
-            and_(
-                Model.surro_model_id == surro_model_id,
-                Model.created_by == member_id
-            )
-        ).order_by(Model.id.desc()).first()
+        """활성 매핑을 갱신하거나 soft-delete 이력을 보존한 새 행을 만든다."""
+        existing = self.get_model_by_surro_id(db, surro_model_id, member_id)
 
         if existing:
             existing.name = model_name or existing.name
             existing.is_catalog = is_catalog
-            existing.is_active = True
-            existing.deleted_at = None
-            existing.deleted_by = None
             existing.updated_by = member_id
             existing.updated_at = datetime.utcnow()
             db.commit()
@@ -290,6 +288,7 @@ class ModelCRUD:
         mappings = db.query(Model).filter(
             Model.surro_model_id.in_(ids),
             Model.deleted_at.is_(None),
+            Model.is_active == True,
             or_(
                 Model.created_by == member_id,
                 Model.is_catalog == True,
@@ -310,7 +309,8 @@ class ModelCRUD:
             and_(
                 Model.name == name,
                 Model.provider_id == provider_id,
-                Model.deleted_at.is_(None)
+                Model.deleted_at.is_(None),
+                Model.is_active == True,
             )
         ).first()
 
@@ -403,7 +403,8 @@ class ModelCRUD:
         return db.query(Model).filter(
             and_(
                 Model.provider_id == provider_id,
-                Model.deleted_at.is_(None)
+                Model.deleted_at.is_(None),
+                Model.is_active == True,
             )
         ).all()
 
@@ -412,7 +413,8 @@ class ModelCRUD:
         return db.query(Model).filter(
             and_(
                 Model.parent_model_id == parent_model_id,
-                Model.deleted_at.is_(None)
+                Model.deleted_at.is_(None),
+                Model.is_active == True,
             )
         ).all()
 
@@ -453,7 +455,8 @@ class ModelCRUD:
         """사용자 모델 검색 (데이터와 총 개수 함께 반환)"""
         query = db.query(Model).filter(
             Model.created_by == member_id,
-            Model.deleted_at.is_(None)
+            Model.deleted_at.is_(None),
+            Model.is_active == True,
         )
 
         # 필터링 조건 추가
@@ -492,7 +495,8 @@ class ModelCRUD:
         """카탈로그 모델 검색 (데이터와 총 개수 함께 반환)"""
         query = db.query(Model).filter(
             Model.is_catalog == True,
-            Model.deleted_at.is_(None)
+            Model.deleted_at.is_(None),
+            Model.is_active == True,
         )
 
         # 필터링 조건 추가

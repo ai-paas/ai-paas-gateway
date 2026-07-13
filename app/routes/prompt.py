@@ -517,7 +517,25 @@ async def update_prompt(
             detail=f"Failed to update external prompt: {e}",
         )
 
-    db_prompt = _ensure_prompt_mapping(db, current_user, updated_external)
+    # This explicit update is a rename of the authorized mapping, not evidence
+    # that the upstream numeric ID was reused by a different resource.
+    prompt_crud.backfill_cache_if_changed(
+        db=db,
+        surro_prompt_id=updated_external.id,
+        name=updated_external.name,
+        description=updated_external.description,
+        content=updated_external.content,
+        prompt_variable=updated_external.prompt_variable,
+    )
+    db_prompt = prompt_crud.get_prompt_by_surro_id(
+        db=db,
+        surro_prompt_id=updated_external.id,
+    )
+    if not db_prompt:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Prompt mapping sync failed",
+        )
     emit_from_request(
         db, request,
         action=Action.UPDATE,

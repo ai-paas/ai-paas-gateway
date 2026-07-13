@@ -136,7 +136,7 @@ class ModelService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout during authentication: {str(e)}")
+            logger.error(f"Timeout during authentication: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="Authentication service timeout"
@@ -303,7 +303,7 @@ class ModelService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout getting models: {str(e)}")
+            logger.error(f"Timeout getting models: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -398,7 +398,7 @@ class ModelService:
             )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout getting model {model_id}: {str(e)}")
+            logger.error(f"Timeout getting model {model_id}: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -483,7 +483,7 @@ class ModelService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout creating model: {str(e)}")
+            logger.error(f"Timeout creating model: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -530,7 +530,7 @@ class ModelService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout updating model {model_id}: {str(e)}")
+            logger.error(f"Timeout updating model {model_id}: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -570,7 +570,7 @@ class ModelService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout deleting model {model_id}: {str(e)}")
+            logger.error(f"Timeout deleting model {model_id}: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -619,7 +619,7 @@ class ModelService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout testing model {model_id}: {str(e)}")
+            logger.error(f"Timeout testing model {model_id}: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -669,7 +669,7 @@ class ModelService:
         except HTTPException:
             raise
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout getting model types: {str(e)}")
+            logger.error(f"Timeout getting model types: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -717,7 +717,7 @@ class ModelService:
         except HTTPException:
             raise
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout getting model providers: {str(e)}")
+            logger.error(f"Timeout getting model providers: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -757,7 +757,7 @@ class ModelService:
             )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout auto-generating model: {str(e)}")
+            logger.error(f"Timeout auto-generating model: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -811,7 +811,7 @@ class ModelService:
             )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout updating base deployment status: {str(e)}")
+            logger.error(f"Timeout updating base deployment status: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -861,7 +861,7 @@ class ModelService:
         except HTTPException:
             raise
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout getting model formats: {str(e)}")
+            logger.error(f"Timeout getting model formats: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"

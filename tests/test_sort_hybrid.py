@@ -347,8 +347,8 @@ class TestPromptsMLOpsSync:
         assert created.name == "ext-name"
         assert created.created_by == sample_member.member_id
 
-    def test_create_mapping_idempotent_on_duplicate(self, db, sample_member):
-        # 이미 매핑이 있으면 기존 반환 (에러 없이)
+    def test_create_mapping_separates_reused_external_id(self, db, sample_member):
+        # MLOps 재설치로 같은 숫자 ID가 다른 이름에 재사용되면 이력을 분리한다.
         first = prompt_crud.create_mapping_from_external(
             db=db, surro_prompt_id=2500, member_id=sample_member.member_id,
             name="first", description=None, content="c",
@@ -357,8 +357,12 @@ class TestPromptsMLOpsSync:
             db=db, surro_prompt_id=2500, member_id=sample_member.member_id,
             name="second-ignored", description=None, content="c",
         )
-        assert first.id == second.id
-        assert second.name == "second-ignored"  # external sync 시 캐시 갱신
+        assert first.id != second.id
+        assert first.deleted_at is not None
+        assert first.is_active is False
+        assert first.deleted_by == "system:upstream-id-reused"
+        assert second.name == "second-ignored"
+        assert second.is_active is True
 
     def test_backfill_updates_when_changed(self, db, sample_member):
         self._make_prompt(db, sample_member.member_id, 2600, name="old")
