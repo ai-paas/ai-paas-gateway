@@ -43,6 +43,7 @@ class ServiceCRUD:
             limit: int = 100,
             search: Optional[str] = None,
             creator_name: Optional[str] = None,
+            member_id: Optional[str] = None,
             order_by: Optional[list] = None,
     ) -> Tuple[List[Service], int]:
         """서비스 목록 조회"""
@@ -59,6 +60,8 @@ class ServiceCRUD:
 
         if creator_name:
             query = query.filter(Service.created_by.ilike(f"%{creator_name}%"))
+        if member_id is not None:
+            query = query.filter(Service.created_by == member_id)
 
         total = query.count()
         if order_by:

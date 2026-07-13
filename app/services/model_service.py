@@ -15,7 +15,16 @@ from app.schemas.model import (
 logger = logging.getLogger(__name__)
 
 
-def _collect_relation_model_ids(model: ModelResponse) -> set:
+def _model_upstream_error_detail(response: httpx.Response) -> Any:
+    try:
+        error_body = response.json()
+    except ValueError:
+        error_body = None
+    detail = error_body.get("detail") if isinstance(error_body, dict) else None
+    return detail if isinstance(detail, (str, list, dict)) else "upstream request rejected"
+
+
+def collect_relation_model_ids(model: ModelResponse) -> set:
     """parent_model 체인 + child_models 트리의 모든 모델 id 수집."""
     ids: set = set()
 
@@ -43,6 +52,17 @@ def _inject_relation_visibility(node: Any, vis_map: Dict[int, Optional[str]]) ->
     for child in (node.get("child_models") or []):
         _inject_relation_visibility(child, vis_map)
     _inject_relation_visibility(node.get("parent_model"), vis_map)
+
+
+def apply_relation_visibility(
+        model: ModelResponse,
+        visibility_by_id: Dict[int, Optional[str]],
+) -> ModelResponse:
+    """gateway DB 매핑에서 계산한 visibility를 관계 노드에 주입."""
+    _inject_relation_visibility(model.parent_model, visibility_by_id)
+    for child in (model.child_models or []):
+        _inject_relation_visibility(child, visibility_by_id)
+    return model
 
 
 class ModelService:
@@ -360,11 +380,22 @@ class ModelService:
                 return ModelResponse(**model_data)
             elif response.status_code == 404:
                 return None
-            else:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Failed to get model: {response.text}"
+            elif (
+                response.status_code < 400
+                or response.status_code == 401
+                or response.status_code >= 500
+            ):
+                logger.error(
+                    f"upstream error getting model {model_id}: status={response.status_code}"
                 )
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="upstream service error",
+                )
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=_model_upstream_error_detail(response),
+            )
 
         except httpx.TimeoutException as e:
             logger.error(f"Timeout getting model {model_id}: {str(e)}")
@@ -374,48 +405,18 @@ class ModelService:
             )
         except HTTPException:
             raise
-        except Exception as e:
-            logger.error(f"Error getting model {model_id}: {str(e)}")
+        except httpx.RequestError as e:
+            logger.error(f"upstream request failed getting model {model_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="upstream connection error",
+            )
+        except Exception:
+            logger.exception(f"Error getting model {model_id}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Internal error: {str(e)}"
+                detail="internal server error",
             )
-
-    async def get_model_with_relation_visibility(
-            self,
-            model_id: int,
-            user_info: Optional[Dict[str, str]] = None
-    ) -> Optional[ModelResponse]:
-        """모델 상세 + parent_model/child_models 각 노드에 visibility 보강.
-
-        upstream(MLOps) 상세 응답의 parent_model/child_models 노드는
-        id/name/description만 포함하고 visibility가 없다. 게이트웨이는 관련 모델을
-        best-effort 단건 조회해 각 노드에 visibility를 주입한다 (조회 실패분은 None).
-        """
-        model = await self.get_model(model_id, user_info)
-        if not model:
-            return None
-
-        related_ids = list(_collect_relation_model_ids(model))
-        if not related_ids:
-            return model
-
-        results = await asyncio.gather(
-            *[self.get_model(mid, user_info) for mid in related_ids],
-            return_exceptions=True,
-        )
-        vis_map: Dict[int, Optional[str]] = {}
-        for mid, res in zip(related_ids, results):
-            if isinstance(res, ModelResponse):
-                vis_map[mid] = res.visibility
-            elif isinstance(res, Exception):
-                logger.warning(f"Failed to fetch visibility for related model {mid}: {res}")
-
-        _inject_relation_visibility(model.parent_model, vis_map)
-        for child in (model.child_models or []):
-            _inject_relation_visibility(child, vis_map)
-
-        return model
 
     async def create_model(
             self,
@@ -431,13 +432,14 @@ class ModelService:
             # multipart/form-data로 전송할 데이터 준비
             data = {
                 "name": model_data.name,
-                "repo_id": model_data.repo_id,
                 "provider_id": str(model_data.provider_id),
                 "type_id": str(model_data.type_id),
                 "format_id": str(model_data.format_id)
             }
 
             # Optional 필드 추가
+            if model_data.repo_id:
+                data["repo_id"] = model_data.repo_id
             if model_data.description:
                 data["description"] = model_data.description
             if model_data.parent_model_id:

@@ -405,7 +405,7 @@ async def create_knowledge_base(
     chunk_type_id: int = Form(..., description="청크 타입 ID"),
     search_method_id: int = Form(..., description="검색 방법 ID"),
     top_k: int = Form(..., description="검색 시 반환할 상위 k개 결과 수"),
-    threshold: float = Form(..., ge=0.0, le=1.0, description="검색 임계값 (0.0 ~ 1.0)"),
+    threshold: float = Form(..., description="검색 임계값"),
     file: UploadFile = File(..., description="업로드할 문서 파일"),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),

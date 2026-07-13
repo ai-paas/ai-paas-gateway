@@ -168,14 +168,14 @@ class ExternalServiceDetailResponse(ExternalServiceResponse):
 
 # 서비스 생성 요청
 class ServiceCreate(BaseModel):
-    name: str
+    name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
-    tags: Optional[List[str]] = None  # 리스트로 변경
+    tags: List[str] = Field(default_factory=list)
 
 
 # 서비스 수정 요청
 class ServiceUpdate(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = None
     tags: Optional[List[str]] = None  # 리스트로 변경
 

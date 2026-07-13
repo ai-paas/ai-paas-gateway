@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional, List
+from typing import Dict, List, Optional
 
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
@@ -275,6 +275,33 @@ class ModelCRUD:
         """사용자가 해당 모델의 소유자인지 확인"""
         model = self.get_model_by_surro_id(db, surro_model_id, member_id)
         return model is not None
+
+    def get_accessible_visibility_map(
+            self,
+            db: Session,
+            surro_model_ids: List[int],
+            member_id: str,
+    ) -> Dict[int, str]:
+        """현재 사용자가 접근 가능한 관계 모델의 gateway 분류를 반환."""
+        ids = set(surro_model_ids)
+        if not ids:
+            return {}
+
+        mappings = db.query(Model).filter(
+            Model.surro_model_id.in_(ids),
+            Model.deleted_at.is_(None),
+            or_(
+                Model.created_by == member_id,
+                Model.is_catalog == True,
+            ),
+        ).all()
+
+        visibility_by_id: Dict[int, str] = {}
+        for mapping in mappings:
+            visibility = "CATALOG" if mapping.is_catalog else "CUSTOM"
+            if visibility == "CATALOG" or mapping.surro_model_id not in visibility_by_id:
+                visibility_by_id[mapping.surro_model_id] = visibility
+        return visibility_by_id
 
     # 기존 메서드들은 호환성을 위해 유지하되, 새로운 구조에 맞게 수정할 수 있음
     def get_model_by_name(self, db: Session, name: str, provider_id: int) -> Optional[Model]:

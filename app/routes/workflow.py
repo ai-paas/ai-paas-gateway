@@ -1,10 +1,10 @@
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 
-from app.auth import get_current_user
+from app.auth import get_current_admin_user, get_current_user
 from app.common.sort import parse_sort, sort_in_memory
 from app.cruds.service import service_crud
 from app.cruds.workflow import workflow_crud
@@ -16,7 +16,6 @@ from app.schemas.workflow import (
     WorkflowResponse,
     WorkflowDetailResponse,
     WorkflowListResponse,
-    WorkflowExecuteRequest,
     WorkflowExecuteResponse,
     WorkflowTestResponse,
     WorkflowValidateRequest,
@@ -27,6 +26,10 @@ from app.schemas.workflow import (
     WorkflowFillMaskTestResponse,
     WorkflowProteinStructurePredictionTestRequest,
     WorkflowProteinStructurePredictionTestResponse,
+    WorkflowComponentDeploymentStatusRequest,
+    ComponentTypeListResponse,
+    TemplateCreateRequest,
+    TemplateUpdateRequest,
 )
 from app.services.audit_service import Action, ResourceType, emit_from_request
 from app.services.workflow_service import UNSET as _SERVICE_UNSET, workflow_service
@@ -50,7 +53,7 @@ _WORKFLOW_SORT_TIE_BREAKER = lambda w: w.id
 
 # ===== Component Types =====
 
-@router.get("/component-types")
+@router.get("/component-types", response_model=ComponentTypeListResponse)
 async def get_component_types(
         current_user=Depends(get_current_user)
 ):
@@ -535,7 +538,7 @@ async def get_workflows(
 
 @router.post("/templates", status_code=status.HTTP_201_CREATED)
 async def create_template(
-        template_create: WorkflowCreateRequest,
+        template_create: TemplateCreateRequest,
         current_user=Depends(get_current_user)
 ):
     """
@@ -808,7 +811,7 @@ async def get_template(
 @router.put("/templates/{template_id}")
 async def update_template(
         template_id: str,
-        template_update: WorkflowUpdateRequest,
+        template_update: TemplateUpdateRequest,
         current_user=Depends(get_current_user)
 ):
     """
@@ -1157,6 +1160,8 @@ async def get_workflow(
     )
     if not db_workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    if current_user.role != "admin" and db_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
 
     # 외부 API에서 상세 정보 조회
     user_info = {
@@ -1471,10 +1476,6 @@ async def delete_workflow(
 @router.post("/{surro_workflow_id}/finalize-deletion")
 async def finalize_workflow_deletion(
         surro_workflow_id: str,
-        run_id: Optional[str] = Query(
-            None,
-            description="Deprecated — 현재 삭제 완료 처리에는 사용되지 않음",
-        ),
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -1486,11 +1487,6 @@ async def finalize_workflow_deletion(
 
     ## Path Parameters
     - **workflow_id** (str): 삭제할 워크플로우 UUID
-
-    ## Query Parameters
-    - **run_id** (str, optional, *deprecated*): 현재 삭제 완료 처리에는 사용되지 않음
-        - 호환성 차원에서 받기는 하나 처리에는 사용하지 않음
-        - 생략 가능
 
     ## Response
     - **workflow_id** (str): 워크플로우 UUID
@@ -1531,6 +1527,14 @@ async def finalize_workflow_deletion(
     - **401**: 인증되지 않은 사용자
     - **500**: 삭제 처리 중 오류 발생
     """
+    existing_workflow = workflow_crud.get_workflow_by_surro_id(
+        db=db, surro_workflow_id=surro_workflow_id
+    )
+    if not existing_workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
     # 외부 API 삭제 완료 확인
     user_info = {
         'member_id': current_user.member_id,
@@ -1542,7 +1546,6 @@ async def finalize_workflow_deletion(
         # MLOps v2부터 run_id는 사용되지 않으므로 외부에 전달하지 않음
         finalize_response = await workflow_service.finalize_deletion(
             surro_workflow_id,
-            run_id=None,
             user_info=user_info,
         )
 
@@ -1566,7 +1569,6 @@ async def finalize_workflow_deletion(
 @router.post("/{surro_workflow_id}/execute", response_model=WorkflowExecuteResponse)
 async def execute_workflow(
         surro_workflow_id: str,
-        execute_request: Optional[WorkflowExecuteRequest] = Body(None),
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -1579,11 +1581,6 @@ async def execute_workflow(
 
     ## Path Parameters
     - **workflow_id** (str): 실행할 워크플로우 UUID
-
-    ## Request Body (Optional[WorkflowExecuteRequest])
-    - **parameters** (Dict[str, Any], optional): 호환성 유지용 실행 파라미터
-        - 현재 실행 처리에는 사용되지 않음
-        - body 자체를 생략해도 정상 호출됨
 
     ## Response (WorkflowExecuteResponse)
     - **workflow_id** (str): 실행된 워크플로우 UUID
@@ -1624,6 +1621,9 @@ async def execute_workflow(
     if not existing_workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
     # 외부 API 실행
     user_info = {
         'member_id': current_user.member_id,
@@ -1631,11 +1631,8 @@ async def execute_workflow(
         'name': current_user.name
     }
 
-    # MLOps v2는 body를 받지 않으므로 parameters는 외부에 전달하지 않음.
-    # 게이트웨이 호환성 차원에서 받기만 한다.
     execute_response = await workflow_service.execute_workflow(
         surro_workflow_id,
-        parameters=None,
         user_info=user_info,
     )
 
@@ -1710,6 +1707,9 @@ async def get_workflow_status(
     if not existing_workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
     # 외부 API 상태 조회
     user_info = {
         'member_id': current_user.member_id,
@@ -1730,13 +1730,8 @@ async def get_workflow_status(
 async def update_component_deployment_status(
         surro_workflow_id: str,
         component_id: str,
-        service_name: str = Form(...),
-        service_hostname: str = Form(...),
-        model_name: str = Form(...),
-        status: str = Form(...),
-        internal_url: Optional[str] = Form(None),
-        error_message: Optional[str] = Form(None),
-        current_user=Depends(get_current_user)
+        payload: WorkflowComponentDeploymentStatusRequest,
+        current_user=Depends(get_current_admin_user)
 ):
     """
     컴포넌트의 워크플로 서빙 배포 상태를 업데이트합니다.
@@ -1751,7 +1746,7 @@ async def update_component_deployment_status(
     - **workflow_id** (str): 워크플로우 ID
     - **component_id** (str): 컴포넌트 UUID
 
-    ## Request Body (Form Data)
+    ## Request Body (application/json)
     - **service_name** (str, required): 서빙 리소스 이름 (KServe InferenceService / Ollama Service 등)
     - **service_hostname** (str, required): 서빙 서비스 호스트명
     - **model_name** (str, required): 배포된 모델 이름
@@ -1786,12 +1781,12 @@ async def update_component_deployment_status(
     update_response = await workflow_service.update_component_deployment_status(
         workflow_id=surro_workflow_id,
         component_id=component_id,
-        service_name=service_name,
-        service_hostname=service_hostname,
-        model_name=model_name,
-        status=status,
-        internal_url=internal_url,
-        error_message=error_message,
+        service_name=payload.service_name,
+        service_hostname=payload.service_hostname,
+        model_name=payload.model_name,
+        status=payload.status,
+        internal_url=payload.internal_url,
+        error_message=payload.error_message,
         user_info=user_info
     )
 
@@ -1876,8 +1871,7 @@ async def test_rag_workflow(
     - **401**: 인증되지 않은 사용자
     - **403**: 워크플로우 실행 권한 없음
     - **404**: 워크플로우를 찾을 수 없음
-    - **503**: 모델 서비스가 준비되지 않음
-    - **500**: 서버 내부 오류
+    - **500 / 502 / 504**: 서버 내부 오류 / upstream 오류(모델 서비스 미준비 포함) / upstream 타임아웃
     """
     # 권한 확인
     existing_workflow = workflow_crud.get_workflow_by_surro_id(
@@ -1975,8 +1969,7 @@ async def test_ml_workflow(
     - **401**: 인증되지 않은 사용자
     - **403**: 워크플로우 실행 권한 없음
     - **404**: 워크플로우를 찾을 수 없음
-    - **503**: 모델 서비스가 준비되지 않음
-    - **500**: 서버 내부 오류
+    - **500 / 502 / 504**: 서버 내부 오류 / upstream 오류(모델 서비스 미준비 포함) / upstream 타임아웃
     """
     # 권한 확인
     existing_workflow = workflow_crud.get_workflow_by_surro_id(
@@ -2056,10 +2049,11 @@ async def test_protein_classification_workflow(
     - base(파인튜닝 안 된) 모델(`parent_model_id IS NULL`)은 어댑터가 없어 서빙 불가 → 400
 
     ## Errors
-    - **400**: ACTIVE 아님 / 해당 task 아닌 MODEL 포함 / 해당 task 모델 없음 / base 모델 지정 / 필수 입력 누락
+    - **400**: ACTIVE 아님 / 해당 task 아닌 MODEL 포함 / 해당 task 모델 없음 / base 모델 지정
     - **401**: 인증되지 않은 사용자
     - **403**: 워크플로우 실행 권한 없음
     - **404**: 워크플로우를 찾을 수 없음
+    - **422**: `epitope`/`cdr3b` 누락 또는 타입 오류
     - **500 / 502 / 504**: 서버 내부 오류 / upstream 오류(KServe 미준비 포함) / upstream 타임아웃
     """
     existing_workflow = workflow_crud.get_workflow_by_surro_id(
@@ -2127,10 +2121,11 @@ async def test_fill_mask_workflow(
     - `sequence`에 `<mask>` 토큰이 최소 1개 있어야 함 (없으면 400)
 
     ## Errors
-    - **400**: ACTIVE 아님 / 해당 task 아닌 MODEL 포함 / 해당 task 모델 없음 / sequence 누락·마스크 없음·top_k 범위 밖
+    - **400**: ACTIVE 아님 / 해당 task 아닌 MODEL 포함 / 해당 task 모델 없음 / sequence 빈 값·마스크 없음·top_k 범위 밖
     - **401**: 인증되지 않은 사용자
     - **403**: 워크플로우 실행 권한 없음
     - **404**: 워크플로우를 찾을 수 없음
+    - **422**: `sequence` 누락 또는 요청 필드 타입 오류
     - **500 / 502 / 504**: 서버 내부 오류 / upstream 오류(KServe 미준비 포함) / upstream 타임아웃
     """
     existing_workflow = workflow_crud.get_workflow_by_surro_id(
@@ -2200,10 +2195,11 @@ async def test_protein_structure_prediction_workflow(
     - 추론이 오래 걸릴 수 있음 — 게이트웨이 타임아웃 초과 시 504 반환
 
     ## Errors
-    - **400**: ACTIVE 아님 / 해당 task 아닌 MODEL 포함 / 해당 task 모델 없음 / sequence 누락·빈 값
+    - **400**: ACTIVE 아님 / 해당 task 아닌 MODEL 포함 / 해당 task 모델 없음 / sequence 빈 값
     - **401**: 인증되지 않은 사용자
     - **403**: 워크플로우 실행 권한 없음
     - **404**: 워크플로우를 찾을 수 없음
+    - **422**: `sequence` 누락 또는 요청 필드 타입 오류
     - **500 / 502 / 504**: 서버 내부 오류 / upstream 오류(KServe 미준비 포함) / upstream 타임아웃
     """
     existing_workflow = workflow_crud.get_workflow_by_surro_id(
@@ -2327,6 +2323,9 @@ async def get_workflow_models(
     if not existing_workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
     # 외부 API 모델 목록 조회
     user_info = {
         'member_id': current_user.member_id,
@@ -2423,7 +2422,6 @@ async def cleanup_workflow(
 @router.post("/{surro_workflow_id}/finalize-cleanup")
 async def finalize_workflow_cleanup(
         surro_workflow_id: str,
-        run_id: str = Query(..., description="Cleanup run ID"),
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -2437,11 +2435,6 @@ async def finalize_workflow_cleanup(
     ## Path Parameters
     - **workflow_id** (str): 정리할 워크플로우 UUID
         - 워크플로우 목록 조회 API(`/workflows`)에서 확인 가능
-
-    ## Query Parameters
-    - **run_id** (str, required): Kubeflow Pipeline cleanup run ID
-        - cleanup API에서 반환된 cleanup_run_id 사용
-        - 형식: Kubeflow Pipeline 실행 UUID
 
     ## Response
     - **workflow_id** (str): 워크플로우 UUID
@@ -2503,6 +2496,9 @@ async def finalize_workflow_cleanup(
     if not existing_workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
     # 외부 API 정리 완료 확인
     user_info = {
         'member_id': current_user.member_id,
@@ -2513,7 +2509,6 @@ async def finalize_workflow_cleanup(
     try:
         finalize_response = await workflow_service.finalize_cleanup(
             surro_workflow_id,
-            run_id,
             user_info
         )
         return finalize_response

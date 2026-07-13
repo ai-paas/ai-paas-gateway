@@ -4,7 +4,7 @@ from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Path, File, UploadFile, Form, Request
 from sqlalchemy.orm import Session
 
-from app.auth import get_current_user
+from app.auth import get_current_admin_user, get_current_user
 from app.common.sort import parse_sort, sort_in_memory
 from app.cruds import model_crud
 from app.database import get_db
@@ -12,10 +12,20 @@ from app.models import Member, Model
 from app.schemas.model import (
     ModelResponse, ModelCreateRequest,
     ModelCreateResponse,
-    InnoUserInfo
+    InnoUserInfo,
+    ModelBaseDeploymentStatusRequest,
+    ModelFormatListWrapper,
+    ModelListWrapper,
+    ModelProviderListWrapper,
+    ModelTypeListWrapper,
+    PredefinedModelKey,
 )
 from app.services.audit_service import Action, ResourceType, emit_from_request
-from app.services.model_service import model_service
+from app.services.model_service import (
+    apply_relation_visibility,
+    collect_relation_model_ids,
+    model_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +65,7 @@ def _create_pagination_response(data: List[Any], total: int, page: int, size: in
 async def create_model(
         request: Request,
         name: str = Form(..., description="모델 이름"),
-        repo_id: str = Form(..., description="모델 저장소 ID"),
+        repo_id: Optional[str] = Form(None, description="모델 저장소 ID"),
         provider_id: int = Form(..., description="프로바이더 ID"),
         type_id: int = Form(..., description="모델 타입 ID"),
         format_id: int = Form(..., description="모델 포맷 ID"),
@@ -152,6 +162,18 @@ async def create_model(
     - **500**: 모델 등록 중 서버 내부 오류
     """
     try:
+        if parent_model_id is not None:
+            accessible_parent = model_crud.get_accessible_visibility_map(
+                db=db,
+                surro_model_ids=[parent_model_id],
+                member_id=current_user.member_id,
+            )
+            if parent_model_id not in accessible_parent:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Parent model not found or access denied",
+                )
+
         # 파일 처리
         file_data = None
         file_name = None
@@ -218,6 +240,8 @@ async def create_model(
         )
         return created_model
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating model for user {current_user.member_id}: {str(e)}")
         raise HTTPException(
@@ -226,7 +250,7 @@ async def create_model(
         )
 
 
-@router.get("")
+@router.get("", response_model=ModelListWrapper)
 async def get_all_models(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
@@ -419,7 +443,7 @@ async def get_all_models(
             detail=f"Failed to get models: {str(e)}"
         )
 
-@router.get("/custom-models")
+@router.get("/custom-models", response_model=ModelListWrapper)
 async def get_user_models(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
@@ -537,7 +561,7 @@ async def get_user_models(
         )
 
 
-@router.get("/model-catalog")
+@router.get("/model-catalog", response_model=ModelListWrapper)
 async def get_catalog_models(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
@@ -655,7 +679,7 @@ async def get_catalog_models(
             detail=f"Failed to get catalog models: {str(e)}"
         )
 
-@router.get("/providers")
+@router.get("/providers", response_model=ModelProviderListWrapper)
 async def get_providers(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
@@ -738,7 +762,7 @@ async def get_providers(
         )
 
 
-@router.get("/types")
+@router.get("/types", response_model=ModelTypeListWrapper)
 async def get_model_types(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
@@ -821,7 +845,7 @@ async def get_model_types(
         )
 
 
-@router.get("/formats")
+@router.get("/formats", response_model=ModelFormatListWrapper)
 async def get_model_formats(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
@@ -904,9 +928,9 @@ async def get_model_formats(
             detail=f"Failed to get model formats: {str(e)}"
         )
 
-@router.post("/auto-generate")
+@router.post("/auto-generate", response_model=ModelCreateResponse)
 async def auto_generate_model(
-        model_key: str = Query(..., description="등록할 사전 정의 모델 키"),
+        model_key: PredefinedModelKey = Query(..., description="등록할 사전 정의 모델 키"),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
@@ -967,7 +991,7 @@ async def auto_generate_model(
         }
 
         created = await model_service.auto_generate_model(
-            model_key=model_key, user_info=user_info
+            model_key=model_key.value, user_info=user_info
         )
 
         # 게이트웨이 DB에 사용자-모델 매핑 저장
@@ -977,7 +1001,7 @@ async def auto_generate_model(
                 db=db,
                 surro_model_id=created.get('id'),
                 member_id=current_user.member_id,
-                model_name=created.get('name', model_key),
+                model_name=created.get('name', model_key.value),
                 is_catalog=is_catalog,
             )
             logger.info(
@@ -994,7 +1018,7 @@ async def auto_generate_model(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error auto-generating model ({model_key}) for {current_user.member_id}: {str(e)}")
+        logger.error(f"Error auto-generating model ({model_key.value}) for {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to auto-generate model: {str(e)}"
@@ -1004,12 +1028,8 @@ async def auto_generate_model(
 @router.put("/base-deployments/{model_id}/status")
 async def update_model_base_deployment_status(
         model_id: int = Path(..., description="모델 ID"),
-        service_name: str = Form(...),
-        service_hostname: str = Form(...),
-        deployment_status: str = Form(..., alias="status"),
-        internal_url: Optional[str] = Form(None),
-        error_message: Optional[str] = Form(None),
-        current_user: Member = Depends(get_current_user)
+        payload: ModelBaseDeploymentStatusRequest = ...,
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """
     모델 기본 배포 상태 업데이트 (백엔드 서버 내부 전용 API)
@@ -1028,7 +1048,7 @@ async def update_model_base_deployment_status(
     ## Path Parameters
     - **model_id** (int): 모델 ID
 
-    ## Request Body (Form Data)
+    ## Request Body (application/json)
     - **service_name** (str, required): 서비스 이름
     - **service_hostname** (str, required): 서비스 호스트명
     - **status** (str, required): 배포 상태 ("deployed", "deploying", "failed")
@@ -1058,11 +1078,11 @@ async def update_model_base_deployment_status(
         }
         return await model_service.update_base_deployment_status(
             model_id=model_id,
-            service_name=service_name,
-            service_hostname=service_hostname,
-            deployment_status=deployment_status,
-            internal_url=internal_url,
-            error_message=error_message,
+            service_name=payload.service_name,
+            service_hostname=payload.service_hostname,
+            deployment_status=payload.status,
+            internal_url=payload.internal_url,
+            error_message=payload.error_message,
             user_info=user_info,
         )
     except HTTPException:
@@ -1135,14 +1155,15 @@ async def get_model(
     - 모델의 모든 관련 정보(제공자, 타입, 포맷, 레지스트리)를 포함하여 반환
     - 부모/자식 모델 관계는 재귀적으로 조회
     - 게이트웨이는 접근 권한 체크 후 MLOps 응답을 전달하되, parent_model/child_models의
-      각 노드에 `visibility`를 보강한다. MLOps 원본 노드에는 visibility가 없어, 게이트웨이가
-      관련 모델을 best-effort 단건 조회해 주입한다 (조회 실패 시 해당 노드는 `null`)
+      각 노드에 `visibility`를 보강한다. 현재 사용자가 접근 가능한 gateway DB 매핑만 사용하며,
+      매핑이 없거나 다른 사용자 전용 모델이면 해당 노드는 `null`이다.
 
     ## Errors
     - **401**: 인증되지 않은 사용자
     - **404**: 모델을 찾을 수 없거나 접근 권한이 없음
         - 본인 소유 모델도 아니고 카탈로그 모델도 아닌 경우
-    - **500**: 서버 내부 오류
+    - **500**: 게이트웨이 내부 오류
+    - **502 / 504**: upstream 오류 / upstream 타임아웃
     """
     try:
         # 1. 사용자가 해당 모델을 소유하고 있는지 확인
@@ -1162,8 +1183,8 @@ async def get_model(
                 detail=f"Model {model_id} not found or access denied"
             )
 
-        # 2. Surro API에서 모델 상세 정보 조회 (parent/child 노드에 visibility 보강)
-        model = await model_service.get_model_with_relation_visibility(
+        # 2. Surro API에서 모델 상세 정보 조회
+        model = await model_service.get_model(
             model_id=model_id,
             user_info={
                 'member_id': current_user.member_id,
@@ -1177,6 +1198,15 @@ async def get_model(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Model {model_id} not found"
             )
+
+        # 3. 관계 노드는 gateway DB의 현재 사용자/카탈로그 매핑으로만 visibility 보강
+        relation_ids = list(collect_relation_model_ids(model))
+        visibility_by_id = model_crud.get_accessible_visibility_map(
+            db=db,
+            surro_model_ids=relation_ids,
+            member_id=current_user.member_id,
+        )
+        apply_relation_visibility(model, visibility_by_id)
 
         return model
 
