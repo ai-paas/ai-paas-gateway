@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON, Index
+from sqlalchemy import Boolean, Column, Integer, String, Text, DateTime, ForeignKey, JSON, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -31,10 +31,20 @@ class Service(Base):
 
     created_by = Column(String(100), ForeignKey("members.member_id"), nullable=False)
     surro_service_id = Column(String(255), nullable=False, index=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_by = Column(String(100), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
 
     creator = relationship("Member", backref="created_services")
 
     __table_args__ = (
-        Index('idx_services_surro_service_id', 'surro_service_id', unique=True),
+        Index('idx_services_active', 'surro_service_id', 'is_active', 'deleted_at'),
+        Index(
+            'idx_services_unique_active',
+            'surro_service_id',
+            unique=True,
+            postgresql_where=Column('deleted_at').is_(None),
+            sqlite_where=Column('deleted_at').is_(None),
+        ),
         {'extend_existing': True}
     )

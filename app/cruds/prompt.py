@@ -34,30 +34,22 @@ class PromptCRUD:
             external_prompt_variables: Optional[List[dict]] = None
     ) -> Prompt:
         """프롬프트 생성 (external 생성 후 로컬 캐시/매핑 저장)."""
-        prompt_variables = _variables_to_dicts(external_prompt_variables)
-
-        db_prompt = Prompt(
+        return self.create_mapping_from_external(
+            db=db,
+            surro_prompt_id=surro_prompt_id,
+            member_id=created_by,
             name=prompt.prompt.name,
             description=prompt.prompt.description,
             content=prompt.prompt.content,
-            prompt_variable=prompt_variables,
-            created_by=created_by,
-            surro_prompt_id=surro_prompt_id,
-            is_active=True,
-            deleted_at=None,
-            deleted_by=None,
+            prompt_variable=external_prompt_variables,
         )
-        db.add(db_prompt)
-        db.commit()
-        db.refresh(db_prompt)
-        return db_prompt
 
     def get_prompt(self, db: Session, prompt_id: int, include_deleted: bool = False) -> Optional[Prompt]:
         """로컬 PK로 조회."""
         query = db.query(Prompt).filter(Prompt.id == prompt_id)
         if not include_deleted:
             query = query.filter(and_(Prompt.deleted_at.is_(None), Prompt.is_active == True))
-        return query.first()
+        return query.order_by(Prompt.id.desc()).first()
 
     def get_prompt_by_surro_id(
             self,
@@ -69,7 +61,7 @@ class PromptCRUD:
         query = db.query(Prompt).filter(Prompt.surro_prompt_id == surro_prompt_id)
         if not include_deleted:
             query = query.filter(and_(Prompt.deleted_at.is_(None), Prompt.is_active == True))
-        return query.first()
+        return query.order_by(Prompt.id.desc()).first()
 
     def get_prompts(
             self,
@@ -141,20 +133,25 @@ class PromptCRUD:
             content: str,
             prompt_variable=None,
     ) -> Prompt:
-        """external prompt 기준 로컬 매핑 upsert/revive."""
-        existing = self.get_prompt_by_surro_id(db, surro_prompt_id, include_deleted=True)
+        """external prompt 기준 활성 매핑을 갱신하거나 새 이력 행을 생성한다."""
+        existing = self.get_prompt_by_surro_id(db, surro_prompt_id)
         if existing:
-            existing.name = name
-            existing.description = description
-            existing.content = content
-            existing.prompt_variable = _variables_to_dicts(prompt_variable)
-            existing.is_active = True
-            existing.deleted_at = None
-            existing.deleted_by = None
-            existing.updated_at = datetime.utcnow()
-            db.commit()
-            db.refresh(existing)
-            return existing
+            if existing.name != name:
+                # 숫자 ID 재사용 가능성이 있으므로 기존 소유권을 새 리소스에 넘기지 않는다.
+                now = datetime.utcnow()
+                existing.is_active = False
+                existing.deleted_at = now
+                existing.deleted_by = "system:upstream-id-reused"
+                existing.updated_at = now
+                db.flush()
+            else:
+                existing.description = description
+                existing.content = content
+                existing.prompt_variable = _variables_to_dicts(prompt_variable)
+                existing.updated_at = datetime.utcnow()
+                db.commit()
+                db.refresh(existing)
+                return existing
 
         db_prompt = Prompt(
             name=name,
@@ -179,8 +176,8 @@ class PromptCRUD:
             content: Any = _MISSING,
             prompt_variable: Any = _MISSING,
     ) -> bool:
-        """외부 응답 기준 로컬 캐시를 갱신하고 soft-delete 상태면 복구한다."""
-        mapping = self.get_prompt_by_surro_id(db, surro_prompt_id, include_deleted=True)
+        """활성 매핑의 외부 응답 캐시를 갱신한다."""
+        mapping = self.get_prompt_by_surro_id(db, surro_prompt_id)
         if not mapping:
             return False
 
@@ -199,12 +196,6 @@ class PromptCRUD:
             if mapping.prompt_variable != new_vars:
                 mapping.prompt_variable = new_vars
                 changed = True
-
-        if mapping.deleted_at is not None or mapping.deleted_by is not None or mapping.is_active is False:
-            mapping.deleted_at = None
-            mapping.deleted_by = None
-            mapping.is_active = True
-            changed = True
 
         if changed:
             mapping.updated_at = datetime.utcnow()

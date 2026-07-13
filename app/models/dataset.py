@@ -102,7 +102,8 @@ class Dataset(Base):
             'surro_dataset_id',
             'created_by',
             unique=True,
-            postgresql_where=Column('deleted_at').is_(None)
+            postgresql_where=Column('deleted_at').is_(None),
+            sqlite_where=Column('deleted_at').is_(None),
         ),
 
         {'comment': '사용자별 외부 API 데이터셋 매핑 테이블'}

@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 from sqlalchemy import or_
@@ -30,11 +31,19 @@ class ServiceCRUD:
 
     def get_service(self, db: Session, service_id: int) -> Optional[Service]:
         """내부 ID로 조회"""
-        return db.query(Service).filter(Service.id == service_id).first()
+        return db.query(Service).filter(
+            Service.id == service_id,
+            Service.deleted_at.is_(None),
+            Service.is_active.is_(True),
+        ).first()
 
     def get_service_by_surro_id(self, db: Session, surro_service_id: str) -> Optional[Service]:
         """외부 API UUID로 조회"""
-        return db.query(Service).filter(Service.surro_service_id == surro_service_id).first()
+        return db.query(Service).filter(
+            Service.surro_service_id == surro_service_id,
+            Service.deleted_at.is_(None),
+            Service.is_active.is_(True),
+        ).first()
 
     def get_services(
             self,
@@ -47,7 +56,10 @@ class ServiceCRUD:
             order_by: Optional[list] = None,
     ) -> Tuple[List[Service], int]:
         """서비스 목록 조회"""
-        query = db.query(Service)
+        query = db.query(Service).filter(
+            Service.deleted_at.is_(None),
+            Service.is_active.is_(True),
+        )
 
         if search:
             search_filter = f"%{search}%"
@@ -101,20 +113,30 @@ class ServiceCRUD:
             db.refresh(db_service)
         return db_service
 
-    def delete_service(self, db: Session, service_id: int) -> bool:
-        """내부 ID로 서비스 삭제"""
+    def delete_service(
+            self, db: Session, service_id: int,
+            deleted_by: str = "system"
+    ) -> bool:
+        """내부 ID로 서비스 soft-delete."""
         db_service = self.get_service(db, service_id)
         if db_service:
-            db.delete(db_service)
+            db_service.deleted_at = datetime.now(timezone.utc)
+            db_service.deleted_by = deleted_by
+            db_service.is_active = False
             db.commit()
             return True
         return False
 
-    def delete_service_by_surro_id(self, db: Session, surro_service_id: str) -> bool:
-        """UUID로 서비스 삭제"""
+    def delete_service_by_surro_id(
+            self, db: Session, surro_service_id: str,
+            deleted_by: str = "system"
+    ) -> bool:
+        """UUID로 서비스 soft-delete."""
         db_service = self.get_service_by_surro_id(db, surro_service_id)
         if db_service:
-            db.delete(db_service)
+            db_service.deleted_at = datetime.now(timezone.utc)
+            db_service.deleted_by = deleted_by
+            db_service.is_active = False
             db.commit()
             return True
         return False

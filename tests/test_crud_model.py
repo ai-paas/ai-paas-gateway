@@ -188,3 +188,19 @@ class TestModelCRUD:
         )
         assert total == 1
         assert models[0].name == "YOLO-Detection"
+
+
+def test_upsert_model_mapping_preserves_soft_deleted_history(db, sample_member):
+    old = model_crud.create_model_mapping(
+        db, 1200, sample_member.member_id, model_name="old-model"
+    )
+    assert model_crud.delete_model_mapping(db, 1200, sample_member.member_id)
+
+    current = model_crud.upsert_model_mapping(
+        db, 1200, sample_member.member_id, model_name="new-model"
+    )
+
+    assert current.id != old.id
+    db.refresh(old)
+    assert old.deleted_at is not None
+    assert old.is_active is False

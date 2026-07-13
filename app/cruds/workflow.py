@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 from sqlalchemy.orm import Session
@@ -28,7 +29,11 @@ class WorkflowCRUD:
 
     def get_workflow(self, db: Session, workflow_id: int) -> Optional[Workflow]:
         """내부 ID로 조회"""
-        return db.query(Workflow).filter(Workflow.id == workflow_id).first()
+        return db.query(Workflow).filter(
+            Workflow.id == workflow_id,
+            Workflow.deleted_at.is_(None),
+            Workflow.is_active.is_(True),
+        ).first()
 
     def get_workflow_by_surro_id(
             self,
@@ -37,7 +42,9 @@ class WorkflowCRUD:
     ) -> Optional[Workflow]:
         """외부 API ID로 조회"""
         return db.query(Workflow).filter(
-            Workflow.surro_workflow_id == surro_workflow_id
+            Workflow.surro_workflow_id == surro_workflow_id,
+            Workflow.deleted_at.is_(None),
+            Workflow.is_active.is_(True),
         ).first()
 
     def get_workflows(
@@ -50,7 +57,10 @@ class WorkflowCRUD:
             status: Optional[str] = None
     ) -> Tuple[List[Workflow], int]:
         """워크플로우 목록 조회"""
-        query = db.query(Workflow)
+        query = db.query(Workflow).filter(
+            Workflow.deleted_at.is_(None),
+            Workflow.is_active.is_(True),
+        )
 
         # 검색 조건 추가 (이름, 설명)
         if search:
@@ -67,7 +77,7 @@ class WorkflowCRUD:
         total = query.count()
 
         # 정렬 (최신순)
-        query = query.order_by(Workflow.created_at.desc())
+        query = query.order_by(Workflow.created_at.desc(), Workflow.id.desc())
 
         # 페이지네이션 적용 (skip, limit이 있을 때만)
         if skip is not None and limit is not None:
@@ -116,20 +126,30 @@ class WorkflowCRUD:
             db.refresh(db_workflow)
         return db_workflow
 
-    def delete_workflow(self, db: Session, workflow_id: int) -> bool:
-        """내부 ID로 워크플로우 삭제"""
+    def delete_workflow(
+            self, db: Session, workflow_id: int,
+            deleted_by: str = "system"
+    ) -> bool:
+        """내부 ID로 워크플로우 soft-delete."""
         db_workflow = self.get_workflow(db, workflow_id)
         if db_workflow:
-            db.delete(db_workflow)
+            db_workflow.deleted_at = datetime.now(timezone.utc)
+            db_workflow.deleted_by = deleted_by
+            db_workflow.is_active = False
             db.commit()
             return True
         return False
 
-    def delete_workflow_by_surro_id(self, db: Session, surro_workflow_id: str) -> bool:
-        """외부 ID로 워크플로우 삭제"""
+    def delete_workflow_by_surro_id(
+            self, db: Session, surro_workflow_id: str,
+            deleted_by: str = "system"
+    ) -> bool:
+        """외부 ID로 워크플로우 soft-delete."""
         db_workflow = self.get_workflow_by_surro_id(db, surro_workflow_id)
         if db_workflow:
-            db.delete(db_workflow)
+            db_workflow.deleted_at = datetime.now(timezone.utc)
+            db_workflow.deleted_by = deleted_by
+            db_workflow.is_active = False
             db.commit()
             return True
         return False

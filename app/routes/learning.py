@@ -531,6 +531,7 @@ async def update_learning_internal(
         mapping = db.query(Experiment).filter(
             Experiment.surro_experiment_id == experiment_id,
             Experiment.deleted_at.is_(None),
+            Experiment.is_active == True,
         ).first()
         if mapping is None:
             raise HTTPException(
