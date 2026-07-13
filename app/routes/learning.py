@@ -1,7 +1,10 @@
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
+from fastapi import (
+    APIRouter, Depends, File, Form, HTTPException, Path, Query, Request,
+    UploadFile, status,
+)
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_admin_user, get_current_user
@@ -25,6 +28,8 @@ from app.schemas.pipeline import (
     TrainingPipelineResponse,
     TrainingStatusResponse,
 )
+from app.schemas.dataset import DatasetKindEnum
+from app.cruds import dataset_crud, model_crud
 from app.services.experiment_service import experiment_service
 from app.services.pipeline_service import pipeline_service
 
@@ -242,8 +247,19 @@ async def list_learning(
 
 @router.post("/training", response_model=TrainingPipelineResponse, summary="Submit Training")
 async def submit_training(
-    request: TrainingPipelineRequest,
     http_request: Request,
+    model_id: int = Form(..., description="학습에 사용할 모델 ID"),
+    dataset_file: Optional[UploadFile] = File(None, description="직접 업로드할 데이터셋 파일"),
+    train_name: str = Form("", description="학습 실험 이름"),
+    description: str = Form("", description="학습 실험 설명"),
+    dataset_id: Optional[int] = Form(None, description="기존 데이터셋 ID. dataset_file과 XOR"),
+    dataset_kind: Optional[DatasetKindEnum] = Form(None, description="데이터셋 학습 태스크 분류"),
+    gpus: Optional[str] = Form(None, description="사용할 GPU 개수"),
+    batch_size: Optional[str] = Form(None, description="배치 크기"),
+    epochs: Optional[str] = Form(None, description="학습 에포크 수"),
+    save_period: Optional[str] = Form(None, description="모델 저장 주기"),
+    weight_decay: Optional[str] = Form(None, description="가중치 감쇠 계수"),
+    learning_rate: Optional[str] = Form(None, description="학습률"),
     db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
@@ -251,7 +267,7 @@ async def submit_training(
     학습 파이프라인 생성 및 실행
 
     모델과 데이터셋을 사용하여 Kubeflow Pipeline 기반의 학습 파이프라인을 생성하고 실행합니다.
-    요청은 전체 Body(JSON)로 전달되며, 학습 시작 후 백그라운드에서 MLflow 메트릭 폴링이 시작됩니다.
+    요청은 `multipart/form-data`로 전달되며 `dataset_id`와 `dataset_file` 중 하나만 사용합니다.
 
     ## Response (TrainingPipelineResponse)
     - **experiment_id** (int | null): 생성된 학습 ID
@@ -266,8 +282,41 @@ async def submit_training(
     - 500: 서버 내부 오류
     """
     try:
+        if (dataset_id is None) == (dataset_file is None):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Exactly one of dataset_id or dataset_file is required",
+            )
+
+        accessible_models = model_crud.get_accessible_visibility_map(
+            db=db,
+            surro_model_ids=[model_id],
+            member_id=current_user.member_id,
+        )
+        if model_id not in accessible_models:
+            raise HTTPException(status_code=404, detail="Model not found or access denied")
+
+        if dataset_id is not None and not dataset_crud.check_dataset_ownership(
+            db, dataset_id, current_user.member_id
+        ):
+            raise HTTPException(status_code=404, detail="Dataset not found or access denied")
+
+        training_request = TrainingPipelineRequest(
+            model_id=model_id,
+            dataset_id=dataset_id,
+            dataset_kind=dataset_kind,
+            train_name=train_name,
+            description=description,
+            gpus=gpus,
+            batch_size=batch_size,
+            epochs=epochs,
+            save_period=save_period,
+            weight_decay=weight_decay,
+            learning_rate=learning_rate,
+        )
         result = await pipeline_service.submit_training(
-            data=request.model_dump(),
+            data=training_request.model_dump(mode="json", exclude_none=True),
+            dataset_file=dataset_file,
             user_info={
                 "member_id": current_user.member_id,
                 "role": current_user.role,
@@ -282,10 +331,10 @@ async def submit_training(
                     db=db,
                     surro_experiment_id=experiment_id,
                     member_id=current_user.member_id,
-                    name=request.train_name,
-                    description=request.description,
-                    model_id=request.model_id,
-                    dataset_id=request.dataset_id,
+                    name=training_request.train_name,
+                    description=training_request.description,
+                    model_id=training_request.model_id,
+                    dataset_id=training_request.dataset_id,
                 )
                 logger.info(
                     f"Created experiment mapping: surro_id={experiment_id}, member_id={current_user.member_id}"
@@ -299,7 +348,11 @@ async def submit_training(
                 resource_type=ResourceType.EXPERIMENT,
                 actor_member_id=current_user.member_id,
                 resource_id=str(experiment_id),
-                metadata={"name": request.train_name, "model_id": request.model_id, "dataset_id": request.dataset_id},
+                metadata={
+                    "name": training_request.train_name,
+                    "model_id": training_request.model_id,
+                    "dataset_id": training_request.dataset_id,
+                },
             )
         return result
 
@@ -316,6 +369,7 @@ async def submit_training(
 @router.post("/model/registration", response_model=ModelRegistrationResponse, summary="Register Model")
 async def register_model(
     request: ModelRegistrationRequest,
+    db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
     """
@@ -340,6 +394,15 @@ async def register_model(
     - 500: 서버 내부 오류
     """
     try:
+        await _sync_external_experiments_for_admin(db, current_user)
+        if not experiment_crud.check_ownership(
+            db, request.experiment_id, current_user.member_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Learning item not found or access denied",
+            )
+
         result = await pipeline_service.register_model(
             data=request.model_dump(),
             user_info={
@@ -368,6 +431,7 @@ async def register_model(
 )
 async def get_training_status(
     experiment_id: int = Path(..., description="Learning ID"),
+    db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
     """
@@ -403,6 +467,13 @@ async def get_training_status(
     - 500: 서버 내부 오류
     """
     try:
+        await _sync_external_experiments_for_admin(db, current_user)
+        if not experiment_crud.check_ownership(db, experiment_id, current_user.member_id):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Learning item not found or access denied",
+            )
+
         result = await pipeline_service.get_training_status(
             experiment_id=experiment_id,
             user_info={
@@ -431,6 +502,7 @@ async def get_training_status(
 async def update_learning_internal(
     experiment_id: int = Path(..., description="Learning ID to update internally"),
     update_data: ExperimentInternalUpdateRequest = ...,
+    db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_admin_user),
 ):
     """
@@ -456,6 +528,16 @@ async def update_learning_internal(
     - 500: 서버 내부 오류
     """
     try:
+        mapping = db.query(Experiment).filter(
+            Experiment.surro_experiment_id == experiment_id,
+            Experiment.deleted_at.is_(None),
+        ).first()
+        if mapping is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Learning item not found",
+            )
+
         user_info = {
             "member_id": current_user.member_id,
             "role": current_user.role,

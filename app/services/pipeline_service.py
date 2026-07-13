@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
 import httpx
-from fastapi import HTTPException, status
+from fastapi import HTTPException, UploadFile, status
 
 from app.config import settings
 
@@ -96,15 +96,71 @@ class PipelineService:
         return response
 
     async def submit_training(self, data: Dict[str, Any],
+                              dataset_file: Optional[UploadFile] = None,
                               user_info: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
-        """학습 파이프라인 제출"""
+        """학습 파이프라인을 MLOps multipart 계약으로 제출"""
         try:
             url = f"{self.base_url}/pipeline/training"
             logger.info(f"Submitting training pipeline to: {url}")
 
-            response = await self._make_authenticated_request(
-                "POST", url, user_info=user_info, json=data
+            form_data = {
+                key: str(value)
+                for key, value in data.items()
+                if value is not None
+            }
+            multipart = [
+                (key, (None, value))
+                for key, value in form_data.items()
+            ]
+            if dataset_file is not None:
+                multipart.append(
+                    ("dataset_file", (
+                        dataset_file.filename,
+                        dataset_file.file,
+                        dataset_file.content_type or "application/zip",
+                    ))
+                )
+
+            token = await self._get_valid_token()
+            headers = self._get_headers(user_info)
+            headers["Authorization"] = f"Bearer {token}"
+            upload_timeout = getattr(settings, "PROXY_UPLOAD_TIMEOUT", 300.0)
+            response = await self.client.post(
+                url,
+                files=multipart,
+                headers=headers,
+                timeout=httpx.Timeout(
+                    timeout=upload_timeout,
+                    connect=settings.PROXY_CONNECT_TIMEOUT,
+                ),
             )
+
+            if response.status_code == 401:
+                self.access_token = None
+                token = await self._get_valid_token()
+                headers["Authorization"] = f"Bearer {token}"
+                if dataset_file is not None:
+                    await dataset_file.seek(0)
+                    multipart = [
+                        (key, (None, value))
+                        for key, value in form_data.items()
+                    ]
+                    multipart.append(
+                        ("dataset_file", (
+                            dataset_file.filename,
+                            dataset_file.file,
+                            dataset_file.content_type or "application/zip",
+                        ))
+                    )
+                response = await self.client.post(
+                    url,
+                    files=multipart,
+                    headers=headers,
+                    timeout=httpx.Timeout(
+                        timeout=upload_timeout,
+                        connect=settings.PROXY_CONNECT_TIMEOUT,
+                    ),
+                )
 
             if response.status_code == 200:
                 return response.json()

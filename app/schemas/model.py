@@ -1,4 +1,5 @@
 from datetime import datetime
+from enum import Enum
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
 
 from pydantic import BaseModel, Field, ConfigDict
@@ -8,6 +9,35 @@ if TYPE_CHECKING:
     pass
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+
+class PredefinedModelKey(str, Enum):
+    """MLOps가 지원하는 사전 정의 모델 키."""
+
+    YOLOS_TINY = "hustvl/yolos-tiny"
+    YOLOS_SMALL = "hustvl/yolos-small"
+    DETR_RESNET_50 = "facebook/detr-resnet-50"
+    DETR_RESNET_101 = "facebook/detr-resnet-101"
+    RF_DETR_LARGE = "Roboflow/rf-detr-large"
+    RF_DETR_MEDIUM = "Roboflow/rf-detr-medium"
+    MEDLLAMA3 = "ahmgam/medllama3-v20:latest"
+    BGE_M3 = "bge-m3"
+    ESM2_8M = "facebook/esm2_t6_8M_UR50D"
+    RNAFM = "multimolecule/rnafm"
+    MOLFORMER = "ibm-research/MoLFormer-XL-both-10pct"
+    ESMC_300M = "biohub/ESMC-300M"
+    ESMC_6B = "biohub/ESMC-6B"
+    ESMFOLD2 = "biohub/ESMFold2"
+    YOLOX_S = "yolox_s"
+    YOLOX_M = "yolox_m"
+    QWQ_32B = "qwq:32b"
+    GPT_OSS_20B = "gpt-oss:20b"
+    DEEPSEEK_R1_32B = "deepseek-r1:32b"
+    GRANITE_4_1_30B = "granite4.1:30b"
+    LFM2_24B = "lfm2:24b"
+    GEMMA4_27B = "gemma4:27b"
+    QWEN3_6_27B = "qwen3.6:27b"
+    NEMOTRON3_33B = "nemotron3:33b"
 
 
 class ProviderInfo(BaseModel):
@@ -70,7 +100,7 @@ class ModelCreateRequest(BaseModel):
 
     name: str = Field(..., description="모델 이름")
     description: Optional[str] = Field(None, description="모델 설명")
-    repo_id: str = Field(..., description="모델 저장소 ID")
+    repo_id: Optional[str] = Field(None, description="모델 저장소 ID")
     provider_id: int = Field(..., description="프로바이더 ID")
     type_id: int = Field(..., description="모델 타입 ID")
     format_id: int = Field(..., description="모델 포맷 ID")
@@ -132,6 +162,7 @@ class ModelResponse(BaseModel):
     learning_enable_yn: Optional[bool] = None
     opt_enable_yn: Optional[bool] = None
     visibility: Optional[str] = None
+    recommended_hparams: Dict[str, str] = Field(default_factory=dict)
     parent_model: Optional[Dict[str, Any]] = None
     child_models: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
 
@@ -143,21 +174,41 @@ class ModelCreateResponse(BaseModel):
     id: int
     name: str
     description: Optional[str] = None
-    repo_id: str  # 새로 생성된 모델은 repo_id 필수
+    repo_id: Optional[str] = None
     provider_info: Optional[ProviderInfo] = None
     type_info: Optional[TypeInfo] = None
     format_info: Optional[FormatInfo] = None
     parent_model_id: Optional[int] = None
-    task: Optional[str] = None
+    task: Optional[str] = Field(
+        None,
+        description=(
+            "모델 태스크: embedding | text-generation | object-detection | fill-mask | "
+            "protein-classification | protein-structure-prediction | vqa"
+        ),
+    )
     parameter: Optional[str] = None
     sample_code: Optional[str] = None
     registry: Optional[ModelRegistry] = None
-    created_at: datetime
-    updated_at: datetime
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
     deleted_at: Optional[datetime] = None
     created_by: Optional[str] = None
     updated_by: Optional[str] = None
     deleted_by: Optional[str] = None
+    learning_enable_yn: Optional[bool] = None
+    opt_enable_yn: Optional[bool] = None
+    visibility: Optional[str] = None
+    recommended_hparams: Dict[str, str] = Field(default_factory=dict)
+
+
+class ModelBaseDeploymentStatusRequest(BaseModel):
+    """내부 모델 기본 배포 상태 업데이트 요청."""
+
+    service_name: str
+    service_hostname: str
+    status: str
+    internal_url: Optional[str] = None
+    error_message: Optional[str] = None
 
 
 class InnoUserInfo(BaseModel):
@@ -172,7 +223,31 @@ class ModelWithMemberInfo(ModelResponse):
 
 
 class ModelListWrapper(BaseModel):
-    data: List[ModelWithMemberInfo]
+    data: List[ModelResponse]
+    total: int
+    page: int
+    size: int
+
+
+class ModelProviderListWrapper(BaseModel):
+    data: List[ProviderInfo]
+    total: int
+    page: int
+    size: int
+
+
+class ModelTypeListWrapper(BaseModel):
+    data: List[TypeInfo]
+    total: int
+    page: int
+    size: int
+
+
+class ModelFormatListWrapper(BaseModel):
+    data: List[FormatInfo]
+    total: int
+    page: int
+    size: int
 
 
 class ModelDetailResponse(ModelResponse):

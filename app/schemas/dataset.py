@@ -1,7 +1,24 @@
 from datetime import datetime
+from enum import Enum
 from typing import List, Optional, Dict, Any
 
 from pydantic import BaseModel, Field, ConfigDict
+
+
+class DatasetKindEnum(str, Enum):
+    """MLOps 데이터셋 학습 태스크 분류"""
+
+    OBJECT_DETECTION = "object-detection"
+    PROTEIN_CLASSIFICATION = "protein-classification"
+
+
+class DatasetKindReadSchema(BaseModel):
+    """데이터셋 분류 카탈로그 응답"""
+
+    name: DatasetKindEnum = Field(..., description="데이터셋 분류 식별자")
+    description: str = Field(..., description="데이터셋 분류 설명")
+    accepted_formats: List[str] = Field(..., description="허용 데이터셋 형식")
+    supported_models: List[str] = Field(..., description="학습 가능한 모델 키 목록")
 
 
 class DatasetBase(BaseModel):
@@ -14,12 +31,17 @@ class DatasetCreateRequest(BaseModel):
     """API 요청용 데이터셋 생성 스키마"""
     name: str = Field(..., description="데이터셋을 식별하기 위한 이름")
     description: Optional[str] = Field(None, description="데이터셋에 대한 상세 설명")
+    dataset_kind: DatasetKindEnum = Field(..., description="데이터셋 학습 태스크 분류")
 
 
 class DatasetUpdateRequest(BaseModel):
     """API 요청용 데이터셋 수정 스키마"""
     name: Optional[str] = Field(None, description="새로운 데이터셋 이름. 생략 시 기존 값 유지")
     description: Optional[str] = Field(None, description="새로운 데이터셋 설명. 생략 시 기존 값 유지")
+    kind: Optional[DatasetKindEnum] = Field(
+        None,
+        description="호환성 입력 필드. 현재 MLOps API는 PUT으로 데이터셋 분류를 변경하지 않습니다",
+    )
 
 
 class DatasetRegistryReadSchema(BaseModel):
@@ -30,12 +52,12 @@ class DatasetRegistryReadSchema(BaseModel):
     artifact_path: str = Field(..., description="MLflow에 저장된 데이터셋의 아티팩트 경로")
     uri: str = Field(..., description="MLflow에서 접근 가능한 데이터셋 URI")
     dataset_id: int = Field(..., description="연결된 데이터셋 ID")
-    created_at: datetime = Field(..., description="생성 시각")
-    updated_at: datetime = Field(..., description="수정 시각")
+    created_at: Optional[datetime] = Field(None, description="생성 시각")
+    updated_at: Optional[datetime] = Field(None, description="수정 시각")
     deleted_at: Optional[datetime] = Field(None, description="삭제 시각")
-    created_by: str = Field("", description="생성자")
-    updated_by: str = Field("", description="수정자")
-    deleted_by: str = Field("", description="삭제자")
+    created_by: Optional[str] = Field(None, description="생성자")
+    updated_by: Optional[str] = Field(None, description="수정자")
+    deleted_by: Optional[str] = Field(None, description="삭제자")
 
 
 class DatasetReadSchema(BaseModel):
@@ -45,13 +67,14 @@ class DatasetReadSchema(BaseModel):
     id: int = Field(..., description="데이터셋 고유 ID")
     name: str = Field(..., description="데이터셋 이름")
     description: Optional[str] = Field(None, description="데이터셋에 대한 상세 설명")
+    kind: Optional[DatasetKindEnum] = Field(None, description="데이터셋 학습 태스크 분류")
     dataset_registry: DatasetRegistryReadSchema = Field(..., description="데이터셋 레지스트리 정보")
-    created_at: datetime = Field(..., description="데이터셋 생성 시각")
-    updated_at: datetime = Field(..., description="데이터셋 수정 시각")
+    created_at: Optional[datetime] = Field(None, description="데이터셋 생성 시각")
+    updated_at: Optional[datetime] = Field(None, description="데이터셋 수정 시각")
     deleted_at: Optional[datetime] = Field(None, description="데이터셋 삭제 시각")
-    created_by: str = Field("", description="생성자")
-    updated_by: str = Field("", description="수정자")
-    deleted_by: str = Field("", description="삭제자")
+    created_by: Optional[str] = Field(None, description="생성자")
+    updated_by: Optional[str] = Field(None, description="수정자")
+    deleted_by: Optional[str] = Field(None, description="삭제자")
 
 
 class DatasetListResponse(BaseModel):

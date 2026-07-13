@@ -61,6 +61,7 @@ class ModelDetailSchema(BaseModel):
     parameter: Optional[str] = None
     sample_code: Optional[str] = None
     visibility: Optional[str] = None  # upstream inline 컴포넌트의 visibility 보존
+    recommended_hparams: Dict[str, str] = Field(default_factory=dict)
 
 
 class ExternalComponentSchema(BaseModel):
@@ -74,7 +75,7 @@ class ExternalComponentSchema(BaseModel):
     id: str
     workflow_id: str
     name: str
-    type: str  # START, END, MODEL, KNOWLEDGE_BASE
+    type: Literal["START", "END", "MODEL", "KNOWLEDGE_BASE"]
     description: Optional[str] = None
     model_id: Optional[int] = None
     model: Optional[ModelDetailSchema] = None
@@ -155,7 +156,7 @@ class ComponentCreateRequest(BaseModel):
     """컴포넌트 생성 요청 (MLOps v2)"""
     ref_id: str = Field(..., description="프론트엔드 생성 임시 참조 ID — Connection이 이 값으로 컴포넌트를 식별")
     name: str
-    type: str  # START, END, MODEL, KNOWLEDGE_BASE
+    type: Literal["START", "END", "MODEL", "KNOWLEDGE_BASE"]
     description: Optional[str] = None
     model_id: Optional[int] = None
     knowledge_base_id: Optional[int] = None
@@ -191,7 +192,7 @@ class WorkflowUpdateRequest(BaseModel):
     name: Optional[str] = Field(None, description="수정할 이름")
     description: Optional[str] = Field(None, description="수정할 설명")
     category: Optional[str] = Field(None, description="수정할 카테고리")
-    status: Optional[str] = Field(None, description="수정할 상태")
+    status: Optional[Literal["DRAFT", "ACTIVE", "ERROR"]] = Field(None, description="수정할 상태")
     service_id: Optional[str] = Field(None, description="수정할 서비스 ID")
     workflow_definition: Optional[WorkflowDefinition] = Field(None, description="워크플로우 정의")
 
@@ -308,6 +309,7 @@ class ComponentTestResult(BaseModel):
     component_name: str
     component_type: str
     model_type: Optional[str] = None
+    task: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
 
@@ -469,8 +471,19 @@ class TemplateUpdateRequest(BaseModel):
     name: Optional[str] = Field(None, description="수정할 이름")
     description: Optional[str] = Field(None, description="수정할 설명")
     category: Optional[str] = Field(None, description="수정할 카테고리")
-    status: Optional[str] = Field(None, description="수정할 상태")
+    status: Optional[Literal["DRAFT", "ACTIVE", "ERROR"]] = Field(None, description="수정할 상태")
     workflow_definition: Optional[WorkflowDefinition] = Field(None, description="워크플로우 정의")
+
+
+class WorkflowComponentDeploymentStatusRequest(BaseModel):
+    """내부 워크플로우 컴포넌트 배포 상태 업데이트 요청."""
+
+    service_name: str
+    service_hostname: str
+    model_name: str
+    status: str
+    internal_url: Optional[str] = None
+    error_message: Optional[str] = None
 
 
 class TemplateResponse(BaseModel):
@@ -499,7 +512,7 @@ class TemplateListResponse(BaseModel):
 
 class ComponentTypeSchema(BaseModel):
     """컴포넌트 타입 스키마"""
-    type: str
+    type: Literal["START", "END", "MODEL", "KNOWLEDGE_BASE"]
     component_id: str
     name: str
     description: str

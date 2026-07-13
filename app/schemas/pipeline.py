@@ -2,22 +2,24 @@ from typing import Optional, List, Any
 
 from pydantic import BaseModel, Field, ConfigDict
 
+from app.schemas.dataset import DatasetKindEnum
+
 
 class TrainingPipelineRequest(BaseModel):
-    """학습 파이프라인 요청"""
+    """MLOps multipart 학습 파이프라인 요청의 Form 필드"""
     model_config = ConfigDict(protected_namespaces=())
 
     model_id: int = Field(..., description="학습에 사용할 모델 ID")
-    dataset_id: int = Field(..., description="학습에 사용할 데이터셋 ID")
+    dataset_id: Optional[int] = Field(None, description="기존 데이터셋 ID. dataset_file과 동시에 사용할 수 없음")
+    dataset_kind: Optional[DatasetKindEnum] = Field(None, description="데이터셋 학습 태스크 분류")
     train_name: str = Field("", description="학습 실험 이름")
     description: str = Field("", description="학습 실험 설명")
-    gpus: str = Field("1", description="사용할 GPU 개수")
-    batch_size: str = Field("32", description="배치 크기")
-    epochs: str = Field("5", description="학습 에포크 수")
-    save_period: str = Field("1", description="모델 저장 주기")
-    weight_decay: str = Field("5e-4", description="가중치 감쇠 계수")
-    lr0: str = Field("0.01", description="초기 학습률")
-    lrf: str = Field("0.05", description="최종 학습률")
+    gpus: Optional[str] = Field(None, description="사용할 GPU 개수")
+    batch_size: Optional[str] = Field(None, description="배치 크기")
+    epochs: Optional[str] = Field(None, description="학습 에포크 수")
+    save_period: Optional[str] = Field(None, description="모델 저장 주기")
+    weight_decay: Optional[str] = Field(None, description="가중치 감쇠 계수")
+    learning_rate: Optional[str] = Field(None, description="학습률")
 
 
 class TrainingPipelineResponse(BaseModel):
