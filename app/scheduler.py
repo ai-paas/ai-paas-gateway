@@ -87,6 +87,43 @@ def job_refresh_dashboard_services() -> None:
         db.close()
 
 
+def job_reconcile_model_visibility() -> None:
+    """주기: MLOps 모델 visibility → gateway is_catalog 캐시 정정 (backstop).
+
+    목록 조회의 read-through 동기화가 1차 수단이고, 이 잡은 게이트웨이를 거치지 않은
+    변경(파이프라인 파생 모델, MLOps 재분류)을 흡수한다. MLOps 호출 필요.
+    """
+    import asyncio
+
+    from app.cruds import model_crud
+    from app.services.model_service import ModelService, normalize_visibility
+
+    db = SessionLocal()
+    try:
+        async def _fetch():
+            svc = ModelService()  # 신규 client 인스턴스 (루프 교차 재사용 회피)
+            try:
+                return await svc.get_models(skip=0, limit=1000)
+            finally:
+                await svc.close()
+
+        models = asyncio.run(_fetch())
+        vis_map = {
+            m.id: v == "CATALOG"
+            for m in models
+            if (v := normalize_visibility(m.visibility)) is not None
+        }
+        n = model_crud.sync_visibility_cache(db, vis_map)
+        logger.info(
+            "[scheduler] model visibility reconciled: upstream=%d, updated=%d",
+            len(models), n,
+        )
+    except Exception:
+        logger.exception("[scheduler] model visibility reconcile failed")
+    finally:
+        db.close()
+
+
 # ---------- lifecycle ----------
 
 def start_scheduler() -> Optional[BackgroundScheduler]:
@@ -157,6 +194,22 @@ def start_scheduler() -> Optional[BackgroundScheduler]:
         )
     else:
         logger.info("[scheduler] dashboard pre-warm job skipped (SCHEDULER_INCLUDE_DASHBOARD=false)")
+
+    # 모델 visibility reconcile — MLOps 호출 필요(SCHEDULER_INCLUDE_MODEL_VISIBILITY).
+    # 목록 조회 read-through 동기화의 backstop이므로 default off.
+    if settings.SCHEDULER_INCLUDE_MODEL_VISIBILITY:
+        sched.add_job(
+            job_reconcile_model_visibility,
+            trigger=IntervalTrigger(minutes=settings.SCHEDULER_MODEL_VISIBILITY_MINUTES),
+            id="reconcile_model_visibility",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+    else:
+        logger.info(
+            "[scheduler] model visibility reconcile job skipped (SCHEDULER_INCLUDE_MODEL_VISIBILITY=false)"
+        )
 
     sched.start()
     _scheduler = sched

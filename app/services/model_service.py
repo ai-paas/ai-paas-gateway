@@ -24,6 +24,14 @@ def _model_upstream_error_detail(response: httpx.Response) -> Any:
     return detail if isinstance(detail, (str, list, dict)) else "upstream request rejected"
 
 
+def normalize_visibility(value: Any) -> Optional[str]:
+    """MLOps visibility 값을 'CATALOG'/'CUSTOM'으로 정규화. 빈값/미지원 값은 None."""
+    if not isinstance(value, str):
+        return None
+    upper = value.strip().upper()
+    return upper if upper in ("CATALOG", "CUSTOM") else None
+
+
 def collect_relation_model_ids(model: ModelResponse) -> set:
     """parent_model 체인 + child_models 트리의 모든 모델 id 수집."""
     ids: set = set()

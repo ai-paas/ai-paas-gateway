@@ -302,6 +302,53 @@ class ModelCRUD:
                 visibility_by_id[mapping.surro_model_id] = visibility
         return visibility_by_id
 
+    def get_active_mappings_brief(
+            self,
+            db: Session,
+            surro_model_ids: List[int],
+    ) -> List[tuple]:
+        """활성(미삭제) 매핑의 (surro_model_id, is_catalog, created_by) 목록.
+
+        목록 분류/노출 판정용 — 권한(created_by)과 soft-delete 상태는 gateway DB가 소스.
+        """
+        ids = {i for i in surro_model_ids if i is not None}
+        if not ids:
+            return []
+        return db.query(
+            Model.surro_model_id, Model.is_catalog, Model.created_by
+        ).filter(
+            Model.surro_model_id.in_(ids),
+            Model.deleted_at.is_(None),
+            Model.is_active == True,
+        ).all()
+
+    def sync_visibility_cache(
+            self,
+            db: Session,
+            is_catalog_by_surro_id: Dict[int, bool],
+    ) -> int:
+        """MLOps visibility를 소스로 is_catalog 캐시를 정정. 갱신된 행 수 반환.
+
+        분류의 단일 소스는 MLOps `visibility`이며 is_catalog는 그 로컬 캐시
+        (DB-only 소비처: 대시보드 카운트, 관계 노드 보강, 접근 체크용).
+        soft-delete된 행도 캐시는 최신으로 유지한다.
+        """
+        if not is_catalog_by_surro_id:
+            return 0
+        rows = db.query(Model).filter(
+            Model.surro_model_id.in_(is_catalog_by_surro_id.keys()),
+        ).all()
+        changed = 0
+        for row in rows:
+            want = is_catalog_by_surro_id.get(row.surro_model_id)
+            if want is not None and row.is_catalog != want:
+                row.is_catalog = want
+                row.updated_by = "visibility-sync"
+                changed += 1
+        if changed:
+            db.commit()
+        return changed
+
     # 기존 메서드들은 호환성을 위해 유지하되, 새로운 구조에 맞게 수정할 수 있음
     def get_model_by_name(self, db: Session, name: str, provider_id: int) -> Optional[Model]:
         """이름과 프로바이더로 모델 조회 (기존 호환성 유지)"""

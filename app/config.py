@@ -120,6 +120,11 @@ class Settings:
     SCHEDULER_INCLUDE_DASHBOARD: bool = _get_bool("SCHEDULER_INCLUDE_DASHBOARD", False)
     SCHEDULER_DASHBOARD_REFRESH_MINUTES: int = int(os.getenv("SCHEDULER_DASHBOARD_REFRESH_MINUTES", "10"))
 
+    # 모델 visibility reconcile 잡 — MLOps visibility → gateway is_catalog 캐시 정정.
+    # 목록 조회가 read-through로도 동기화하므로 backstop 용도. MLOps(PROXY) 필요.
+    SCHEDULER_INCLUDE_MODEL_VISIBILITY: bool = _get_bool("SCHEDULER_INCLUDE_MODEL_VISIBILITY", False)
+    SCHEDULER_MODEL_VISIBILITY_MINUTES: int = int(os.getenv("SCHEDULER_MODEL_VISIBILITY_MINUTES", "30"))
+
     ANY_CLOUD_ENABLED: bool = _get_bool("ANY_CLOUD_ENABLED", False)
     ANY_CLOUD_TARGET_BASE_URL: str = os.getenv("ANY_CLOUD_TARGET_BASE_URL", "")
     ANY_CLOUD_TIMEOUT: float = float(os.getenv("ANY_CLOUD_TIMEOUT", "30.0"))
