@@ -8,7 +8,7 @@ from app.auth import get_current_admin_user, get_current_user
 from app.common.sort import parse_sort, sort_in_memory
 from app.cruds import model_crud
 from app.database import get_db
-from app.models import Member, Model
+from app.models import Member
 from app.schemas.model import (
     ModelResponse, ModelCreateRequest,
     ModelCreateResponse,
@@ -63,11 +63,13 @@ def _create_pagination_response(data: List[Any], total: int, page: int, size: in
 
 
 def _derive_is_catalog(visibility: Optional[str], current_user: Member) -> bool:
-    """생성된 모델의 gateway 분류 캐시 값. MLOps visibility 우선, 없으면 기존 role 규칙 fallback."""
+    """생성 모델의 분류 캐시. visibility가 없으면 role fallback, 알 수 없는 값은 비공개."""
     normalized = normalize_visibility(visibility)
     if normalized is not None:
         return normalized == "CATALOG"
-    return current_user.role.lower() == "admin"
+    if visibility is not None and str(visibility).strip():
+        return False
+    return (current_user.role or "").lower() == "admin"
 
 
 def _prepare_model_classifier(db: Session, models: List[ModelResponse], member_id: str):
@@ -105,6 +107,12 @@ def _prepare_model_classifier(db: Session, models: List[ModelResponse], member_i
     def classify(model: ModelResponse) -> Optional[str]:
         vis = normalize_visibility(model.visibility)
         if vis is None:
+            if model.visibility is not None and str(model.visibility).strip():
+                logger.warning(
+                    "unsupported model visibility: model_id=%s",
+                    model.id,
+                )
+                return None
             vis = "CATALOG" if model.id in cached_catalog_ids else "CUSTOM"
         if vis == "CATALOG":
             return "catalog" if model.id in active_ids else None
@@ -280,6 +288,7 @@ async def create_model(
                 f"member_id={current_user.member_id}, is_catalog={is_catalog}"
             )
         except Exception as mapping_error:
+            db.rollback()
             logger.error(f"Failed to create model mapping: {str(mapping_error)}")
             # 매핑 저장에 실패해도 Surro API에는 이미 생성되었으므로, 경고만 로그
             logger.warning(f"Model {created_model.id} created in Surro API but mapping failed")
@@ -312,8 +321,9 @@ async def get_all_models(
         model_type_id: Optional[int] = Query(None, description="모델 타입 ID로 필터링"),
         model_provider_id: Optional[int] = Query(None, description="모델 제공자 ID로 필터링"),
         model_format_id: Optional[int] = Query(None, description="모델 포맷 ID로 필터링"),
-        visibility: Optional[Literal["catalog", "custom", "CATALOG", "CUSTOM"]] = Query(
+        visibility: Optional[str] = Query(
             None,
+            pattern=r"(?i)^(catalog|custom)$",
             description=(
                 "모델 분류 필터 (MLOps 명세와 동일): 'catalog'(카탈로그만), "
                 "'custom'(내 커스텀 모델만), 생략 시 전체(카탈로그 + 내 커스텀). 대소문자 무관"
@@ -1047,6 +1057,7 @@ async def auto_generate_model(
                 f"member_id={current_user.member_id}, is_catalog={is_catalog}"
             )
         except Exception as mapping_error:
+            db.rollback()
             logger.warning(
                 f"Model {created.get('id')} auto-generated in MLOps but mapping failed: {mapping_error}"
             )
@@ -1204,18 +1215,8 @@ async def get_model(
     - **502 / 504**: upstream 오류 / upstream 타임아웃
     """
     try:
-        # 1. 사용자가 해당 모델을 소유하고 있는지 확인
-        is_owner = model_crud.check_model_ownership(db, model_id, current_user.member_id)
-
-        # 2. 소유하지 않았다면, 카탈로그 모델인지 확인
-        catalog_model = db.query(Model).filter(
-            Model.is_catalog == True,
-            Model.deleted_at.is_(None),
-            Model.surro_model_id == model_id
-        ).first()
-
-        # 3. 사용자 소유 모델도 아니고, 카탈로그 모델도 아닐 경우 접근 불가
-        if not is_owner and not catalog_model:
+        # 1. 외부 ID만으로 upstream을 호출하지 않도록 활성 gateway 매핑을 먼저 확인
+        if not model_crud.get_active_mappings_brief(db, [model_id]):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Model {model_id} not found or access denied"
@@ -1237,7 +1238,15 @@ async def get_model(
                 detail=f"Model {model_id} not found"
             )
 
-        # 3. 관계 노드는 gateway DB의 현재 사용자/카탈로그 매핑으로만 visibility 보강
+        # 3. MLOps 최신 visibility로 최종 노출 권한 판정 + is_catalog 캐시 동기화
+        classify = _prepare_model_classifier(db, [model], current_user.member_id)
+        if classify(model) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Model {model_id} not found or access denied"
+            )
+
+        # 4. 관계 노드는 gateway DB의 현재 사용자/카탈로그 매핑으로만 visibility 보강
         relation_ids = list(collect_relation_model_ids(model))
         visibility_by_id = model_crud.get_accessible_visibility_map(
             db=db,

@@ -103,7 +103,18 @@ def job_reconcile_model_visibility() -> None:
         async def _fetch():
             svc = ModelService()  # 신규 client 인스턴스 (루프 교차 재사용 회피)
             try:
-                return await svc.get_models(skip=0, limit=1000)
+                models = []
+                seen_ids = set()
+                skip = 0
+                page_size = 1000
+                while True:
+                    page = await svc.get_models(skip=skip, limit=page_size)
+                    new_models = [model for model in page if model.id not in seen_ids]
+                    models.extend(new_models)
+                    seen_ids.update(model.id for model in new_models)
+                    if len(page) < page_size or not new_models:
+                        return models
+                    skip += page_size
             finally:
                 await svc.close()
 
