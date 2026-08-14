@@ -135,6 +135,48 @@ def job_reconcile_model_visibility() -> None:
         db.close()
 
 
+def job_reconcile_workflow_mappings() -> None:
+    """주기: MLOps에서 사라진 워크플로우의 stale 매핑 soft-delete.
+
+    목록 조회 라우트는 원격 장애나 service/status 필터가 만든 빈 결과로 멀쩡한
+    매핑을 지울 수 있어 이 작업을 하지 않는다. 여기서는 필터 없는 전체 목록
+    (템플릿 포함)을 받아 그 목록에 없는 활성 매핑만 정리한다. MLOps 호출 필요.
+    """
+    import asyncio
+
+    from app.cruds.workflow import workflow_crud
+    from app.services.workflow_service import WorkflowService
+
+    db = SessionLocal()
+    try:
+        async def _fetch():
+            svc = WorkflowService()  # 신규 client 인스턴스 (루프 교차 재사용 회피)
+            try:
+                return await svc.get_workflows(page=None, page_size=None)
+            finally:
+                await svc.close()
+
+        external = asyncio.run(_fetch())
+        if not external:
+            # 빈 응답을 "전부 삭제됨"으로 해석하면 안 된다.
+            logger.warning("[scheduler] workflow reconcile skipped (upstream returned no workflows)")
+            return
+
+        n = workflow_crud.soft_delete_missing_mappings(
+            db=db,
+            active_surro_workflow_ids=[w.id for w in external],
+            deleted_by="system:workflow-reconcile",
+        )
+        logger.info(
+            "[scheduler] workflow mappings reconciled: upstream=%d, soft_deleted=%d",
+            len(external), n,
+        )
+    except Exception:
+        logger.exception("[scheduler] workflow mapping reconcile failed")
+    finally:
+        db.close()
+
+
 # ---------- lifecycle ----------
 
 def start_scheduler() -> Optional[BackgroundScheduler]:
@@ -220,6 +262,21 @@ def start_scheduler() -> Optional[BackgroundScheduler]:
     else:
         logger.info(
             "[scheduler] model visibility reconcile job skipped (SCHEDULER_INCLUDE_MODEL_VISIBILITY=false)"
+        )
+
+    # 워크플로우 매핑 reconcile — 목록 조회가 stale 매핑을 지우지 않으므로 유일한 정리 주체.
+    if settings.SCHEDULER_INCLUDE_WORKFLOW_RECONCILE:
+        sched.add_job(
+            job_reconcile_workflow_mappings,
+            trigger=IntervalTrigger(minutes=settings.SCHEDULER_WORKFLOW_RECONCILE_MINUTES),
+            id="reconcile_workflow_mappings",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+    else:
+        logger.info(
+            "[scheduler] workflow mapping reconcile job skipped (SCHEDULER_INCLUDE_WORKFLOW_RECONCILE=false)"
         )
 
     sched.start()

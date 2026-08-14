@@ -154,6 +154,38 @@ class WorkflowCRUD:
             return True
         return False
 
+    def soft_delete_missing_mappings(
+            self,
+            db: Session,
+            active_surro_workflow_ids: List[str],
+            deleted_by: str = "system",
+    ) -> int:
+        """외부 목록에 없는 활성 매핑을 soft-delete 한다.
+
+        목록 조회 라우트는 원격 장애나 service/status 필터가 만든 빈 결과로
+        멀쩡한 매핑을 지울 수 있어 이 작업을 하지 않는다. 호출자는 필터 없는
+        전체 목록을 넘겨야 한다.
+        """
+        active_id_set = set(active_surro_workflow_ids)
+        targets = db.query(Workflow).filter(
+            Workflow.deleted_at.is_(None),
+            Workflow.is_active == True,
+        ).all()
+
+        now = datetime.now(timezone.utc)
+        deleted_count = 0
+        for workflow in targets:
+            if workflow.surro_workflow_id in active_id_set:
+                continue
+            workflow.is_active = False
+            workflow.deleted_at = now
+            workflow.deleted_by = deleted_by
+            deleted_count += 1
+
+        if deleted_count:
+            db.commit()
+        return deleted_count
+
 
 # 전역 CRUD 인스턴스
 workflow_crud = WorkflowCRUD()
