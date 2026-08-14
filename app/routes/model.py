@@ -62,14 +62,10 @@ def _create_pagination_response(data: List[Any], total: int, page: int, size: in
     }
 
 
-def _derive_is_catalog(visibility: Optional[str], current_user: Member) -> bool:
-    """생성 모델의 분류 캐시. visibility가 없으면 role fallback, 알 수 없는 값은 비공개."""
+def _derive_is_catalog(visibility: Optional[str]) -> bool:
+    """생성 모델의 분류 캐시. 누락/미지원 값은 호출자 역할과 무관하게 CUSTOM."""
     normalized = normalize_visibility(visibility)
-    if normalized is not None:
-        return normalized == "CATALOG"
-    if visibility is not None and str(visibility).strip():
-        return False
-    return (current_user.role or "").lower() == "admin"
+    return normalized == "CATALOG"
 
 
 def _prepare_model_classifier(db: Session, models: List[ModelResponse], member_id: str):
@@ -271,9 +267,9 @@ async def create_model(
 
         # 2. Inno DB에 사용자-모델 매핑 저장
         try:
-            # 분류는 MLOps visibility가 소스 (응답에 없으면 기존 role 규칙 fallback)
+            # 분류는 MLOps visibility가 소스. 누락 시 호출자 역할과 무관하게 CUSTOM.
             is_catalog = _derive_is_catalog(
-                getattr(created_model, "visibility", None), current_user
+                getattr(created_model, "visibility", None)
             )
 
             model_crud.create_model_mapping(
@@ -1043,8 +1039,8 @@ async def auto_generate_model(
 
         # 게이트웨이 DB에 사용자-모델 매핑 저장
         try:
-            # 분류는 MLOps visibility가 소스 (응답에 없으면 기존 role 규칙 fallback)
-            is_catalog = _derive_is_catalog(created.get('visibility'), current_user)
+            # 분류는 MLOps visibility가 소스. 누락 시 호출자 역할과 무관하게 CUSTOM.
+            is_catalog = _derive_is_catalog(created.get('visibility'))
             model_crud.create_model_mapping(
                 db=db,
                 surro_model_id=created.get('id'),
