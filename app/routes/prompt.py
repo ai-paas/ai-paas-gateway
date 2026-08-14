@@ -127,6 +127,8 @@ def _sync_external_prompts_to_db(
                 prompt_variable=ext.prompt_variable,
             )
         except Exception as sync_error:
+            # 실패한 flush 가 세션을 오염시키면 이후 항목과 본 조회까지 전부 실패한다.
+            db.rollback()
             logger.warning("Failed to sync external prompt %s: %s", ext.id, sync_error)
 
 

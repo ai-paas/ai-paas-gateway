@@ -113,6 +113,8 @@ def _register_missing_experiments_to_admin(
                 f"Registered missing experiment under admin ({current_user.member_id}): surro_id={exp_id}"
             )
         except Exception as sync_error:
+            # 실패한 flush 가 세션을 오염시키면 이후 항목과 본 조회까지 전부 실패한다.
+            db.rollback()
             logger.warning(f"Failed to sync external experiment {exp_id}: {str(sync_error)}")
 
 
