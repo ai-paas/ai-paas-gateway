@@ -125,6 +125,11 @@ class Settings:
     SCHEDULER_INCLUDE_MODEL_VISIBILITY: bool = _get_bool("SCHEDULER_INCLUDE_MODEL_VISIBILITY", False)
     SCHEDULER_MODEL_VISIBILITY_MINUTES: int = int(os.getenv("SCHEDULER_MODEL_VISIBILITY_MINUTES", "30"))
 
+    # 워크플로우 매핑 reconcile 잡 — MLOps에서 사라진 워크플로우의 stale 매핑 soft-delete.
+    # 목록 조회는 원격 장애/필터로 멀쩡한 매핑을 지울 위험이 있어 이 잡에만 위임. MLOps(PROXY) 필요.
+    SCHEDULER_INCLUDE_WORKFLOW_RECONCILE: bool = _get_bool("SCHEDULER_INCLUDE_WORKFLOW_RECONCILE", False)
+    SCHEDULER_WORKFLOW_RECONCILE_MINUTES: int = int(os.getenv("SCHEDULER_WORKFLOW_RECONCILE_MINUTES", "30"))
+
     ANY_CLOUD_ENABLED: bool = _get_bool("ANY_CLOUD_ENABLED", False)
     ANY_CLOUD_TARGET_BASE_URL: str = os.getenv("ANY_CLOUD_TARGET_BASE_URL", "")
     ANY_CLOUD_TIMEOUT: float = float(os.getenv("ANY_CLOUD_TIMEOUT", "30.0"))
