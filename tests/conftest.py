@@ -68,6 +68,10 @@ def db():
     5. session.close()
     6. transaction.rollback() → 테스트 데이터 롤백
     7. connection.close()
+
+    주의: 이 세션은 외부 트랜잭션에 rollback_only 로 참여한다. 라우트가
+    session.rollback() 을 호출하는 경로를 검증할 때는 이 fixture 대신 엔진에
+    직접 바인딩한 세션을 써야 한다 (tests/test_prompt_sync.py 참고).
     """
     connection = _engine.connect()
     transaction = connection.begin()
