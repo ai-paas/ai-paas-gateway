@@ -1,17 +1,21 @@
 import logging
 from typing import List, Optional, Dict, Any, Literal
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Path, File, UploadFile, Form, Request
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_admin_user, get_current_user
 from app.common.sort import parse_sort, sort_in_memory
+from app.config import settings
 from app.cruds import model_crud
 from app.database import get_db
 from app.models import Member
 from app.schemas.model import (
     ModelResponse, ModelCreateRequest,
     ModelCreateResponse,
+    ModelFileDownloadUrlResponse,
+    ModelFileListWrapper,
     InnoUserInfo,
     ModelBaseDeploymentStatusRequest,
     ModelFormatListWrapper,
@@ -43,6 +47,14 @@ _MODEL_SORT_GETTERS = {
 _MODEL_SORT_DEFAULT = [("created_at", True)]
 _MODEL_SORT_TIE_BREAKER = lambda m: m.id
 
+_MODEL_FILE_SORT_GETTERS = {
+    "name": lambda file: file.name,
+    "size_bytes": lambda file: file.size_bytes,
+    "last_modified": lambda file: file.last_modified,
+}
+_MODEL_FILE_SORT_DEFAULT = [("name", False)]
+_MODEL_FILE_SORT_TIE_BREAKER = lambda file: file.name
+
 
 def _create_inno_user_info(user: Member) -> InnoUserInfo:
     """Member 객체에서 InnoUserInfo 생성"""
@@ -66,6 +78,20 @@ def _derive_is_catalog(visibility: Optional[str]) -> bool:
     """생성 모델의 분류 캐시. 누락/미지원 값은 호출자 역할과 무관하게 CUSTOM."""
     normalized = normalize_visibility(visibility)
     return normalized == "CATALOG"
+
+
+def _ensure_model_file_access(db: Session, model_id: int, member_id: str) -> None:
+    """현재 사용자의 활성 모델 매핑 또는 활성 카탈로그 매핑을 확인."""
+    visibility_by_id = model_crud.get_accessible_visibility_map(
+        db=db,
+        surro_model_ids=[model_id],
+        member_id=member_id,
+    )
+    if model_id not in visibility_by_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Model {model_id} not found or access denied",
+        )
 
 
 def _prepare_model_classifier(db: Session, models: List[ModelResponse], member_id: str):
@@ -1138,6 +1164,127 @@ async def update_model_base_deployment_status(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update base deployment status: {str(e)}"
         )
+
+
+@router.get(
+    "/{model_id}/files/download-url",
+    response_model=ModelFileDownloadUrlResponse,
+    summary="모델 파일 다운로드 URL 발급",
+    responses={
+        401: {"description": "Gateway 인증 실패"},
+        404: {"description": "모델 또는 파일이 없거나 모델 접근 권한 없음"},
+        409: {"description": "파일 다운로드를 제공하지 않는 저장 유형"},
+        500: {"description": "Gateway 내부 오류"},
+        502: {"description": "MLOps 또는 스토리지 연동 실패"},
+        504: {"description": "MLOps 응답 시간 초과"},
+    },
+)
+async def get_model_file_download_url(
+        model_id: int = Path(..., description="Gateway DB에 매핑된 MLOps 모델 ID"),
+        name: str = Query(
+            ...,
+            description="파일 목록 응답의 data[].name 값. 상대 경로를 그대로 전달",
+        ),
+        db: Session = Depends(get_db),
+        current_user: Member = Depends(get_current_user),
+):
+    """
+    모델 파일의 실제 스토리지 서명 URL을 다운로드 직전에 발급합니다.
+
+    현재 로그인 사용자의 활성 Gateway DB 매핑 또는 활성 카탈로그 매핑을 먼저 확인한 뒤
+    MLOps에 요청합니다. 응답의 `download_url`은 5분 동안 유효하며 인증 없이 접근할 수
+    있으므로 저장하거나 로그에 남기지 않아야 합니다. 브라우저는 발급 직후 해당 URL로
+    이동하고 파일 본문을 JavaScript 메모리에 적재하지 않는 방식을 권장합니다.
+
+    MLOps가 반환한 `404`와 `409`는 그대로 전달합니다. MLOps의 스토리지 장애를 포함한
+    5xx는 Gateway 표준에 따라 `502`, 시간 초과는 `504`로 변환합니다.
+    """
+    _ensure_model_file_access(db, model_id, current_user.member_id)
+    return await model_service.get_model_file_download_url(
+        model_id=model_id,
+        name=name,
+        user_info=_create_inno_user_info(current_user).model_dump(),
+    )
+
+
+@router.get(
+    "/{model_id}/files",
+    response_model=ModelFileListWrapper,
+    summary="모델 저장 파일 목록 조회",
+    responses={
+        401: {"description": "Gateway 인증 실패"},
+        404: {"description": "모델이 없거나 접근 권한 없음"},
+        500: {"description": "Gateway 내부 오류"},
+        502: {"description": "MLOps 또는 스토리지 연동 실패"},
+        504: {"description": "MLOps 응답 시간 초과"},
+    },
+)
+async def get_model_files(
+        model_id: int = Path(..., description="Gateway DB에 매핑된 MLOps 모델 ID"),
+        page: int = Query(1, ge=1, description="페이지 번호"),
+        size: int = Query(20, ge=1, le=100, description="페이지당 항목 수"),
+        sort: Optional[str] = Query(
+            None,
+            description=(
+                "정렬 기준. name, size_bytes, last_modified를 지원하며 "
+                "내림차순은 - 접두사를 사용"
+            ),
+        ),
+        db: Session = Depends(get_db),
+        current_user: Member = Depends(get_current_user),
+):
+    """
+    현재 로그인 사용자가 접근할 수 있는 모델의 저장 파일을 조회합니다.
+
+    MLflow 아티팩트의 평면 파일 목록을 `{data,total,page,size}` 형식으로 반환합니다.
+    MLOps cursor는 Gateway가 내부에서 모두 수집하며 공개 API에는 노출하지 않습니다.
+    기본 정렬은 `name` 오름차순이고 `name`, `size_bytes`, `last_modified` 다중 정렬을
+    지원합니다. `.cache` 경로는 MLOps에서 제외합니다. `OLLAMA`와 `NONE` 모델은 오류가
+    아니라 HTTP 200과 빈 `data`를 반환합니다.
+
+    `data[].download_url`은 파일 주소가 아니라 이 Gateway의 서명 URL 발급 API 경로입니다.
+    현재 사용자의 활성 Gateway DB 매핑 또는 활성 카탈로그 매핑을 원격 호출 전에 확인합니다.
+    MLOps의 스토리지 장애를 포함한 5xx는 `502`, 시간 초과는 `504`로 변환합니다.
+    """
+    _ensure_model_file_access(db, model_id, current_user.member_id)
+    parsed_sort = parse_sort(sort)
+    # 허용 필드 검증을 upstream 전체 cursor 조회보다 먼저 수행한다.
+    sort_in_memory(
+        [],
+        parsed=parsed_sort,
+        getters=_MODEL_FILE_SORT_GETTERS,
+        default=_MODEL_FILE_SORT_DEFAULT,
+        tie_breaker_getter=_MODEL_FILE_SORT_TIE_BREAKER,
+    )
+    result = await model_service.get_all_model_files(
+        model_id=model_id,
+        user_info=_create_inno_user_info(current_user).model_dump(),
+    )
+    sorted_files = sort_in_memory(
+        result.files,
+        parsed=parsed_sort,
+        getters=_MODEL_FILE_SORT_GETTERS,
+        default=_MODEL_FILE_SORT_DEFAULT,
+        tie_breaker_getter=_MODEL_FILE_SORT_TIE_BREAKER,
+    )
+    start = (page - 1) * size
+    data = [
+        file.model_copy(
+            update={
+                "download_url": (
+                    f"{settings.API_V1_STR}/models/{model_id}/files/download-url?"
+                    f"{urlencode({'name': file.name})}"
+                )
+            }
+        )
+        for file in sorted_files[start:start + size]
+    ]
+    return _create_pagination_response(
+        data=data,
+        total=len(sorted_files),
+        page=page,
+        size=size,
+    )
 
 
 @router.get("/{model_id}", response_model=ModelResponse)
