@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import Enum
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import AnyHttpUrl, AwareDatetime, BaseModel, Field, ConfigDict, model_validator
 
 # 타입 체킹할 때만 import (순환 참조 방지)
 if TYPE_CHECKING:
@@ -199,6 +199,84 @@ class ModelCreateResponse(BaseModel):
     opt_enable_yn: Optional[bool] = None
     visibility: Optional[str] = None
     recommended_hparams: Dict[str, str] = Field(default_factory=dict)
+
+
+class ModelFileStorageType(str, Enum):
+    """MLOps 모델 파일 저장 유형."""
+
+    MLFLOW = "MLFLOW"
+    OLLAMA = "OLLAMA"
+    NONE = "NONE"
+
+
+class ModelFileEntry(BaseModel):
+    """모델 아티팩트의 파일 항목."""
+
+    name: str = Field(..., description="모델 저장 위치 기준 상대 경로")
+    size_bytes: int = Field(..., ge=0, description="파일 크기(바이트)")
+    last_modified: AwareDatetime = Field(..., description="UTC 기준 마지막 수정 시각")
+    download_url: str = Field(
+        ...,
+        description="실제 다운로드 URL을 발급받는 Gateway API 상대 경로",
+    )
+
+
+class ModelFileListResponse(BaseModel):
+    """MLOps 모델 파일 목록 응답."""
+
+    model_id: int = Field(..., description="MLOps 모델 ID")
+    model_name: str = Field(..., description="모델 표시 이름")
+    storage_type: ModelFileStorageType = Field(..., description="모델 파일 저장 유형")
+    location: Optional[str] = Field(
+        None,
+        description="MLflow 오브젝트 prefix 또는 Ollama 볼륨 이름",
+    )
+    files: List[ModelFileEntry] = Field(
+        default_factory=list,
+        description="파일 목록. 파일이 없으면 빈 배열",
+    )
+    next_cursor: Optional[str] = Field(
+        None,
+        description="다음 목록 요청에 그대로 전달할 불투명 cursor",
+    )
+    message: Optional[str] = Field(
+        None,
+        description="파일 목록이 비어 있을 때 사용자에게 표시할 안내 문구",
+    )
+
+    @model_validator(mode="after")
+    def validate_file_state(self):
+        if self.files:
+            if self.storage_type != ModelFileStorageType.MLFLOW or self.message is not None:
+                raise ValueError("files are only valid for MLFLOW responses without a message")
+        else:
+            if self.next_cursor is not None:
+                raise ValueError("an empty file list cannot have a next_cursor")
+        if self.storage_type == ModelFileStorageType.NONE and self.location is not None:
+            raise ValueError("NONE storage must not expose a location")
+        return self
+
+
+class ModelFileListWrapper(BaseModel):
+    """Gateway 공개 모델 파일 목록 응답."""
+
+    data: List[ModelFileEntry] = Field(..., description="현재 페이지의 파일 목록")
+    total: int = Field(..., ge=0, description="전체 파일 수")
+    page: int = Field(..., ge=1, description="현재 페이지 번호")
+    size: int = Field(..., ge=1, le=100, description="페이지당 항목 수")
+
+
+class ModelFileDownloadUrlResponse(BaseModel):
+    """모델 파일의 단기 서명 다운로드 URL 응답."""
+
+    model_id: int = Field(..., description="MLOps 모델 ID")
+    name: str = Field(..., description="모델 저장 위치 기준 상대 경로")
+    size_bytes: int = Field(..., ge=0, description="파일 크기(바이트)")
+    download_url: AnyHttpUrl = Field(
+        ...,
+        description="5분 동안 유효한 실제 스토리지 서명 URL",
+    )
+    expires_at: AwareDatetime = Field(..., description="서명 URL 만료 시각(UTC)")
 
 
 class ModelBaseDeploymentStatusRequest(BaseModel):

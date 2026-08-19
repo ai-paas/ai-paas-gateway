@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List
+from typing import Any, Dict, Optional, List
 
 import httpx
 from fastapi import HTTPException, UploadFile
@@ -18,6 +18,21 @@ from app.schemas.knowledge_base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _upstream_error_detail(response: httpx.Response) -> Any:
+    """upstream 에러 body에서 detail만 꺼낸다.
+
+    body를 문자열 그대로 detail에 넣으면 `{"detail": "{\"detail\": \"...\"}"}`로
+    이중 래핑되어 클라이언트가 메시지를 읽지 못한다.
+    """
+    try:
+        error_body = response.json()
+    except ValueError:
+        error_body = None
+    detail = error_body.get("detail") if isinstance(error_body, dict) else None
+    return detail if isinstance(detail, (str, list, dict)) else "upstream request rejected"
+
 
 
 class KnowledgeBaseService:
@@ -117,7 +132,7 @@ class KnowledgeBaseService:
             if response.status_code == 200:
                 data = response.json()
                 return [ChunkTypeSchema(**item) for item in data]
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -133,7 +148,7 @@ class KnowledgeBaseService:
             if response.status_code == 200:
                 data = response.json()
                 return [LanguageSchema(**item) for item in data]
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -149,7 +164,7 @@ class KnowledgeBaseService:
             if response.status_code == 200:
                 data = response.json()
                 return [SearchMethodSchema(**item) for item in data]
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -191,7 +206,7 @@ class KnowledgeBaseService:
             if response.status_code in [200, 201]:
                 kb_data = response.json()
                 return ExternalKnowledgeBaseDetailResponse(**kb_data)
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -215,7 +230,7 @@ class KnowledgeBaseService:
                 if isinstance(data, list):
                     return [ExternalKnowledgeBaseBriefResponse(**item) for item in data]
                 return [ExternalKnowledgeBaseBriefResponse(**data)]
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -234,7 +249,7 @@ class KnowledgeBaseService:
                 return ExternalKnowledgeBaseDetailResponse(**response.json())
             elif response.status_code == 404:
                 return None
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -260,7 +275,7 @@ class KnowledgeBaseService:
                 return ExternalKnowledgeBaseDetailResponse(**response.json())
             elif response.status_code == 404:
                 return None
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -279,7 +294,7 @@ class KnowledgeBaseService:
                 return True
             elif response.status_code == 404:
                 return False
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -300,7 +315,7 @@ class KnowledgeBaseService:
 
             if response.status_code in [200, 201]:
                 return ExternalKnowledgeBaseDetailResponse(**response.json())
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -317,7 +332,7 @@ class KnowledgeBaseService:
 
             if response.status_code == 200:
                 return ExternalKnowledgeBaseDetailResponse(**response.json())
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -336,7 +351,7 @@ class KnowledgeBaseService:
 
             if response.status_code == 200:
                 return KnowledgeBaseSearchResponse(**response.json())
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -354,7 +369,7 @@ class KnowledgeBaseService:
             if response.status_code == 200:
                 data = response.json()
                 return [KnowledgeBaseSearchRecord(**item) for item in data]
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:

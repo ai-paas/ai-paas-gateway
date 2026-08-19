@@ -1,7 +1,7 @@
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Query, Request, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -37,6 +37,13 @@ _KB_SORT_FIELDS = {
 }
 _KB_SORT_DEFAULT = [(KnowledgeBase.created_at, True)]
 _KB_SORT_TIE_BREAKER = KnowledgeBase.id
+
+# 경로 파라미터는 MLOps ID(`surro_knowledge_id`)를 받는다. 응답의 `id`(게이트웨이 PK)와 다른 ID 공간이므로
+# 두 값이 우연히 겹칠 수 있다 — 둘 다 허용하면 오조회가 되어 자동 판별은 하지 않는다.
+_KB_ID_DESC = (
+    "Knowledge Base ID. 생성/목록/상세 응답의 `surro_knowledge_id` 값을 사용한다. "
+    "게이트웨이 내부 PK인 `id`가 아니다."
+)
 
 CHUNK_TYPES_DESCRIPTION = """
 청크 타입 목록 조회
@@ -108,14 +115,25 @@ Knowledge Base 생성
     - `GET /api/v1/knowledge-bases/languages` API로 조회 가능
 - **embedding_model_id** (int, required): 임베딩 모델 ID
     - `GET /api/v1/models?model_type_id={embedding_type_id}` API로 조회 가능
-- **chunk_size** (int, required): 청크 크기
-- **chunk_overlap** (int, required): 청크 오버랩 크기
+- **chunk_size** (int, required): 청크 크기 (문자 수) — 권장 500, 실용 범위 300~1000
+- **chunk_overlap** (int, required): 청크 오버랩 크기 — 권장 `chunk_size`의 10~20% (예: 50), **반드시 `chunk_size`보다 작게**
 - **chunk_type_id** (int, required): 청크 타입 ID
     - `GET /api/v1/knowledge-bases/chunk-types` API로 조회 가능
 - **search_method_id** (int, required): 검색 방법 ID
     - `GET /api/v1/knowledge-bases/search-methods` API로 조회 가능
-- **top_k** (int, required): 검색 시 반환할 상위 k개 결과 수
-- **threshold** (float, required): 검색 임계값 (0.0 ~ 1.0)
+- **top_k** (int, required): 검색 시 반환할 상위 k개 결과 수 — 권장 3~5, **0이면 검색 결과가 항상 0건**
+- **threshold** (float, required): 검색 임계값 (0.0 ~ 1.0) — 권장 0.3~0.5
+
+## 값 검증 주의
+게이트웨이·MLOps 모두 위 수치의 상하한을 강제하지 않는다.
+`chunk_size=1`, `top_k=0`, `chunk_overlap >= chunk_size` 같은 값도 그대로 생성되며
+KB가 만들어진 뒤에야 검색 불가·임베딩 과다 청킹으로 드러나므로 **클라이언트에서 검증**해야 한다.
+
+## embedding_model_id 주의
+서빙 배포(deployment)가 없는 임베딩 모델을 지정하면 업스트림이 400
+`Deployment not found`를 반환하고 KB는 생성되지 않는다.
+`GET /api/v1/models?model_type_id={embedding_type_id}` 결과에는 미배포 모델도 포함되므로
+운영에서 검증된 모델만 선택지에 노출할 것.
 - **file** (UploadFile, required): 업로드할 문서 파일
     - **지원 파일 타입**:
       - PDF: `.pdf`
@@ -126,12 +144,17 @@ Knowledge Base 생성
     - 지원되지 않는 파일 타입 업로드 시 400 오류 발생
 
 ## Response (KnowledgeBaseReadSchema)
-- **id** (int): Gateway Knowledge Base ID
-- **surro_knowledge_id** (int): 외부 Knowledge Base ID
+- **id** (int): Gateway 내부 PK — **경로 파라미터로 사용 금지**
+- **surro_knowledge_id** (int): Knowledge Base ID — **이후 조회/수정/삭제/파일/검색 경로에 사용하는 값**
 - **name** (str): Knowledge Base 이름
 - **description** (str, optional): Knowledge Base 설명
 - **collection_name** (str): Milvus Collection 이름
 - 기타 필드들...
+
+## ID 사용 규칙
+`id`와 `surro_knowledge_id`는 서로 다른 ID 공간이며 값이 우연히 겹칠 수 있다.
+생성 직후 상세 화면 이동 등 모든 후속 호출은 `surro_knowledge_id`를 써야 하며,
+`id`를 쓰면 404가 발생한다.
 
 ## Errors
 - 400: 유효하지 않은 요청 또는 필수 파라미터 누락
@@ -174,7 +197,7 @@ Knowledge Base 상세 조회
 특정 Knowledge Base의 상세 정보를 조회합니다.
 
 ## Path Parameters
-- **knowledge_base_id** (int): 조회할 Knowledge Base ID
+- **surro_knowledge_id** (int): 조회할 Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`, 게이트웨이 `id` 아님)
 
 ## Response (KnowledgeBaseReadSchema)
 - Knowledge Base 상세 정보 및 파일 목록
@@ -191,7 +214,7 @@ Knowledge Base 수정
 Knowledge Base의 이름과 설명만 수정할 수 있습니다.
 
 ## Path Parameters
-- **knowledge_base_id** (int): 수정할 Knowledge Base ID
+- **surro_knowledge_id** (int): 수정할 Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`)
 
 ## Request Body
 - **name** (str, optional): 수정할 이름
@@ -214,7 +237,7 @@ Knowledge Base를 삭제합니다.
 DB에서 Knowledge Base 정보를 삭제하고, Milvus에서 Collection을 삭제합니다.
 
 ## Path Parameters
-- **knowledge_base_id** (int): 삭제할 Knowledge Base ID
+- **surro_knowledge_id** (int): 삭제할 Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`)
 
 ## Errors
 - 401: 인증되지 않은 사용자
@@ -229,7 +252,7 @@ Knowledge Base에 파일 추가
 파일은 청크로 분할되고 임베딩되어 Milvus의 동일한 Collection에 Partition으로 추가됩니다.
 
 ## Path Parameters
-- **knowledge_base_id** (int): Knowledge Base ID
+- **surro_knowledge_id** (int): Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`)
 
 ## Request Body (multipart/form-data)
 - **file** (UploadFile, required): 추가할 문서 파일
@@ -251,7 +274,7 @@ Knowledge Base에서 특정 파일을 삭제합니다.
 DB에서 파일 정보를 삭제하고, Milvus에서 해당 Partition을 삭제합니다.
 
 ## Path Parameters
-- **knowledge_base_id** (int): Knowledge Base ID
+- **surro_knowledge_id** (int): Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`)
 - **file_id** (int): 삭제할 파일 ID
 
 ## Response (KnowledgeBaseReadSchema)
@@ -271,7 +294,7 @@ Knowledge Base에 저장된 문서를 검색합니다.
 Knowledge Base의 설정된 검색 방법(search_method), top_k, threshold를 사용하여 검색을 수행합니다.
 
 ## Path Parameters
-- **knowledge_base_id** (int): 검색할 Knowledge Base ID
+- **surro_knowledge_id** (int): 검색할 Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`)
 
 ## Request Body
 - **text** (str, required): 검색할 쿼리 텍스트
@@ -297,11 +320,11 @@ Knowledge Base 검색 기록 조회
 특정 Knowledge Base에 대한 검색 기록을 조회합니다.
 
 ## Path Parameters
-- **knowledge_base_id** (int): 조회할 Knowledge Base ID
+- **surro_knowledge_id** (int): 조회할 Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`)
 
 ## Response (List[KnowledgeBaseSearchRecordReadSchema])
 - **id** (int): 검색 기록 ID
-- **knowledge_base_id** (int): Knowledge Base ID
+- **surro_knowledge_id** (int): Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`)
 - **source** (str): Collection 이름
 - **text** (str): 검색 쿼리 텍스트
 - **created_at** (datetime): 검색 기록 생성 시간
@@ -399,13 +422,13 @@ async def create_knowledge_base(
     name: str = Form(..., description="Knowledge Base 이름"),
     description: Optional[str] = Form(None, description="Knowledge Base 설명"),
     language_id: int = Form(..., description="언어 ID"),
-    embedding_model_id: int = Form(..., description="임베딩 모델 ID"),
-    chunk_size: int = Form(..., description="청크 크기"),
-    chunk_overlap: int = Form(..., description="청크 오버랩 크기"),
-    chunk_type_id: int = Form(..., description="청크 타입 ID"),
-    search_method_id: int = Form(..., description="검색 방법 ID"),
-    top_k: int = Form(..., description="검색 시 반환할 상위 k개 결과 수"),
-    threshold: float = Form(..., description="검색 임계값"),
+    embedding_model_id: int = Form(..., description="임베딩 모델 ID (배포된 임베딩 모델만 가능)", examples=[13]),
+    chunk_size: int = Form(..., description="청크 크기 (권장 500, 범위 300~1000)", examples=[500]),
+    chunk_overlap: int = Form(..., description="청크 오버랩 (권장 chunk_size의 10~20%, chunk_size 미만)", examples=[50]),
+    chunk_type_id: int = Form(..., description="청크 타입 ID", examples=[1]),
+    search_method_id: int = Form(..., description="검색 방법 ID", examples=[1]),
+    top_k: int = Form(..., description="검색 시 반환할 상위 k개 결과 수 (권장 3~5, 0이면 결과 없음)", examples=[3]),
+    threshold: float = Form(..., description="검색 임계값 0.0~1.0 (권장 0.3~0.5)", examples=[0.4]),
     file: UploadFile = File(..., description="업로드할 문서 파일"),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
@@ -555,18 +578,17 @@ async def get_knowledge_bases(
 
 
 @router.get(
-    "/{knowledge_base_id}",
+    "/{surro_knowledge_id}",
     response_model=KnowledgeBaseDetailResponse,
     summary="Get Knowledge Base",
     description=GET_KNOWLEDGE_BASE_DESCRIPTION,
 )
 async def get_knowledge_base(
-    knowledge_base_id: int,
+    surro_knowledge_id: int = Path(..., description=_KB_ID_DESC),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """지식베이스 상세 정보 조회"""
-    surro_knowledge_id = knowledge_base_id
     db_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id,
@@ -603,20 +625,19 @@ async def get_knowledge_base(
 
 
 @router.put(
-    "/{knowledge_base_id}",
+    "/{surro_knowledge_id}",
     response_model=KnowledgeBaseResponse,
     summary="Update Knowledge Base",
     description=UPDATE_KNOWLEDGE_BASE_DESCRIPTION,
 )
 async def update_knowledge_base(
-    knowledge_base_id: int,
     knowledge_base_update: KnowledgeBaseUpdate,
     request: Request,
+    surro_knowledge_id: int = Path(..., description=_KB_ID_DESC),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """지식베이스 정보 수정"""
-    surro_knowledge_id = knowledge_base_id
     existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id,
@@ -660,7 +681,7 @@ async def update_knowledge_base(
         action=Action.UPDATE,
         resource_type=ResourceType.KNOWLEDGE_BASE,
         actor_member_id=current_user.member_id,
-        resource_id=str(knowledge_base_id),
+        resource_id=str(surro_knowledge_id),
     )
     return KnowledgeBaseResponse(
         id=existing_kb.id,
@@ -679,19 +700,18 @@ async def update_knowledge_base(
 
 
 @router.delete(
-    "/{knowledge_base_id}",
+    "/{surro_knowledge_id}",
     status_code=204,
     summary="Delete Knowledge Base",
     description=DELETE_KNOWLEDGE_BASE_DESCRIPTION,
 )
 async def delete_knowledge_base(
-    knowledge_base_id: int,
     request: Request,
+    surro_knowledge_id: int = Path(..., description=_KB_ID_DESC),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """지식베이스 삭제"""
-    surro_knowledge_id = knowledge_base_id
     existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id,
@@ -725,25 +745,24 @@ async def delete_knowledge_base(
         action=Action.DELETE,
         resource_type=ResourceType.KNOWLEDGE_BASE,
         actor_member_id=current_user.member_id,
-        resource_id=str(knowledge_base_id),
+        resource_id=str(surro_knowledge_id),
     )
     return None
 
 
 @router.post(
-    "/{knowledge_base_id}/files",
+    "/{surro_knowledge_id}/files",
     response_model=KnowledgeBaseDetailResponse,
     summary="Add File To Knowledge Base",
     description=ADD_FILE_DESCRIPTION,
 )
 async def add_file_to_knowledge_base(
-    knowledge_base_id: int,
+    surro_knowledge_id: int = Path(..., description=_KB_ID_DESC),
     file: UploadFile = File(..., description="추가할 문서 파일"),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """지식베이스에 파일 추가"""
-    surro_knowledge_id = knowledge_base_id
     existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id,
@@ -778,19 +797,18 @@ async def add_file_to_knowledge_base(
 
 
 @router.delete(
-    "/{knowledge_base_id}/files/{file_id}",
+    "/{surro_knowledge_id}/files/{file_id}",
     response_model=KnowledgeBaseDetailResponse,
     summary="Delete File From Knowledge Base",
     description=DELETE_FILE_DESCRIPTION,
 )
 async def delete_file_from_knowledge_base(
-    knowledge_base_id: int,
-    file_id: int,
+    surro_knowledge_id: int = Path(..., description=_KB_ID_DESC),
+    file_id: int = Path(..., description="삭제할 파일 ID (상세 응답 `files[].id`)"),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """지식베이스에서 파일 삭제"""
-    surro_knowledge_id = knowledge_base_id
     existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id,
@@ -829,19 +847,18 @@ async def delete_file_from_knowledge_base(
 
 
 @router.post(
-    "/{knowledge_base_id}/search",
+    "/{surro_knowledge_id}/search",
     response_model=KnowledgeBaseSearchResponse,
     summary="Search Knowledge Base",
     description=SEARCH_KNOWLEDGE_BASE_DESCRIPTION,
 )
 async def search_knowledge_base(
-    knowledge_base_id: int,
     search_request: KnowledgeBaseSearchRequest,
+    surro_knowledge_id: int = Path(..., description=_KB_ID_DESC),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """지식베이스 검색"""
-    surro_knowledge_id = knowledge_base_id
     existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id,
@@ -860,18 +877,17 @@ async def search_knowledge_base(
 
 
 @router.get(
-    "/{knowledge_base_id}/search-records",
+    "/{surro_knowledge_id}/search-records",
     response_model=List[KnowledgeBaseSearchRecord],
     summary="Get Knowledge Base Search Records",
     description=SEARCH_RECORDS_DESCRIPTION,
 )
 async def get_search_records(
-    knowledge_base_id: int,
+    surro_knowledge_id: int = Path(..., description=_KB_ID_DESC),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """지식베이스 검색 기록 조회"""
-    surro_knowledge_id = knowledge_base_id
     existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id,

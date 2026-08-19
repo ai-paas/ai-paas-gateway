@@ -158,3 +158,40 @@ class TestKnowledgeBaseCRUD:
         assert updated.name == "after"
         assert updated.description == "새 설명"
         assert updated.updated_by == sample_member.member_id
+
+
+class TestKnowledgeBaseRouteIdContract:
+    """경로 파라미터가 MLOps ID(surro_knowledge_id) 공간임을 고정한다.
+
+    응답의 `id`(게이트웨이 PK)와 값이 겹칠 수 있어, 경로 이름이 흐려지면
+    프론트가 잘못된 ID로 404를 맞는다.
+    """
+
+    def test_kb_paths_use_surro_id_param(self):
+        from app.main import app
+
+        kb_paths = [p for p in app.openapi()["paths"] if p.startswith("/api/v1/knowledge-bases/{")]
+        assert kb_paths, "knowledge-bases 경로 엔드포인트가 없다"
+        for path in kb_paths:
+            assert "{surro_knowledge_id}" in path, path
+            assert "{knowledge_base_id}" not in path, path
+
+
+class TestKnowledgeBaseUpstreamErrorDetail:
+    """upstream 에러 body를 그대로 넣어 detail이 이중 JSON이 되는 것을 막는다."""
+
+    def test_json_detail_unwrapped(self):
+        import httpx
+
+        from app.services.knowledge_base_service import _upstream_error_detail
+
+        assert _upstream_error_detail(
+            httpx.Response(400, json={"detail": "Deployment not found"})
+        ) == "Deployment not found"
+
+    def test_non_json_body_falls_back(self):
+        import httpx
+
+        from app.services.knowledge_base_service import _upstream_error_detail
+
+        assert _upstream_error_detail(httpx.Response(500, text="boom")) == "upstream request rejected"
