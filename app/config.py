@@ -97,19 +97,23 @@ class Settings:
     HUB_CONNECT_API_USERNAME: str = os.getenv("HUB_CONNECT_API_USERNAME", "")
     HUB_CONNECT_API_PASSWORD: str = os.getenv("HUB_CONNECT_API_PASSWORD", "")
 
+    # 대시보드 배경 작업 스케줄러 (in-process)
+    # 운영(멀티 워커)에서는 별도 worker 프로세스로 띄우고 ENABLE_SCHEDULER=false 권장.
+    ENABLE_SCHEDULER: bool = _get_bool("ENABLE_SCHEDULER", False)
+    SCHEDULER_TRENDS_HOUR: int = int(os.getenv("SCHEDULER_TRENDS_HOUR", "0"))  # 매일 0시 daily_stats 재계산
+    SCHEDULER_MV_REFRESH_MINUTES: int = int(os.getenv("SCHEDULER_MV_REFRESH_MINUTES", "30"))  # mat view refresh
+    SCHEDULER_API_METRICS_FLUSH_MINUTES: int = int(os.getenv("SCHEDULER_API_METRICS_FLUSH_MINUTES", "1"))
+    SCHEDULER_PROVIDER_HEALTH_MINUTES: int = int(os.getenv("SCHEDULER_PROVIDER_HEALTH_MINUTES", "1"))
+    # API metrics flush 잡은 middleware의 in-process buffer에 의존 →
+    # 별도 worker 프로세스에서 띄울 때는 false로 두어야 한다 (API 프로세스에만 켤 것).
+    SCHEDULER_INCLUDE_API_METRICS: bool = _get_bool("SCHEDULER_INCLUDE_API_METRICS", True)
+
     ANY_CLOUD_ENABLED: bool = _get_bool("ANY_CLOUD_ENABLED", False)
     ANY_CLOUD_TARGET_BASE_URL: str = os.getenv("ANY_CLOUD_TARGET_BASE_URL", "")
     ANY_CLOUD_TIMEOUT: float = float(os.getenv("ANY_CLOUD_TIMEOUT", "30.0"))
     ANY_CLOUD_CONNECT_TIMEOUT: float = float(os.getenv("ANY_CLOUD_CONNECT_TIMEOUT", "5.0"))
     ANY_CLOUD_MAX_CONNECTIONS: int = int(os.getenv("ANY_CLOUD_MAX_CONNECTIONS", "100"))
     ANY_CLOUD_MAX_KEEPALIVE_CONNECTIONS: int = int(os.getenv("ANY_CLOUD_MAX_KEEPALIVE_CONNECTIONS", "20"))
-
-    LITE_MODEL_ENABLED: bool = _get_bool("LITE_MODEL_ENABLED", False)
-    LITE_MODEL_TARGET_BASE_URL: str = os.getenv("LITE_MODEL_TARGET_BASE_URL", "")
-    LITE_MODEL_TIMEOUT: float = float(os.getenv("LITE_MODEL_TIMEOUT", "30.0"))
-    LITE_MODEL_CONNECT_TIMEOUT: float = float(os.getenv("LITE_MODEL_CONNECT_TIMEOUT", "5.0"))
-    LITE_MODEL_MAX_CONNECTIONS: int = int(os.getenv("LITE_MODEL_MAX_CONNECTIONS", "100"))
-    LITE_MODEL_MAX_KEEPALIVE_CONNECTIONS: int = int(os.getenv("LITE_MODEL_MAX_KEEPALIVE_CONNECTIONS", "20"))
 
     def __init__(self):
         if not self.DATABASE_URL:

@@ -1,10 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
-from sqlalchemy.orm import Session
+import logging
 from typing import Optional
-from app.database import get_db
-from app.cruds.workflow import workflow_crud
-from app.models.member import Member
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status, UploadFile, File, Form
+from sqlalchemy.orm import Session
+
 from app.auth import get_current_user
+from app.common.sort import parse_sort, sort_in_memory
+from app.cruds.service import service_crud
+from app.cruds.workflow import workflow_crud
+from app.database import get_db
+from app.models.member import Member
 from app.schemas.workflow import (
     WorkflowCreateRequest,
     WorkflowUpdateRequest,
@@ -13,15 +18,29 @@ from app.schemas.workflow import (
     WorkflowListResponse,
     WorkflowExecuteRequest,
     WorkflowExecuteResponse,
-    WorkflowTestRAGRequest,
-    WorkflowTestResponse
+    WorkflowTestResponse,
+    WorkflowValidateRequest,
+    WorkflowValidateResponse,
 )
-from app.services.workflow_service import workflow_service
-import logging
+from app.services.audit_service import Action, ResourceType, emit_from_request
+from app.services.workflow_service import UNSET as _SERVICE_UNSET, workflow_service
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
+
+# 워크플로우는 merge 후 WorkflowResponse 리스트로 in-memory 정렬.
+# 로컬 필드(id/name/created_at/updated_at/created_by) + 외부 필드(status) 모두 허용.
+_WORKFLOW_SORT_GETTERS = {
+    "id": lambda w: w.id,
+    "name": lambda w: w.name,
+    "created_at": lambda w: w.created_at,
+    "updated_at": lambda w: w.updated_at,
+    "created_by": lambda w: w.created_by,
+    "status": lambda w: w.status,
+}
+_WORKFLOW_SORT_DEFAULT = [("created_at", True)]
+_WORKFLOW_SORT_TIE_BREAKER = lambda w: w.id
 
 # ===== Component Types =====
 
@@ -75,11 +94,61 @@ async def get_component_types(
         "data": component_types
     }
 
+# ===== Workflow Definition 검증 (MLOps v2 신규) =====
+
+@router.post("/validate", response_model=WorkflowValidateResponse)
+async def validate_workflow_definition(
+        validate_request: WorkflowValidateRequest,
+        current_user=Depends(get_current_user),
+):
+    """
+    워크플로우 정의 사전 검증
+
+    워크플로우 생성 전에 정의(components/connections)가 유효한지 검사합니다.
+    저장 없이 검증 규칙 결과만 반환합니다.
+
+    ## Request Body (WorkflowValidateRequest)
+    - **workflow_definition** (WorkflowDefinition, required): 검증할 정의
+        - components (List[ComponentCreateRequest]): 컴포넌트 목록
+            - ref_id, name, type 필수
+            - description, model_id, knowledge_base_id, prompt_id, config 선택
+        - connections (List[ConnectionCreateRequest]): ref_id 기반 연결 목록
+            - source_ref_id, target_ref_id 필수
+
+    ## Response (WorkflowValidateResponse)
+    - **valid** (bool): 모든 규칙 통과 여부
+    - **checks** (List[ValidationCheckResponse]): 규칙별 결과
+        - rule (str): 규칙 식별자
+        - passed (bool): 통과 여부
+        - message (str, optional): 실패 시 상세 메시지
+
+    ## Notes
+    - 저장하지 않음 — 순수 사전 검증용
+    - 본 검사를 통과해도 실제 생성(`POST /workflows`) 시 추가 정합성 검사가 있을 수 있음
+
+    ## Errors
+    - **401**: 인증되지 않은 사용자
+    - **422**: 정의 형식 오류 (Pydantic 스키마 위반)
+    - **500**: MLOps 검증 호출 실패
+    """
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name,
+    }
+
+    return await workflow_service.validate_workflow(
+        workflow_definition=validate_request.workflow_definition.dict(),
+        user_info=user_info,
+    )
+
+
 # ===== Workflow CRUD =====
 
 @router.post("/", response_model=WorkflowResponse, status_code=status.HTTP_201_CREATED)
 async def create_workflow(
         workflow_create: WorkflowCreateRequest,
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -97,14 +166,19 @@ async def create_workflow(
     - **service_id** (str, optional): 연결할 서비스 ID
     - **workflow_definition** (WorkflowDefinition, optional): 워크플로우 정의
         - components (List[ComponentCreateRequest]): 컴포넌트 목록
+            - ref_id (str, required): 프론트엔드 생성 임시 참조 ID — Connection이 이 값으로 식별
             - name (str): 컴포넌트 이름
             - type (ComponentType): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
+            - description (str, optional): 컴포넌트 설명
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
-        - connections (List[ConnectionCreateRequest]): 연결 목록
-            - source_component_type (ComponentType): 소스 컴포넌트 타입
-            - target_component_type (ComponentType): 타겟 컴포넌트 타입
+            - config (dict, optional): 컴포넌트별 세부 설정
+            - x (int, optional): 프론트 캔버스 x 좌표 (음수 허용)
+            - y (int, optional): 프론트 캔버스 y 좌표 (음수 허용)
+        - connections (List[ConnectionCreateRequest]): 연결 목록 — *MLOps v2부터 ref_id 기반*
+            - source_ref_id (str): 소스 컴포넌트의 ref_id
+            - target_ref_id (str): 타겟 컴포넌트의 ref_id
 
     ## Response (WorkflowResponse)
     - **id** (int): 게이트웨이 DB PK
@@ -143,6 +217,8 @@ async def create_workflow(
     ## Errors
     - **400**: 잘못된 요청 (정의 오류 등)
     - **401**: 인증되지 않은 사용자
+    - **403**: service_id가 다른 사용자 소유의 service일 때 (admin 제외)
+    - **404**: service_id가 게이트웨이 DB에 존재하지 않을 때
     - **500**: 서버 내부 오류 (MLOps에는 생성됐으나 게이트웨이 DB 저장 실패 포함)
     """
     user_info = {
@@ -150,6 +226,20 @@ async def create_workflow(
         'role': current_user.role,
         'name': current_user.name
     }
+
+    # 서비스 링크 권한 확인: 다른 사용자의 service에 link 불가 (admin 제외)
+    if workflow_create.service_id:
+        db_service = service_crud.get_service_by_surro_id(db, workflow_create.service_id)
+        if not db_service:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Service not found: {workflow_create.service_id}",
+            )
+        if current_user.role != "admin" and db_service.created_by != current_user.member_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permission denied: cannot link another user's service",
+            )
 
     # 외부 API 호출
     workflow_definition_dict = None
@@ -188,6 +278,14 @@ async def create_workflow(
             detail=f"Workflow created in external API but failed to save: {str(mapping_error)}"
         )
 
+    emit_from_request(
+        db, request,
+        action=Action.CREATE,
+        resource_type=ResourceType.WORKFLOW,
+        actor_member_id=current_user.member_id,
+        resource_id=str(db_workflow.surro_workflow_id),
+        metadata={"name": db_workflow.name, "service_id": workflow_create.service_id},
+    )
     # 응답: DB 메타정보 + 외부 API 데이터
     return WorkflowResponse(
         id=db_workflow.id,
@@ -213,6 +311,21 @@ async def get_workflows(
         creator_id: Optional[str] = Query(None, description="생성자 member_id 필터 (게이트웨이 DB 기준)"),
         service_id: Optional[str] = Query(None, description="서비스 ID 필터 (UUID)"),
         status: Optional[str] = Query(None, description="상태 필터 (DRAFT/ACTIVE/ERROR)"),
+        sort: Optional[str] = Query(
+            None,
+            description=(
+                "정렬 기준. `,` 로 다중 키, `-` 접두사는 내림차순(DESC). "
+                "미지정 시 `-created_at`. 허용 필드: "
+                "`id`, `name`, `created_at`, `updated_at`, `created_by`, `status`."
+            ),
+            openapi_examples={
+                "default": {"summary": "최신순 (기본)", "value": "-created_at"},
+                "name_asc": {"summary": "이름 오름차순", "value": "name"},
+                "status_asc": {"summary": "상태 ASC (외부 필드)", "value": "status"},
+                "status_then_name": {"summary": "상태 ASC + 이름 ASC", "value": "status,name"},
+                "multi": {"summary": "수정시각 DESC + 이름 ASC", "value": "-updated_at,name"},
+            },
+        ),
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -235,6 +348,9 @@ async def get_workflows(
         - "DRAFT": 임시저장 상태
         - "ACTIVE": 활성 상태 (배포됨)
         - "ERROR": 오류 상태
+    - sort (str, optional): 정렬 기준 (`,` 다중 키, `-` DESC).
+        - 기본: `-created_at`. 허용: `id`, `name`, `created_at`, `updated_at`, `created_by`, `status`.
+        - 로컬 필드와 외부 필드(`status`) 모두 지원 — merge 완료 리스트에 in-memory 정렬 적용.
 
     ## Response (WorkflowListResponse)
     - total (int): 필터 조건에 맞는 전체 워크플로우 수
@@ -259,6 +375,7 @@ async def get_workflows(
 
     ## Errors
     - **401**: 인증되지 않은 사용자
+    - **422**: 허용되지 않은 sort 필드
     - **500**: 서버 내부 오류
     """
     user_info = {
@@ -371,7 +488,16 @@ async def get_workflows(
 
     total = len(merged)
 
-    # 5) 게이트웨이 레벨 페이지네이션
+    # 5) 정렬 (merge 완료된 리스트에 in-memory 적용, 로컬/외부 필드 모두 수용)
+    merged = sort_in_memory(
+        items=merged,
+        parsed=parse_sort(sort),
+        getters=_WORKFLOW_SORT_GETTERS,
+        default=_WORKFLOW_SORT_DEFAULT,
+        tie_breaker_getter=_WORKFLOW_SORT_TIE_BREAKER,
+    )
+
+    # 6) 게이트웨이 레벨 페이지네이션
     if page is not None and size is not None:
         start = (page - 1) * size
         merged = merged[start:start + size]
@@ -421,11 +547,10 @@ async def create_template(
     - **status** (str): 템플릿 상태 (DRAFT)
     - **service_id** (str): 기본 서비스 ID
     - **creator_id** (int): 템플릿 생성자 ID
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보 (password 미포함)
         - id (int): 사용자 ID
         - username (str): 사용자명
         - name (str): 사용자 이름
-        - password (str): 비밀번호 (해시된 값)
         - created_at (datetime): 계정 생성 시각
         - updated_at (datetime): 계정 정보 수정 시각
         - created_by (str, optional): 계정 생성자
@@ -505,11 +630,10 @@ async def get_templates(
         - status (str): 템플릿 상태 (DRAFT)
         - service_id (str): 기본 서비스 ID
         - creator_id (int): 템플릿 생성자 ID
-        - creator (UserSchema): 생성자 정보
+        - creator (UserBriefSchema): 생성자 정보 (password 미포함)
             - id (int): 사용자 ID
             - username (str): 사용자명
             - name (str): 사용자 이름
-            - password (str): 비밀번호 (해시된 값)
             - created_at (datetime): 계정 생성 시각
             - updated_at (datetime): 계정 정보 수정 시각
             - created_by (str, optional): 계정 생성자
@@ -577,11 +701,10 @@ async def get_template(
         - 템플릿으로부터 워크플로우 생성 시 기본으로 연결될 서비스 ID
         - null 가능 (서비스 연결 없이 생성 가능)
     - **creator_id** (int): 템플릿 생성자 ID
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보 (password 미포함)
         - id (int): 사용자 ID
         - username (str): 사용자명
         - name (str): 사용자 이름
-        - password (str): 비밀번호 (해시된 값)
         - created_at (datetime): 계정 생성 시각
         - updated_at (datetime): 계정 정보 수정 시각
         - created_by (str, optional): 계정 생성자
@@ -685,16 +808,21 @@ async def update_template(
     - **category** (str, optional): 새 카테고리
     - **status** (str, optional): 새 상태 (DRAFT/ACTIVE/ERROR)
         - 템플릿은 일반적으로 DRAFT 상태 유지 (실행 불가)
-    - **workflow_definition** (WorkflowUpdateDefinition, optional): 새 템플릿 구조
-        - components (List[ComponentUpdateRequest]): 컴포넌트 목록
+    - **workflow_definition** (WorkflowDefinition, optional): 새 템플릿 구조
+        - components (List[ComponentCreateRequest]): 컴포넌트 목록
+            - ref_id (str, required): 프론트엔드 생성 임시 참조 ID
             - name (str): 컴포넌트 이름
             - type (ComponentType): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
+            - description (str, optional): 컴포넌트 설명
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID
-        - connections (List[ConnectionUpdateRequest]): 연결 목록
-            - source_component_type (ComponentType): 소스 컴포넌트 타입
-            - target_component_type (ComponentType): 타겟 컴포넌트 타입
+            - config (dict, optional): 컴포넌트별 세부 설정
+            - x (int, optional): 프론트 캔버스 x 좌표 (음수 허용)
+            - y (int, optional): 프론트 캔버스 y 좌표 (음수 허용)
+        - connections (List[ConnectionCreateRequest]): 연결 목록 — *MLOps v2부터 ref_id 기반*
+            - source_ref_id (str): 소스 컴포넌트의 ref_id
+            - target_ref_id (str): 타겟 컴포넌트의 ref_id
 
     ## Response (WorkflowTemplateReadSchema)
     - **id** (str): 템플릿 UUID
@@ -704,7 +832,7 @@ async def update_template(
     - **status** (str): 템플릿 상태 (DRAFT)
     - **service_id** (str): 기본 서비스 ID (항상 null)
     - **creator_id** (int): 템플릿 생성자 ID
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보 (password 미포함)
     - **is_template** (bool): 템플릿 여부 (항상 true)
     - **template_id** (str): 원본 템플릿 ID (항상 null)
     - **components** (List[ComponentReadSchema]): 컴포넌트 상세 정보
@@ -762,7 +890,7 @@ async def delete_template(
     """
     워크플로우 템플릿 삭제
 
-    템플릿은 배포된 KServe InferenceService가 없으므로 즉시 DB에서 삭제됩니다.
+    템플릿은 워크플로 실행으로 생성된 클러스터 서빙 리소스가 없는 레코드이므로 즉시 DB에서 삭제됩니다.
     파생된 워크플로우가 있으면 삭제 불가.
 
     ## Path Parameters
@@ -802,7 +930,10 @@ async def delete_template(
 async def clone_template(
         template_id: str,
         workflow_name: str = Query(..., description="새로 생성할 워크플로우 이름"),
-        service_id: Optional[int] = Query(None, description="연결할 서비스 ID"),
+        service_id: Optional[int] = Query(
+            None,
+            description="연결할 서비스 ID. 서비스 목록/상세 조회 응답의 id 값을 사용합니다.",
+        ),
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -818,8 +949,10 @@ async def clone_template(
     ## Query Parameters
     - **workflow_name** (str, required): 새로 생성할 워크플로우 이름
     - **service_id** (int, optional): 연결할 서비스 ID
+        - 서비스 목록/상세 조회 응답의 `id` 값을 사용
         - 서비스와 연결시 모니터링 가능
-        - (MLOps 원본은 UUID str이나, 게이트웨이는 내부 서비스 매핑을 위해 int로 노출)
+        - 존재하지 않는 서비스면 404 반환
+        - 접근 권한이 없는 서비스면 403 반환
 
     ## Response (WorkflowReadSchema)
     - **id** (str): 생성된 워크플로우 UUID
@@ -830,7 +963,7 @@ async def clone_template(
     - **service_id** (str): 연결된 서비스 ID
     - **service_name** (str): 연결된 서비스 이름
     - **creator_id** (int): 생성자 ID (현재 사용자, MLOps 기준)
-    - **creator** (UserSchema): 생성자 정보
+    - **creator** (UserBriefSchema): 생성자 정보 (password 미포함)
     - **is_template** (bool): 템플릿 여부 (false)
     - **template_id** (str): 원본 템플릿 ID
     - **template_name** (str): 원본 템플릿 이름
@@ -840,20 +973,15 @@ async def clone_template(
     - **created_at** (datetime): 생성 시각
     - **updated_at** (datetime): 수정 시각
 
-    게이트웨이 추가 필드 (응답에 함께 포함):
-    - **db_id** (int): 게이트웨이 DB PK
-    - **db_created_at** (str): 게이트웨이 DB 생성 시각 (ISO 8601)
-    - **db_created_by** (str): 게이트웨이 사용자 member_id
-
     ## Notes
     - 템플릿의 모든 컴포넌트와 연결이 복사됨
     - 생성된 워크플로우는 템플릿과 독립적으로 동작
     - template_id가 자동으로 기록됨
-    - MLOps에는 복제되었으나 게이트웨이 DB 저장에 실패하는 경우 경고만 기록하고 MLOps 응답은 그대로 반환
 
     ## Errors
     - **401**: 인증되지 않은 사용자
-    - **404**: 템플릿을 찾을 수 없음
+    - **403**: service_id가 다른 사용자 소유의 service일 때 (admin 제외)
+    - **404**: 템플릿 또는 service_id를 찾을 수 없음
     - **500**: 서버 내부 오류
     """
     user_info = {
@@ -862,11 +990,28 @@ async def clone_template(
         'name': current_user.name
     }
 
+    # 게이트웨이 내부 service_id(int) → MLOps surro_service_id(UUID) 매핑
+    # + 다른 사용자의 service에 link 불가 (admin 제외)
+    surro_service_id: Optional[str] = None
+    if service_id is not None:
+        db_service = service_crud.get_service(db, service_id)
+        if not db_service:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Service not found: id={service_id}",
+            )
+        if current_user.role != "admin" and db_service.created_by != current_user.member_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permission denied: cannot link another user's service",
+            )
+        surro_service_id = db_service.surro_service_id
+
     # 외부 API에서 템플릿 복제
     clone_response = await workflow_service.clone_template(
         template_id=template_id,
         workflow_name=workflow_name,
-        service_id=service_id,
+        surro_service_id=surro_service_id,
         user_info=user_info
     )
 
@@ -947,16 +1092,18 @@ async def get_workflow(
     - **kubeflow_run_id** (str): Kubeflow 파이프라인 실행 ID
         - 워크플로우 실행 시 생성된 Kubeflow Pipeline 실행 ID
         - 실행 전이면 null
-    - **public_url** (str): KServe 공개 엔드포인트 URL
-        - 배포 후 동적으로 생성되는 공개 접근 URL
-        - 배포 전이면 null
+    - **public_url** (str): 공개 추론 엔드포인트 URL
+        - KServe + KSERVE_GATEWAY_URL 환경 설정이 있는 경우에만 동적 생성
+        - 배포 전·미설정 시 null
         - 형식: `{gateway_url}/v2/models/{model_name}/infer`
     - **backend_api_url** (str): 백엔드 API URL
-        - 배포 후 동적으로 생성되는 백엔드 API URL
+        - 배포 레코드(`model_workflow_deployments`)의 `internal_url` 기준
         - 배포 전이면 null
     - **components** (List[ComponentReadSchema]): 컴포넌트 목록
         - id / workflow_id / component_id / name / type (START|END|MODEL|KNOWLEDGE_BASE)
         - model_id / knowledge_base_id / prompt_id (optional)
+        - config (dict, optional): 컴포넌트별 세부 설정
+        - x / y (int, optional): 프론트 캔버스 좌표 (음수 허용)
         - model (ModelBriefReadSchema, optional): MODEL 타입인 경우 상세 정보
             - id / name / description
             - provider_info / type_info / format_info
@@ -967,7 +1114,7 @@ async def get_workflow(
         - source_component / target_component (ComponentReadSchema 전체)
         - created_at
 
-    (MLOps 원본의 `creator`(UserSchema)는 MLOps 슈퍼어드민 정보라 게이트웨이에서는
+    (MLOps 원본의 `creator`(UserBriefSchema, password 미포함)는 MLOps 슈퍼어드민 정보라 게이트웨이에서는
      별도로 반환하지 않고, 대신 `created_by`(member_id)를 제공)
 
     ## Notes
@@ -1036,6 +1183,7 @@ async def get_workflow(
 async def update_workflow(
         surro_workflow_id: str,
         workflow_update: WorkflowUpdateRequest,
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -1059,20 +1207,25 @@ async def update_workflow(
     - **service_id** (str, optional): 연결할 서비스 ID
         - 모니터링 및 서비스 관리용 서비스 ID
         - null로 설정 시 서비스 연결 해제
-    - **workflow_definition** (WorkflowUpdateDefinition, optional): 새 워크플로우 구조
-        - components (List[ComponentUpdateRequest]): 컴포넌트 목록
+    - **workflow_definition** (WorkflowDefinition, optional): 새 워크플로우 구조
+        - components (List[ComponentCreateRequest]): 컴포넌트 목록
+            - ref_id (str, required): 프론트엔드 생성 임시 참조 ID
             - name (str): 컴포넌트 이름
             - type (ComponentType): 타입 (START/END/MODEL/KNOWLEDGE_BASE)
                 - "START": 워크플로우 시작점
                 - "END": 워크플로우 종료점
                 - "MODEL": ML 모델 실행 노드
                 - "KNOWLEDGE_BASE": 지식 베이스 검색 노드
+            - description (str, optional): 컴포넌트 설명
             - model_id (int, optional): MODEL 타입인 경우 모델 ID
             - knowledge_base_id (int, optional): KNOWLEDGE_BASE 타입인 경우 Knowledge Base ID
             - prompt_id (int, optional): MODEL 타입인 경우 프롬프트 ID (선택)
-        - connections (List[ConnectionUpdateRequest]): 연결 목록
-            - source_component_type (ComponentType): 소스 컴포넌트 타입
-            - target_component_type (ComponentType): 타겟 컴포넌트 타입
+            - config (dict, optional): 컴포넌트별 세부 설정
+            - x (int, optional): 프론트 캔버스 x 좌표 (음수 허용)
+            - y (int, optional): 프론트 캔버스 y 좌표 (음수 허용)
+        - connections (List[ConnectionCreateRequest]): 연결 목록 — *MLOps v2부터 ref_id 기반*
+            - source_ref_id (str): 소스 컴포넌트의 ref_id
+            - target_ref_id (str): 타겟 컴포넌트의 ref_id
 
     ## Response (WorkflowResponse)
     - **id** (int): 게이트웨이 DB PK
@@ -1101,8 +1254,8 @@ async def update_workflow(
 
     ## Errors
     - **401**: 인증되지 않은 사용자
-    - **403**: 권한 없음 (본인 소유가 아니며 admin도 아님)
-    - **404**: 워크플로우를 찾을 수 없음
+    - **403**: 권한 없음 (워크플로우가 본인 소유가 아니며 admin도 아님 / service_id가 다른 사용자 service일 때)
+    - **404**: 워크플로우 또는 service_id를 찾을 수 없음
     - **500**: 서버 내부 오류
     """
     # 우리 DB에서 기존 워크플로우 조회 (권한 확인용)
@@ -1116,6 +1269,27 @@ async def update_workflow(
     # 권한 확인
     if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
         raise HTTPException(status_code=403, detail="Permission denied")
+
+    # 서비스 링크 권한 확인 + 미지정/명시 null 구별
+    # - 요청 본문에 service_id가 아예 없으면: 외부에 전달 X (no-op)
+    # - 명시적 null: 외부에 service_id=null 전달 (unlink) — 권한 검사 불필요
+    # - UUID 값: 우리 DB에서 소유권 확인 후 전달
+    service_id_was_provided = "service_id" in workflow_update.model_fields_set
+    if workflow_update.service_id:
+        db_service = service_crud.get_service_by_surro_id(db, workflow_update.service_id)
+        if not db_service:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Service not found: {workflow_update.service_id}",
+            )
+        if current_user.role != "admin" and db_service.created_by != current_user.member_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permission denied: cannot link another user's service",
+            )
+
+    # 외부 API에 보낼 service_id: 요청에 포함됐을 때만 (명시 null도 그대로)
+    service_id_arg = workflow_update.service_id if service_id_was_provided else _SERVICE_UNSET
 
     # 외부 API 업데이트
     user_info = {
@@ -1135,7 +1309,7 @@ async def update_workflow(
             description=workflow_update.description,
             category=workflow_update.category,
             status=workflow_update.status,
-            service_id=workflow_update.service_id,
+            service_id=service_id_arg,
             workflow_definition=workflow_definition_dict,
             user_info=user_info
         )
@@ -1167,6 +1341,13 @@ async def update_workflow(
     except Exception as e:
         logger.error(f"Failed to sync DB with external API: {str(e)}")
 
+    emit_from_request(
+        db, request,
+        action=Action.UPDATE,
+        resource_type=ResourceType.WORKFLOW,
+        actor_member_id=current_user.member_id,
+        resource_id=surro_workflow_id,
+    )
     # 응답
     return WorkflowResponse(
         id=existing_workflow.id,
@@ -1186,14 +1367,15 @@ async def update_workflow(
 @router.delete("/{surro_workflow_id}", status_code=202)
 async def delete_workflow(
         surro_workflow_id: str,
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
     """
     워크플로우 삭제 시작 (2단계 프로세스)
 
-    워크플로우 삭제를 시작합니다. KServe InferenceService를 정리하는
-    Kubeflow Pipeline을 실행하고 cleanup_run_id를 반환합니다.
+    워크플로우 삭제를 시작합니다. Kubeflow 정리 파이프라인으로 KServe InferenceService,
+    Ollama Deployment/Service 등 클러스터 서빙 리소스를 정리하고 cleanup_run_id를 반환합니다.
     실제 DB 삭제는 `finalize-deletion` API를 통해 완료 확인 후 수행됩니다.
 
     ## Path Parameters
@@ -1209,12 +1391,12 @@ async def delete_workflow(
 
     ## Deletion Process
     1. 현재 API 호출: 정리 파이프라인 시작
-    2. Kubeflow Pipeline: KServe InferenceService 삭제
+    2. Kubeflow Pipeline: KServe InferenceService · Ollama Deployment/Service 등 클러스터 서빙 리소스 삭제
     3. `finalize-deletion` API 호출: Kubernetes 리소스 직접 확인 및 DB 삭제
 
     ## Notes
     - 비동기 프로세스로 진행됨 (202 Accepted)
-    - KServe 리소스 정리에 시간이 걸릴 수 있음
+    - 클러스터 서빙 리소스 정리에 시간이 걸릴 수 있음
     - 템플릿은 바로 DB에서 삭제됨 (배포 리소스 없음)
     - 게이트웨이 권한 검사: admin 이거나 해당 워크플로우의 `created_by` 사용자만 삭제 가능
 
@@ -1248,6 +1430,14 @@ async def delete_workflow(
             surro_workflow_id,
             user_info
         )
+        emit_from_request(
+            db, request,
+            action=Action.DELETE,
+            resource_type=ResourceType.WORKFLOW,
+            actor_member_id=current_user.member_id,
+            resource_id=surro_workflow_id,
+            metadata={"stage": "initiated"},
+        )
         return deletion_response
     except Exception as e:
         raise HTTPException(
@@ -1258,7 +1448,10 @@ async def delete_workflow(
 @router.post("/{surro_workflow_id}/finalize-deletion")
 async def finalize_workflow_deletion(
         surro_workflow_id: str,
-        run_id: str = Query(..., description="Cleanup run ID"),
+        run_id: Optional[str] = Query(
+            None,
+            description="Deprecated — 현재 삭제 완료 처리에는 사용되지 않음",
+        ),
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -1272,8 +1465,9 @@ async def finalize_workflow_deletion(
     - **workflow_id** (str): 삭제할 워크플로우 UUID
 
     ## Query Parameters
-    - **run_id** (str, required): Kubeflow Pipeline cleanup run ID
-        - `DELETE /workflows/{workflow_id}` 응답의 `cleanup_run_id` 사용
+    - **run_id** (str, optional, *deprecated*): 현재 삭제 완료 처리에는 사용되지 않음
+        - 호환성 차원에서 받기는 하나 처리에는 사용하지 않음
+        - 생략 가능
 
     ## Response
     - **workflow_id** (str): 워크플로우 UUID
@@ -1322,10 +1516,11 @@ async def finalize_workflow_deletion(
     }
 
     try:
+        # MLOps v2부터 run_id는 사용되지 않으므로 외부에 전달하지 않음
         finalize_response = await workflow_service.finalize_deletion(
             surro_workflow_id,
-            run_id,
-            user_info
+            run_id=None,
+            user_info=user_info,
         )
 
         # 삭제 완료된 경우 우리 DB에서도 삭제
@@ -1348,24 +1543,24 @@ async def finalize_workflow_deletion(
 @router.post("/{surro_workflow_id}/execute", response_model=WorkflowExecuteResponse)
 async def execute_workflow(
         surro_workflow_id: str,
-        execute_request: WorkflowExecuteRequest,
+        execute_request: Optional[WorkflowExecuteRequest] = Body(None),
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
     """
-    워크플로우 실행 (KServe 배포 + Kubeflow 파이프라인 실행)
+    워크플로우 실행 (서빙 배포 + Kubeflow 파이프라인)
 
-    워크플로우를 실행하여 ML 모델을 배포합니다.
-    Kubeflow 파이프라인을 통해 KServe InferenceService를 생성하고,
-    모델 서빙 엔드포인트를 활성화합니다.
+    워크플로우를 실행하여 MODEL 컴포넌트를 배포합니다.
+    배포 유형(`deployment_type`)에 따라 KServe InferenceService 또는
+    Ollama Deployment/Service 등 클러스터 서빙 리소스를 Kubeflow 파이프라인으로 생성합니다.
 
     ## Path Parameters
     - **workflow_id** (str): 실행할 워크플로우 UUID
 
-    ## Request Body (WorkflowExecuteRequest)
-    - **parameters** (Dict[str, Any], optional): 실행 파라미터
-        - 커스텀 설정 값들을 전달할 수 있음
-        - 예: `{"gpus": 1, "replicas": 2}`
+    ## Request Body (Optional[WorkflowExecuteRequest])
+    - **parameters** (Dict[str, Any], optional): 호환성 유지용 실행 파라미터
+        - 현재 실행 처리에는 사용되지 않음
+        - body 자체를 생략해도 정상 호출됨
 
     ## Response (WorkflowExecuteResponse)
     - **workflow_id** (str): 실행된 워크플로우 UUID
@@ -1379,10 +1574,10 @@ async def execute_workflow(
 
     ## Process
     1. 지식베이스가 모델 앞에 있는지 검증
-    2. MODEL 컴포넌트를 KServe InferenceService로 배포
+    2. MODEL 컴포넌트를 deployment_type에 따라 KServe / Ollama 등으로 배포
     3. 워크플로우를 Kubeflow 파이프라인으로 변환
     4. 파이프라인 실행 및 모니터링 시작
-    5. KServeDeployment 테이블에 배포 정보 기록
+    5. `model_workflow_deployments` 테이블에 배포 정보 기록
 
     ## Notes
     - 워크플로우 상태가 ERROR인 경우만 실행 불가
@@ -1413,10 +1608,12 @@ async def execute_workflow(
         'name': current_user.name
     }
 
+    # MLOps v2는 body를 받지 않으므로 parameters는 외부에 전달하지 않음.
+    # 게이트웨이 호환성 차원에서 받기만 한다.
     execute_response = await workflow_service.execute_workflow(
         surro_workflow_id,
-        execute_request.parameters,
-        user_info
+        parameters=None,
+        user_info=user_info,
     )
 
     return execute_response
@@ -1431,7 +1628,7 @@ async def get_workflow_status(
     워크플로우 실행 상태 조회
 
     워크플로우의 실행 상태와 배포된 모델들의 상태를 종합적으로 조회합니다.
-    KServe 배포 상태와 Kubeflow 파이프라인 실행 상태를 모두 포함합니다.
+    `model_workflow_deployments` 레코드(서빙 배포 상태)와 Kubeflow 파이프라인 실행 상태를 모두 포함합니다.
 
     ## Path Parameters
     - **workflow_id** (str): 조회할 워크플로우 UUID
@@ -1449,18 +1646,18 @@ async def get_workflow_status(
         - 참조용으로만 포함되며, 실제 파이프라인 상태는 조회하지 않음
     - **deployed_models** (List[dict]): 배포된 모델 목록
         - **component_id** (str): 컴포넌트 UUID
-        - **service_name** (str): KServe InferenceService 이름 (DNS 1035 규칙 준수)
-        - **service_hostname** (str): KServe 서비스 호스트명
+        - **service_name** (str): 서빙 리소스 이름 (DNS 1035 규칙 준수, KServe InferenceService / Ollama Service 등)
+        - **service_hostname** (str): 서빙 서비스 호스트명
             - Istio Virtual Service 라우팅에 사용
             - 형식: `{service_name}.{namespace}.example.com`
         - **model_name** (str): 컴포넌트 이름 (사용자가 지정한 이름)
         - **sanitized_model_name** (str): 정제된 모델 이름
             - DNS 규칙에 맞게 변환된 모델 이름 (슬래시가 하이픈으로 변경됨)
-            - KServe 엔드포인트에서 실제로 사용되는 이름
+            - 서빙 엔드포인트에서 실제로 사용되는 이름
         - **model_id** (int, optional): 모델 ID (MODEL 타입 컴포넌트인 경우)
         - **internal_url** (str, optional): 내부 접근 URL
             - 형식: `http://{service_name}.{namespace}.svc.cluster.local`
-        - **gateway_url** (str): 외부에서 접근 가능한 KServe Gateway 엔드포인트 URL
+        - **gateway_url** (str): 외부에서 접근 가능한 게이트웨이 엔드포인트 URL (KServe + KSERVE_GATEWAY_URL 설정 시)
         - **status** (str): 배포 상태
             - "DEPLOYING": 배포 중
             - "DEPLOYED": 배포 완료
@@ -1474,7 +1671,7 @@ async def get_workflow_status(
     - 워크플로우가 실행되지 않았다면 `kubeflow_run_id`는 null
     - `deployed_models`는 MODEL 타입 컴포넌트가 있는 경우만 포함
     - 모든 조회는 DB 기반으로 수행되며, Kubernetes나 Kubeflow를 직접 조회하지 않음
-    - 배포 상태는 `kserve_deployments` 테이블의 정보를 기반으로 함
+    - 배포 상태는 `model_workflow_deployments` 테이블의 정보를 기반으로 함
     - `deployed_models` 조회 실패 시에도 에러를 발생시키지 않고 빈 리스트로 처리됨
 
     ## Errors
@@ -1519,12 +1716,12 @@ async def update_component_deployment_status(
         current_user=Depends(get_current_user)
 ):
     """
-    컴포넌트의 KServe 배포 상태를 업데이트합니다.
+    컴포넌트의 워크플로 서빙 배포 상태를 업데이트합니다.
 
-    **중요**: 이 API는 Kubeflow Pipeline 내부에서만 호출되는 내부 API입니다.
+    **중요**: 이 API는 Kubeflow Pipeline(또는 파이프라인 내 경량 컴포넌트)에서만 호출되는 내부 API입니다.
     프론트엔드나 외부 클라이언트에서는 사용하지 않아야 합니다.
 
-    Kubeflow Pipeline 실행 중 컴포넌트의 KServe 배포가 완료되면,
+    Kubeflow Pipeline 실행 중 컴포넌트의 서빙 배포(KServe / Ollama 등)가 완료되면,
     Pipeline 내부에서 자동으로 이 API를 호출하여 배포 상태를 업데이트합니다.
 
     ## Path Parameters
@@ -1532,8 +1729,8 @@ async def update_component_deployment_status(
     - **component_id** (str): 컴포넌트 UUID
 
     ## Request Body (Form Data)
-    - **service_name** (str, required): KServe 서비스 이름
-    - **service_hostname** (str, required): KServe 서비스 호스트명
+    - **service_name** (str, required): 서빙 리소스 이름 (KServe InferenceService / Ollama Service 등)
+    - **service_hostname** (str, required): 서빙 서비스 호스트명
     - **model_name** (str, required): 배포된 모델 이름
     - **status** (str, required): 배포 상태 (예: "ready", "failed")
     - **internal_url** (str, optional): 내부 서비스 URL
@@ -1775,7 +1972,7 @@ async def test_ml_workflow(
 
     return test_response
 
-# ===== Workflow 모델 추론 (Deprecated) =====
+# ===== Workflow 모델 추론 (Removed in MLOps v2) =====
 
 @router.post(
     "/{surro_workflow_id}/models/{component_id}/inference",
@@ -1784,126 +1981,30 @@ async def test_ml_workflow(
 async def inference_workflow_model(
         surro_workflow_id: str,
         component_id: str,
-        image: Optional[UploadFile] = File(None),
-        text: Optional[str] = Form(None),
-        search_text: Optional[str] = Form(None),
-        db: Session = Depends(get_db),
-        current_user=Depends(get_current_user)
+        current_user=Depends(get_current_user),
 ):
     """
-    배포된 모델에 추론 요청 (Deprecated)
+    배포된 모델에 추론 요청 — **MLOps v2에서 제거됨 (410 Gone)**
 
-    ⚠️ 이 API는 deprecated 되었습니다. 대신 다음 API를 사용하세요:
+    이 엔드포인트는 MLOps v2에서 더 이상 제공되지 않습니다.
+    아래 대체 API를 사용하세요:
+
     - RAG 워크플로우: `POST /api/v1/workflows/{workflow_id}/test/rag`
     - ML 워크플로우: `POST /api/v1/workflows/{workflow_id}/test/ml`
 
-    워크플로우에서 배포된 특정 모델 컴포넌트에 추론을 수행합니다.
-    - KServe 모델: KServe V2 프로토콜을 사용하며, Object Detection 모델을 지원합니다.
-    - Ollama 모델: Ollama 채팅 API(`/api/chat`)를 사용하며, LLM 모델을 지원합니다.
-
-    게이트웨이는 호환성 유지를 위해 MLOps로 요청을 그대로 전달(프록시)합니다.
-    신규 연동에서는 위의 test API를 사용하세요.
-
-    ## Path Parameters
-    - **workflow_id** (str): 워크플로우 UUID
-    - **component_id** (str): 컴포넌트 UUID (WorkflowComponent.id)
-        - 컴포넌트 ID 조회 방법:
-          1. 워크플로우 상세 조회: `GET /api/v1/workflows/{workflow_id}`
-             - 응답의 `components` 배열에서 `id` 필드 확인
-             - `type`이 "MODEL"인 컴포넌트의 `id` 사용
-          2. 배포된 모델 목록 조회: `GET /api/v1/workflows/{workflow_id}/models`
-             - 응답의 `deployed_models` 배열에서 `component_id` 필드 확인
-             - 배포된 모델만 조회 가능 (DEPLOYED 상태)
-
-    ## Request Body (Form Data)
-    - **image** (file, optional): 분석할 이미지 파일
-        - KServe 모델인 경우 필수
-        - Ollama 모델인 경우 선택 (텍스트와 함께 사용 가능)
-        - 지원 형식: JPEG, PNG, GIF, WebP
-        - Base64로 인코딩되어 서버로 전송
-    - **text** (str, optional): 텍스트 입력
-        - Ollama 모델인 경우 필수 (image가 없는 경우)
-        - KServe 모델인 경우 사용하지 않음
-    - **search_text** (str, optional): Knowledge Base 검색 결과 텍스트
-        - Knowledge Base 컴포넌트에서 검색된 결과를 전달하는 파라미터
-        - Ollama 모델인 경우에만 사용됨
-        - prompt_id가 설정된 경우: prompt의 context 변수에 자동 치환
-        - prompt_id가 없는 경우: [참고자료] 태그와 함께 system 메시지로 추가
-
-    ## Response (통일된 형식)
-    - **workflow_id** (str): 워크플로우 UUID
-    - **component_id** (str): 컴포넌트 UUID
-    - **model_info** (dict): 모델 정보
-        - component_id (str): 컴포넌트 ID
-        - service_name (str): 서비스 이름
-        - sanitized_model_name (str): 정제된 모델 이름 (DNS 규칙 준수)
-        - model_id (int, optional): 모델 ID
-        - original_model_name (str, optional): 원본 모델 이름
-        - model_type (str, optional): 모델 타입 (예: "ODM", "LLM")
-        - model_format (str, optional): 모델 포맷 (예: "pytorch", "gguf")
-    - **result** (dict): 추론 결과
-        - **model_type** (str): 모델 타입 ("KServe" 또는 "Ollama")
-        - KServe 모델인 경우:
-            - **predictions** (List[dict]): 추론 결과 목록
-                - 각 항목은 다음 필드를 포함:
-                    - **score** (float): 객체 감지 신뢰도 점수 (0.0 ~ 1.0)
-                    - **label** (str): 감지된 객체의 레이블 (예: "person", "laptop")
-                    - **box** (List[float]): 바운딩 박스 좌표 [x1, y1, x2, y2]
-            - **image_info** (dict, optional): 이미지 메타데이터
-                - **original_size** (dict): 원본 이미지 크기
-                - **model_input_size** (dict): 모델 입력 크기
-        - Ollama 모델인 경우:
-            - **response** (str): LLM 응답 텍스트
-            - **full_response** (dict, optional): Ollama API 전체 응답
-    - **raw_response** (dict, optional): 원본 응답 (예상치 못한 형식인 경우에만 포함)
-
-    ## Monitoring
-    - 모든 추론 요청은 ServiceMonitoring 테이블에 자동 기록
-    - 응답 시간, 성공/실패 여부, 사용자 정보 포함
-    - 서비스와 연결된 경우만 모니터링 데이터 저장
-
-    ## Notes
-    ### KServe 모델
-    - Istio Gateway를 통해 KServe InferenceService에 접근
-    - V2 프로토콜 엔드포인트: `/v2/models/{model_name}/infer`
-    - Host 헤더로 Istio 라우팅 제어
-
-    ### Ollama 모델
-    - internal_url을 통해 Ollama 서비스에 직접 접근 (예: `http://localhost:11434`)
-    - 채팅 API 엔드포인트: `/api/chat`
-    - model 필드에 repo_id 사용 (예: "gemma3", "ahmgam/medllama3-v20")
-    - 이미지는 base64로 인코딩되어 메시지에 포함됨
-
     ## Errors
-    - **400**: 잘못된 요청
-        - Ollama 모델인 경우: text 인자가 없으면 에러
-        - KServe 모델인 경우: image 인자가 없으면 에러
-        - 잘못된 이미지 파일
     - **401**: 인증되지 않은 사용자
-    - **404**: 워크플로우나 컴포넌트를 찾을 수 없음
-    - **503**: 모델 서비스가 준비되지 않음
-    - **504**: 추론 요청 타임아웃
+    - **410**: 인증된 호출 시 — 대체 API 정보를 응답에 포함
     """
-    existing_workflow = workflow_crud.get_workflow_by_surro_id(
-        db=db,
-        surro_workflow_id=surro_workflow_id
-    )
-    if not existing_workflow:
-        raise HTTPException(status_code=404, detail="Workflow not found")
-
-    user_info = {
-        'member_id': current_user.member_id,
-        'role': current_user.role,
-        'name': current_user.name
-    }
-
-    return await workflow_service.inference_workflow_model(
-        workflow_id=surro_workflow_id,
-        component_id=component_id,
-        image=image,
-        text=text,
-        search_text=search_text,
-        user_info=user_info,
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "message": "This endpoint was removed in MLOps v2.",
+            "alternatives": {
+                "rag_workflow": "POST /api/v1/workflows/{workflow_id}/test/rag",
+                "ml_workflow": "POST /api/v1/workflows/{workflow_id}/test/ml",
+            },
+        },
     )
 
 
@@ -1918,8 +2019,8 @@ async def get_workflow_models(
     """
     워크플로우에 배포된 모델 목록 조회
 
-    워크플로우에서 배포된 모든 ML 모델의 상세 정보를 조회합니다.
-    KServe InferenceService로 배포된 모델들의 엔드포인트와 상태를 포함합니다.
+    워크플로우의 `model_workflow_deployments` 레코드를 조회합니다.
+    KServe · Ollama 등 클러스터 서빙 리소스로 배포된 모델들의 엔드포인트와 상태를 포함합니다.
 
     ## Path Parameters
     - **workflow_id** (str): 조회할 워크플로우 UUID
@@ -1935,8 +2036,8 @@ async def get_workflow_models(
         - model_id (int): 모델 ID
         - model_name (str): 원본 모델 이름
         - sanitized_model_name (str): DNS 규칙에 맞게 변환된 모델 이름
-        - service_name (str): KServe 서비스 이름
-        - service_hostname (str): KServe 서비스 호스트명
+        - service_name (str): 서빙 리소스 이름 (KServe / Ollama 등)
+        - service_hostname (str): 서빙 서비스 호스트명
         - status (str): 배포 상태
             - "PENDING": 배포 대기중
             - "DEPLOYED": 배포 완료
@@ -1994,7 +2095,7 @@ async def cleanup_workflow(
     """
     워크플로우 리소스 정리 시작
 
-    배포된 KServe InferenceService들을 정리합니다.
+    배포된 KServe InferenceService · Ollama Deployment/Service 등 클러스터 서빙 리소스를 정리합니다.
     워크플로우 자체는 유지하면서 배포된 리소스만 제거합니다.
 
     ## Path Parameters
@@ -2014,7 +2115,7 @@ async def cleanup_workflow(
     - 워크플로우 구조 변경 전 리소스 정리
 
     ## Process
-    1. KServe InferenceService 삭제 파이프라인 시작
+    1. 서빙 리소스(KServe / Ollama 등) 삭제 파이프라인 시작
     2. cleanup_run_id 반환
     3. `finalize-cleanup` API로 완료 확인
     4. 워크플로우 상태를 DRAFT로 변경 (재실행 가능)
@@ -2116,7 +2217,7 @@ async def finalize_workflow_cleanup(
        - Ollama Deployment/Service 조회
     3. 리소스가 모두 삭제된 경우:
        - 워크플로우 상태가 ERROR인 경우 DRAFT로 변경
-       - KServe 배포 데이터(kserve_deployments) 삭제
+       - 배포 데이터(`model_workflow_deployments`) 삭제
        - 재실행 가능한 상태로 업데이트
     4. 리소스가 아직 존재하는 경우: 진행중 상태 반환 (재호출 필요)
     5. 확인 중 오류 발생: 실패 상태 반환

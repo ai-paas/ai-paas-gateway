@@ -1,9 +1,10 @@
-from logging.config import fileConfig
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
-from alembic import context
 import os
 import sys
+from logging.config import fileConfig
+
+from alembic import context
+from sqlalchemy import engine_from_config
+from sqlalchemy import pool
 
 # 프로젝트 루트를 Python path에 추가
 sys.path.append(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))

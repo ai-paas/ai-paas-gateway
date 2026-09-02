@@ -1,5 +1,6 @@
 """MemberCRUD 단위 테스트"""
 import pytest
+
 from app.cruds.member import member_crud
 from app.schemas.member import MemberCreate, MemberUpdate
 

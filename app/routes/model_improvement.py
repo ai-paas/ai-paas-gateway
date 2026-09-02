@@ -1,17 +1,19 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
-from typing import List, Optional
 import logging
+from typing import List, Optional
 
-from app.database import get_db
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
+from sqlalchemy.orm import Session
+
 from app.auth import get_current_user
 from app.cruds import model_improvement_crud, model_crud
+from app.database import get_db
+from app.models import Member
 from app.schemas.model_improvement import (
     ModelImprovementRequest, ModelImprovementResponse,
     ModelImprovementStatusResponse, TaskTypeResponse
 )
+from app.services.audit_service import Action, ResourceType, emit_from_request
 from app.services.model_improvement_service import model_improvement_service
-from app.models import Member
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,7 @@ router = APIRouter(prefix="/model-improvements", tags=["Model Improvements"])
 @router.post("", response_model=ModelImprovementResponse, status_code=status.HTTP_202_ACCEPTED)
 async def submit_improvement(
         request: ModelImprovementRequest,
+        http_request: Request,
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
@@ -79,6 +82,14 @@ async def submit_improvement(
             except Exception as mapping_error:
                 logger.warning(f"Failed to create improvement mapping: {str(mapping_error)}")
 
+            emit_from_request(
+                db, http_request,
+                action=Action.CREATE,
+                resource_type=ResourceType.MODEL_IMPROVEMENT,
+                actor_member_id=current_user.member_id,
+                resource_id=task_id,
+                metadata={"source_model_id": request.source_model_id, "task_type": request.task_type},
+            )
         return result
 
     except HTTPException:
@@ -155,6 +166,12 @@ async def get_improvement_status(
 @router.get("/task-types", response_model=List[TaskTypeResponse])
 async def get_task_types(
         category: Optional[str] = Query(None, description="카테고리 필터 (optimization, lightweight)"),
+        source_model_id: Optional[int] = Query(
+            None,
+            description="지정 시 해당 모델 repo_id에 맞는 허용 기법만 반환 (예: DETR은 tensorrt/openvino/pruning). "
+                        "본인 소유 모델만 지정 가능 (admin 제외).",
+        ),
+        db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
     """
@@ -167,6 +184,7 @@ async def get_task_types(
     | 필드 | 타입 | 필수 | 설명 |
     |------|------|------|------|
     | `category` | string | — | 카테고리 필터 (optimization, lightweight) |
+    | `source_model_id` | integer | — | 지정 시 본인 소유 모델에 한해 repo_id 기반 허용 기법만 반환 |
 
     ## Response (200) — `List[TaskTypeResponse]`
 
@@ -175,10 +193,35 @@ async def get_task_types(
     | `name` | string | ✅ | 기법 식별자 |
     | `category` | string | ✅ | optimization 또는 lightweight |
     | `description` | string \\| null | — | 표시용 설명 |
+
+    ## Errors
+    - **404**: `source_model_id`가 지정되었으나 해당 모델이 게이트웨이 DB에 없거나 접근 권한이 없는 경우
     """
+    # source_model_id 지정 시 게이트웨이 DB 매핑 기준 권한 검증 (메모 4번 규약).
+    # 일반 사용자: 본인 소유 + soft-delete 아님. admin: ownership은 우회하되 존재/soft-delete는 확인.
+    if source_model_id is not None:
+        if current_user.role == "admin":
+            from app.models.model import Model
+            exists = db.query(Model).filter(
+                Model.surro_model_id == source_model_id,
+                Model.deleted_at.is_(None),
+            ).first()
+            if not exists:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Model {source_model_id} not found",
+                )
+        else:
+            if not model_crud.check_model_ownership(db, source_model_id, current_user.member_id):
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Model {source_model_id} not found or access denied",
+                )
+
     try:
         result = await model_improvement_service.get_task_types(
             category=category,
+            source_model_id=source_model_id,
             user_info={
                 'member_id': current_user.member_id,
                 'role': current_user.role,

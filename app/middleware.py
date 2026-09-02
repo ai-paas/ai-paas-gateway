@@ -28,11 +28,17 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             response.headers["X-Request-ID"] = request_id
             return response
         finally:
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
             try:
-                log_data = self._build_log_data(request, request_id, status_code, start_time)
+                log_data = self._build_log_data(request, request_id, status_code, start_time, duration_ms)
                 get_access_logger().info("access", extra={"event_data": log_data})
             except Exception:
                 _fallback_logger.exception("Failed to write access log")
+            try:
+                from app.services import api_metrics_service
+                api_metrics_service.record(request.url.path, status_code, duration_ms)
+            except Exception:
+                _fallback_logger.exception("Failed to record api metric")
 
     def _build_log_data(
         self,
@@ -40,8 +46,10 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         request_id: str,
         status_code: int,
         start_time: float,
+        duration_ms: float | None = None,
     ) -> dict:
-        duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        if duration_ms is None:
+            duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
         path = request.url.path
         is_masked_path = path in settings.LOG_ACCESS_MASK_PATHS
 

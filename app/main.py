@@ -11,11 +11,12 @@ from app.middleware import RequestLoggingMiddleware
 from app.routes import (
     any_cloud,
     auth,
+    dashboard,
     dataset,
     hub_connect,
     knowledge_base,
     learning,
-    lite_model,
+    me_dashboard,
     member,
     model,
     model_improvement,
@@ -31,8 +32,13 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting AIPaaS Gateway API")
-    yield
-    logger.info("Shutting down AIPaaS Gateway API")
+    from app.scheduler import start_scheduler, stop_scheduler
+    start_scheduler()  # ENABLE_SCHEDULER=false면 no-op
+    try:
+        yield
+    finally:
+        stop_scheduler()
+        logger.info("Shutting down AIPaaS Gateway API")
 
 
 app = FastAPI(
@@ -83,10 +89,8 @@ app.include_router(any_cloud.router_admin_cluster, prefix=settings.API_V1_STR)
 app.include_router(any_cloud.router_admin_agent, prefix=settings.API_V1_STR)
 app.include_router(any_cloud.router_fleet, prefix=settings.API_V1_STR)
 app.include_router(any_cloud.router_vm, prefix=settings.API_V1_STR)
-app.include_router(lite_model.router_info, prefix=settings.API_V1_STR)
-app.include_router(lite_model.router_optimize, prefix=settings.API_V1_STR)
-app.include_router(lite_model.router_task, prefix=settings.API_V1_STR)
-app.include_router(lite_model.router_model, prefix=settings.API_V1_STR)
+app.include_router(dashboard.router, prefix=settings.API_V1_STR)
+app.include_router(me_dashboard.router, prefix=settings.API_V1_STR)
 
 
 @app.get("/")
