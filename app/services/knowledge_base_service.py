@@ -1,9 +1,11 @@
-import httpx
-import logging
 import asyncio
+import logging
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List
-from fastapi import HTTPException, status, UploadFile
+from typing import Dict, Optional, List
+
+import httpx
+from fastapi import HTTPException, UploadFile
+
 from app.config import settings
 from app.schemas.knowledge_base import (
     ExternalKnowledgeBaseDetailResponse,

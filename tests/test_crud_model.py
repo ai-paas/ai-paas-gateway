@@ -1,5 +1,6 @@
 """ModelCRUD 단위 테스트"""
 import pytest
+
 from app.cruds.model import model_crud
 
 

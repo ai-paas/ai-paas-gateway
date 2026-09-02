@@ -55,11 +55,6 @@ services:
       - ANY_CLOUD_TARGET_BASE_URL=${ANY_CLOUD_TARGET_BASE_URL:-}
       - ANY_CLOUD_TIMEOUT=${ANY_CLOUD_TIMEOUT:-30.0}
       - ANY_CLOUD_CONNECT_TIMEOUT=${ANY_CLOUD_CONNECT_TIMEOUT:-5.0}
-      # Lite Model
-      - LITE_MODEL_ENABLED=${LITE_MODEL_ENABLED:-false}
-      - LITE_MODEL_TARGET_BASE_URL=${LITE_MODEL_TARGET_BASE_URL:-}
-      - LITE_MODEL_TIMEOUT=${LITE_MODEL_TIMEOUT:-30.0}
-      - LITE_MODEL_CONNECT_TIMEOUT=${LITE_MODEL_CONNECT_TIMEOUT:-5.0}
     volumes:
       - .:/app  # Mount source code for development
     restart: unless-stopped

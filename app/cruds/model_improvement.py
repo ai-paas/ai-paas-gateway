@@ -1,6 +1,7 @@
-from sqlalchemy.orm import Session
-from sqlalchemy import and_
 from typing import Optional, List
+
+from sqlalchemy import and_
+from sqlalchemy.orm import Session
 
 from app.models.model_improvement import ModelImprovement
 

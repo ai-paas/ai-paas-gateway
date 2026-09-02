@@ -12,6 +12,7 @@ from app.schemas.member import (
     MemberResponse,
     TokenResponse,
 )
+from app.services.audit_service import Action, ResourceType, emit_from_request
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
@@ -49,6 +50,7 @@ def _clear_refresh_token_cookie(response: Response) -> None:
 def login(
         login_data: LoginRequest,
         response: Response,
+        request: Request,
         db: Session = Depends(get_db)
 ):
     """로그인"""
@@ -78,6 +80,14 @@ def login(
     _set_refresh_token_cookie(response, refresh_token)
     member_crud.update_last_login(db=db, member_id=member.member_id)
 
+    emit_from_request(
+        db, request,
+        action=Action.LOGIN,
+        resource_type=ResourceType.MEMBER,
+        actor_member_id=member.member_id,
+        resource_id=member.member_id,
+    )
+
     return {
         "access_token": access_token,
         "token_type": "bearer",
@@ -88,6 +98,7 @@ def login(
 @router.post("/token", response_model=TokenResponse)
 def login_for_swagger(
         response: Response,
+        request: Request,
         form_data: OAuth2PasswordRequestForm = Depends(),
         db: Session = Depends(get_db)
 ):
@@ -117,6 +128,15 @@ def login_for_swagger(
 
     _set_refresh_token_cookie(response, refresh_token)
     member_crud.update_last_login(db=db, member_id=member.member_id)
+
+    emit_from_request(
+        db, request,
+        action=Action.LOGIN,
+        resource_type=ResourceType.MEMBER,
+        actor_member_id=member.member_id,
+        resource_id=member.member_id,
+        metadata={"flow": "swagger_oauth2"},
+    )
 
     return {
         "access_token": access_token,
@@ -173,13 +193,30 @@ def refresh_token(
 @router.post("/logout")
 def logout(
         response: Response,
+        request: Request,
+        db: Session = Depends(get_db),
         credentials: HTTPAuthorizationCredentials | None = Depends(optional_security)
 ):
     """로그아웃"""
+    actor_member_id = None
     if credentials:
+        try:
+            token_data = AuthService.verify_token(credentials.credentials)
+            actor_member_id = token_data.get("member_id")
+        except HTTPException:
+            actor_member_id = None
         AuthService.revoke_token(credentials.credentials)
 
     _clear_refresh_token_cookie(response)
+
+    if actor_member_id:
+        emit_from_request(
+            db, request,
+            action=Action.LOGOUT,
+            resource_type=ResourceType.MEMBER,
+            actor_member_id=actor_member_id,
+            resource_id=actor_member_id,
+        )
 
     return {"message": "Successfully logged out"}
 
