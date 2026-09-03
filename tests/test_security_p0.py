@@ -82,17 +82,15 @@ def _any_cloud_client(user) -> TestClient:
 
 
 def _cluster_payload() -> dict:
+    # Any Cloud v0.3.0: source discriminator + spec 구조
     return {
-        "clusterType": "kubernetes",
-        "clusterProvider": "aws",
+        "source": "registered",
         "clusterName": "cluster-001",
-        "description": "test",
-        "apiServerIp": "127.0.0.1",
-        "apiServerUrl": "https://127.0.0.1",
-        "serverCA": "server-ca",
-        "clientCA": "client-ca",
-        "clientKey": "client-key",
-        "monitServerURL": "https://127.0.0.1/metrics",
+        "spec": {
+            "provider": "AWS",
+            "clusterType": "EKS",
+            "description": "test",
+        },
     }
 
 
