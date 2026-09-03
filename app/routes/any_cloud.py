@@ -14,7 +14,8 @@ from app.models import Member
 from app.schemas.any_cloud import AnyCloudResponse, ClusterCreateRequest, \
     HelmRepoCreateRequest, ClusterUpdateRequest, AnyCloudPagedResponse, \
     CredentialCreateRequest, ClusterValidationRequest, AddonInstallRequest, \
-    HelmReleaseInstallRequest, OperationResponse, UnifiedClusterResponse
+    HelmReleaseInstallRequest, OperationResponse, PrometheusMultiQueryRequest, \
+    UnifiedClusterResponse
 from app.services.any_cloud_service import any_cloud_service
 
 logger = logging.getLogger(__name__)
@@ -325,7 +326,7 @@ async def update_any_cloud_cluster(
         logger.error(f"Error updating cluster for {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update cluster: {str(e)}"
+            detail="Failed to update cluster"
         )
 
 # 클러스터 생성
@@ -441,7 +442,7 @@ async def create_any_cloud_cluster(
         logger.error(f"Error creating cluster for {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create cluster: {str(e)}"
+            detail="Failed to create cluster"
         )
 
 
@@ -477,7 +478,7 @@ async def cluster_refresh(
         logger.error(f"Error refresh cluster for {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to refresh cluster: {str(e)}"
+            detail="Failed to refresh cluster"
         )
 
 # 클러스터 삭제
@@ -671,7 +672,7 @@ async def create_helm_repo(
         logger.error(f"Error creating helm repo for {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create helm repo: {str(e)}"
+            detail="Failed to create helm repo"
         )
 
 # 헬름 저장소 삭제
@@ -756,13 +757,13 @@ async def get_prometheus_query(
 @router_monit.post("/monit/{cluster_name}/multi-query", response_model=AnyCloudResponse)
 async def post_prometheus_multi_query(
         cluster_name: str = Path(..., description="대상 클러스터 이름", examples=["on-prem-01"]),
-        body: dict = Body(..., description='{"queries": [{"name", "type", "query", "start?", "end?", "step?", "time?"}]}'),
+        body: PrometheusMultiQueryRequest = Body(...),
         current_user: Member = Depends(get_current_user)
 ):
-    """Prometheus N PromQL 병렬 fan-out — 모니터링 페이지의 27 요청을 1 요청으로 묶기 위한 batch."""
+    """Prometheus N PromQL 병렬 fan-out — 모니터링 페이지의 다중 요청을 1 요청으로 묶기 위한 batch."""
     try:
         user_info = _create_user_info_dict(current_user)
-        queries = body.get("queries", []) if isinstance(body, dict) else []
+        queries = [q.model_dump(exclude_none=True) for q in body.queries]
         return await any_cloud_service.multi_query_prometheus(
             cluster_name=cluster_name,
             queries=queries,
@@ -1377,13 +1378,13 @@ async def list_operations(
         type: Optional[str] = Query(None, description="필터 — 작업 종류"),
         resourceType: Optional[str] = Query(None, description="필터 — 리소스 타입"),
         resourceId: Optional[str] = Query(None, description="필터 — 리소스 ID"),
-        pageSize: int = Query(50, ge=1, le=500, description="페이지 크기"),
+        size: int = Query(50, ge=1, le=500, description="페이지 크기"),
         current_user: Member = Depends(get_current_user)
 ):
     """작업 이력 목록 조회"""
     try:
         user_info = _create_user_info_dict(current_user)
-        query = {"pageSize": pageSize}
+        query = {"pageSize": size}   # gateway size -> upstream pageSize
         if state:
             query["state"] = state
         if type:
@@ -1761,7 +1762,7 @@ async def create_credential(
         logger.error(f"Error creating credential for {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create credential: {str(e)}"
+            detail="Failed to create credential"
         )
 
 
@@ -1914,7 +1915,7 @@ async def install_cluster_addon(
         logger.error(f"Error installing addon for {cluster_name}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to install addon: {str(e)}"
+            detail="Failed to install addon"
         )
 
 
@@ -2026,7 +2027,7 @@ async def install_helm_release(
         logger.error(f"Error installing helm release for {cluster_name}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to install helm release: {str(e)}"
+            detail="Failed to install helm release"
         )
 
 
@@ -2516,6 +2517,37 @@ async def get_standard_metric(
     except Exception as e:
         logger.error(f"Error getting standard metric {metric} for {cluster_name}: {str(e)}")
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get standard metric")
+
+
+# v0.2 프론트 호환용 alias. upstream 의 /monit/nodeStatus 는 v0.3.0 에서 사라졌으므로
+# 동등한 K8s nodes 목록으로 위임한다. **응답 형태가 v0.2 와 다르다** — 프론트는
+# GET /any-cloud/kubernetes/nodes?clusterName=... 로 이관할 것.
+@router_monit.get("/monit/nodeStatus/{cluster_name}", deprecated=True)
+async def get_monitoring_cluster_node(
+        cluster_name: str = Path(..., description="조회할 cluster 이름", examples=["openstack"]),
+        page: int = Query(1, ge=1, description="페이지 번호"),
+        size: int = Query(20, ge=1, le=500, description="페이지 크기"),
+        current_user: Member = Depends(get_current_user)
+):
+    """[deprecated] 클러스터 노드 상태 조회.
+
+    Any Cloud v0.3.0 대체 경로: `GET /any-cloud/kubernetes/nodes?clusterName={cluster_name}`
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.get_kubernetes_resource(
+            resource_type="nodes",
+            clusterName=cluster_name,
+            namespace="",
+            user_info=user_info,
+            page=page,
+            size=size,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting node status for {cluster_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get node status")
 
 
 # ============================================================================
@@ -3023,12 +3055,12 @@ async def delete_vm(
 @router_vm.get("/{vm_name}/operations")
 async def list_vm_operations(
         vm_name: str = Path(...),
-        page_size: int = Query(50, alias="pageSize", ge=1, le=500),
+        size: int = Query(50, ge=1, le=500, description="페이지 크기"),
         current_user: Member = Depends(get_current_user),
 ):
     """이 VM 의 operation 이력"""
     user_info = _create_user_info_dict(current_user)
-    return await any_cloud_service.list_vm_operations(vm_name=vm_name, user_info=user_info, page_size=page_size)
+    return await any_cloud_service.list_vm_operations(vm_name=vm_name, user_info=user_info, page_size=size)
 
 
 @router_vm.post("/{vm_name}/operations")
@@ -3045,12 +3077,12 @@ async def create_vm_operation(
 @router_vm.get("/{vm_name}/state-history")
 async def get_vm_state_history(
         vm_name: str = Path(...),
-        page_size: int = Query(50, alias="pageSize", ge=1, le=500),
+        size: int = Query(50, ge=1, le=500, description="페이지 크기"),
         current_user: Member = Depends(get_current_user),
 ):
     """VM workflow state transition 이력"""
     user_info = _create_user_info_dict(current_user)
-    return await any_cloud_service.get_vm_state_history(vm_name=vm_name, user_info=user_info, page_size=page_size)
+    return await any_cloud_service.get_vm_state_history(vm_name=vm_name, user_info=user_info, page_size=size)
 
 
 @router_vm.get("/{vm_name}/nodes")
@@ -3066,7 +3098,7 @@ async def get_vm_nodes(
 @router_vm.post("/{vm_name}/ssh-key")
 async def issue_vm_ssh_key(
         vm_name: str = Path(...),
-        format: str = Query("json", regex="^(json|pem)$"),
+        format: str = Query("json", pattern="^(json|pem)$"),
         current_user: Member = Depends(get_current_admin_user),
 ):
     """VM SSH private key 발급. format=pem 이면 raw PEM."""

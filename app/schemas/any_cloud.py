@@ -170,13 +170,29 @@ class ClusterUpdateRequest(BaseModel):
 
 
 class AnyCloudPagedResponse(BaseModel):
-    """Any Cloud API 페이징 응답 래퍼"""
+    """Any Cloud API 페이징 응답 래퍼.
+
+    두 가지 모드가 한 스키마를 공유한다. 프론트는 **`has_next` 하나만 보고** 다음 페이지
+    유무를 판단하면 되고, `total`/`total_pages` 는 offset 모드에서만 신뢰할 수 있다.
+
+    | 모드 | 사용처 | 신뢰 가능한 필드 |
+    |---|---|---|
+    | offset | 대부분의 목록 API (`page`/`size`) | `total`, `total_pages`, `has_next` |
+    | cursor | Kubernetes 리소스 목록 (K8s 는 총계를 주지 않음) | `nextPageToken`, `has_next` |
+
+    cursor 모드에서 `total` 은 **현재 페이지의 건수**이고 `total_pages` 는 의미가 없다.
+    다음 페이지는 `nextPageToken` 을 요청의 `pageToken` 으로 되돌려 보내 조회한다.
+    """
     data: List[Any] = Field(..., description="응답 데이터 목록")
-    total: int = Field(..., description="전체 데이터 개수")
+    total: int = Field(..., description="전체 데이터 개수 (cursor 모드에서는 현재 페이지 건수)")
     page: int = Field(..., description="현재 페이지 번호")
     size: int = Field(..., description="페이지 크기")
-    total_pages: int = Field(..., description="전체 페이지 수")
-    nextPageToken: Optional[str] = Field(default=None, description="다음 페이지 토큰")
+    total_pages: int = Field(..., description="전체 페이지 수 (cursor 모드에서는 의미 없음)")
+    has_next: bool = Field(default=False, description="다음 페이지 존재 여부 — 두 모드 공통")
+    nextPageToken: Optional[str] = Field(
+        default=None,
+        description="cursor 모드의 다음 페이지 토큰. 다음 요청의 pageToken 으로 그대로 전달."
+    )
 
     @classmethod
     def create(cls, data: List[Any], total: int, page: int, size: int, next_page_token: Optional[str] = None):
@@ -188,8 +204,31 @@ class AnyCloudPagedResponse(BaseModel):
             page=page,
             size=size,
             total_pages=total_pages,
+            has_next=bool(next_page_token) or page < total_pages,
             nextPageToken=next_page_token
         )
+
+
+class PrometheusQueryItem(BaseModel):
+    """multi-query 의 개별 PromQL 항목"""
+    model_config = ConfigDict(extra="allow")
+    name: str = Field(..., description="응답 맵의 키", examples=["node_cpu"])
+    query: str = Field(..., description="PromQL 표현식", examples=["up"])
+    type: Literal["instant", "range"] = Field("instant", description='"instant" | "range"')
+    time: Optional[str] = Field(None, description="instant 평가 시각 (RFC3339 또는 unix ts)")
+    start: Optional[str] = Field(None, description="range 시작 시각")
+    end: Optional[str] = Field(None, description="range 종료 시각")
+    step: Optional[str] = Field(None, description='range 간격 (예: "60s")', examples=["60s"])
+
+
+class PrometheusMultiQueryRequest(BaseModel):
+    """N개 PromQL 배치 조회 — 모니터링 페이지의 다중 요청을 1회로 묶는다."""
+    queries: List[PrometheusQueryItem] = Field(
+        ...,
+        min_length=1,
+        max_length=50,
+        description="PromQL 목록 (1~50개). 상한은 백엔드 fan-out 증폭을 막기 위한 값."
+    )
 
 
 class CredentialCreateRequest(BaseModel):
