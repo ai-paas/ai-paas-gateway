@@ -1,215 +1,67 @@
-# AI-PaaS Gateway Management API
+# AI PaaS Gateway
 
-## 기능 개요
+[AI-PaaS](https://github.com/ai-paas) 프로젝트의 게이트웨이 저장소.
 
-### 주요 기능
-- JWT 기반 인증/인가 (Access Token, Refresh Token, 역할 기반 접근 제어)
-- 회원 관리 (가입, 조회, 수정, 삭제)
-- 서비스 관리 (CRUD, 검색, 페이지네이션)
-- AI 모델 관리 (외부 Surro API 연동, 모델 생성/조회/삭제/테스트)
-- 워크플로우 관리 (외부 API 연동, 생성/조회/수정/삭제)
+FastAPI 기반 AI PaaS 게이트웨이. 외부 AI 플랫폼(MLOps/Surro, [Hub Connect](https://github.com/ai-paas/hub-connect), [Any Cloud](https://github.com/ai-paas/any-cloud-management))을 프론트엔드([ai-paas-web](https://github.com/ai-paas/ai-paas-web))에 단일 API로 노출하고, 게이트웨이 자체 DB에서 **사용자·권한·리소스 매핑**을 관리한다.
 
-### API 엔드포인트
+- API 경로: `/api/v1` — 188 path / 231 operation
+- 라우터 모듈 14개 (`any_cloud`는 17개 sub-router로 분할)
+- 테스트 473건 통과 (`pytest -m "not postgres"`)
 
-#### 인증 (`/api/v1/auth`)
-| HTTP 메서드 | 엔드포인트 | 설명 |
-|-------------|------------|------|
-| POST | `/auth/login` | 로그인 |
-| POST | `/auth/refresh` | Access Token 갱신 |
-| POST | `/auth/logout` | 로그아웃 (토큰 무효화) |
-| GET | `/auth/me` | 현재 사용자 정보 조회 |
-| POST | `/auth/change-password` | 비밀번호 변경 |
-| POST | `/auth/validate-token` | 토큰 유효성 검증 |
-
-#### 회원 (`/api/v1/members`)
-| HTTP 메서드 | 엔드포인트 | 설명 |
-|-------------|------------|------|
-| POST | `/members/` | 회원 가입 |
-| GET | `/members/` | 회원 목록 조회 (관리자, 페이징/검색) |
-| GET | `/members/{member_id}` | 회원 상세 조회 |
-| PUT | `/members/{member_id}` | 회원 정보 수정 |
-| DELETE | `/members/{member_id}` | 회원 삭제 (소프트 삭제) |
-
-#### 서비스 (`/api/v1/services`)
-| HTTP 메서드 | 엔드포인트 | 설명 |
-|-------------|------------|------|
-| POST | `/services/` | 서비스 생성 (관리자) |
-| GET | `/services/` | 서비스 목록 조회 (페이징/검색) |
-| GET | `/services/{service_id}` | 서비스 상세 조회 |
-| PUT | `/services/{service_id}` | 서비스 수정 |
-| DELETE | `/services/{service_id}` | 서비스 삭제 (소프트 삭제) |
-
-#### 모델 (`/api/v1/models`)
-| HTTP 메서드 | 엔드포인트 | 설명 |
-|-------------|------------|------|
-| GET | `/models/` | 모델 목록 조회 |
-| GET | `/models/providers` | 모델 제공자 목록 |
-| GET | `/models/types` | 모델 타입 목록 |
-| GET | `/models/formats` | 모델 포맷 목록 |
-| GET | `/models/{model_id}` | 모델 상세 조회 |
-| POST | `/models/` | 모델 생성 (파일 업로드 지원) |
-| DELETE | `/models/{model_id}` | 모델 삭제 |
-| POST | `/models/{model_id}/test` | 모델 테스트 |
-
-#### 워크플로우 (`/api/v1/workflows`)
-| HTTP 메서드 | 엔드포인트 | 설명 |
-|-------------|------------|------|
-| POST | `/workflows/` | 워크플로우 생성 |
-| GET | `/workflows/` | 워크플로우 목록 조회 (페이징) |
-| GET | `/workflows/{workflow_id}` | 워크플로우 상세 조회 |
-| PUT | `/workflows/{workflow_id}` | 워크플로우 수정 |
-| DELETE | `/workflows/{workflow_id}` | 워크플로우 삭제 (소프트 삭제) |
-| GET | `/workflows/my/workflows` | 내 워크플로우 조회 |
-| GET | `/workflows/{workflow_id}/external-status` | 외부 워크플로우 상태 확인 |
-
-#### 기타
-| HTTP 메서드 | 엔드포인트 | 설명 |
-|-------------|------------|------|
-| GET | `/` | 루트 |
-| GET | `/health` | 헬스 체크 |
-
-## 설치 및 실행
-
-### 1. 환경 준비
+## 빠른 시작
 
 ```bash
-# 프로젝트 클론
-git clone <repository-url>
-cd service-management-api
-
-# 가상환경 생성 (권장)
-python -m venv venv
-
-# 가상환경 활성화
-# Linux/Mac:
-source venv/bin/activate
-# Windows:
-venv\Scripts\activate
-
-# 의존성 설치
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-```
-
-### 2. 환경변수 설정
-
-`.env.example` 파일을 참고하여 `.env` 파일을 생성하고 데이터베이스 정보를 입력하세요.
-
-```bash
-cp .env.example .env
-# .env 파일을 편집하여 실제 데이터베이스 정보 입력
-```
-
-### 3. 데이터베이스 마이그레이션
-
-```bash
-# Alembic 초기화 (처음 실행 시만)
-alembic init alembic
-
-# 마이그레이션 파일 생성
-alembic revision --autogenerate -m "Initial migration"
-
-# 마이그레이션 실행
+cp .env.example .env             # DATABASE_URL, JWT_SECRET_KEY는 필수
 alembic upgrade head
+uvicorn app.main:app --reload
 ```
 
-### 4. 서버 실행
+기동 후 <http://localhost:8000/docs>에서 Swagger UI로 전체 API를 확인할 수 있다. `./run.sh`는 의존성 설치 → 마이그레이션 → 서버 실행을 한 번에 수행한다.
+
+Docker로 띄우려면:
 
 ```bash
-# 개발 서버 실행
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-
-# 또는 스크립트 실행
-chmod +x run.sh
-./run.sh
+docker compose up --build
 ```
 
-### Docker로 실행
+## 핵심 설계 원칙
 
-```bash
-# Docker Compose로 실행
-docker-compose up -d
+| 원칙 | 내용 |
+|---|---|
+| 단순 프록시가 아니다 | 외부 provider 리소스는 게이트웨이 DB의 매핑 행(`created_by`, `surro_*_id`, soft-delete 상태)과 결합해 권한을 판정한다. upstream ID만으로 접근을 허용하지 않는다. |
+| public contract 분리 | 프론트에 노출되는 요청/응답 형식은 게이트웨이 표준(`page`/`size`, `{data,total,page,size}`)을 따르고, upstream의 `page_size`/`limit`/`items` 등은 service adapter 내부에서만 변환한다. |
+| 검증 lockstep | upstream spec이 완화되면 게이트웨이 라우트 검증(`Body`/`Query` 제약, 스키마)도 같이 완화한다. 그렇지 않으면 새 spec을 따르는 클라이언트가 게이트웨이에서 먼저 422를 받는다. |
+| provider 비활성 허용 | `PROXY_ENABLED` / `HUB_CONNECT_ENABLED` / `ANY_CLOUD_ENABLED`가 false여도 앱은 기동된다. 해당 도메인만 비활성화된다. |
 
-# 로그 확인
-docker-compose logs -f
+## 기술 스택
 
-# 종료
-docker-compose down
-```
+| 구분 | 사용 기술 |
+|---|---|
+| 런타임 | Python 3.12 (Docker 이미지 `python:3.12-slim`) |
+| 웹 | FastAPI 0.135.3, Uvicorn 0.34.3, Starlette |
+| DB | PostgreSQL (`psycopg2-binary` 2.9.11), SQLAlchemy 2.0.49, Alembic 1.18.4 |
+| 스키마 | Pydantic 2.12.5, email-validator |
+| 인증 | python-jose (JWT), bcrypt 4.3.0 |
+| 외부 통신 | httpx 0.28.1 (AsyncClient 커넥션 풀), websockets 13.1 (pod exec 프록시 · uvicorn WS 지원) |
+| 스케줄러 | APScheduler 3.10.4 (in-process BackgroundScheduler) |
+| 테스트 | pytest 9.0.3 |
 
-## API 문서
+## 문서
 
-서버 실행 후 다음 URL에서 API 문서를 확인할 수 있습니다:
+| 문서 | 내용 |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | 모듈 계층, 요청 흐름, 외부 provider 매핑, 데이터 모델 |
+| [docs/api-conventions.md](docs/api-conventions.md) | 인증/인가, 페이지네이션, 정렬, 삭제 정책, 감사 로그 |
+| [docs/api-reference.md](docs/api-reference.md) | 엔드포인트 전체 목록 (자동 생성) |
+| [docs/configuration.md](docs/configuration.md) | 환경 변수, 백그라운드 스케줄러 |
+| [docs/deployment.md](docs/deployment.md) | 로컬/Docker 실행, CI 배포, 테스트 |
+| [docs/development.md](docs/development.md) | 프로젝트 구조, 개발 가이드, 알려진 제약 |
 
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
-- **OpenAPI JSON**: http://localhost:8000/api/v1/openapi.json
+요청/응답 스키마의 단일 소스는 실행 중인 서버의 Swagger UI(`/docs`)와 `/api/v1/openapi.json`이다. `docs/api-reference.md`는 경로·권한 조망용이며 `scripts/gen_api_docs.py`가 생성한다.
 
-## 프로젝트 구조
+## 라이선스
 
-```
-app/
-├── main.py              # FastAPI 앱 진입점
-├── auth.py              # JWT 인증/토큰 관리
-├── config.py            # 환경 설정
-├── database.py          # DB 세션 관리
-├── middleware.py         # 미들웨어
-├── cruds/               # 데이터베이스 CRUD 로직
-│   ├── member.py
-│   ├── model.py
-│   ├── service.py
-│   └── workflow.py
-├── models/              # SQLAlchemy ORM 모델
-│   ├── base.py
-│   ├── member.py
-│   ├── model.py
-│   ├── service.py
-│   └── workflow.py
-├── routes/              # API 라우터
-│   ├── auth.py
-│   ├── member.py
-│   ├── model.py
-│   ├── service.py
-│   └── workflow.py
-├── schemas/             # Pydantic 요청/응답 스키마
-│   ├── member.py
-│   ├── model.py
-│   ├── service.py
-│   └── workflow.py
-└── services/            # 외부 API 연동 서비스
-    ├── model_service.py
-    └── workflow_service.py
-```
-
-## 데이터베이스 스키마
-
-### 주요 테이블
-
-1. **members**: 사용자 정보 (역할, 인증)
-2. **services**: 서비스 기본 정보
-3. **models**: AI 모델 매핑 (외부 Surro API 연동)
-4. **workflows**: 워크플로우 정보 (외부 API 연동)
-
-## 개발 가이드
-
-### 새로운 API 추가
-
-1. `app/schemas/`에 Pydantic 스키마 추가
-2. `app/models/`에 SQLAlchemy 모델 추가 (필요한 경우)
-3. `app/cruds/`에 데이터베이스 CRUD 로직 추가
-4. `app/services/`에 외부 API 연동 서비스 추가 (필요한 경우)
-5. `app/routes/`에 API 라우터 추가
-6. `app/main.py`에 라우터 등록
-7. 마이그레이션 생성 및 적용
-
-### 데이터베이스 스키마 변경
-
-```bash
-# 모델 수정 후 마이그레이션 생성
-alembic revision --autogenerate -m "변경사항 설명"
-
-# 마이그레이션 적용
-alembic upgrade head
-
-# 롤백 (필요한 경우)
-alembic downgrade -1
-```
+[Apache License 2.0](LICENSE).
