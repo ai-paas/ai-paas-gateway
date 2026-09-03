@@ -193,9 +193,25 @@ class AnyCloudPagedResponse(BaseModel):
         default=None,
         description="cursor 모드의 다음 페이지 토큰. 다음 요청의 pageToken 으로 그대로 전달."
     )
+    degraded: Optional[bool] = Field(
+        default=None,
+        description="true 면 agent/circuit 문제로 부분 가용. data 가 비어도 '리소스 없음'이 아니다."
+    )
+    degradedReason: Optional[str] = Field(default=None, description="degraded 사유 코드 (예: AGENT_INACTIVE)")
+    degradedMessage: Optional[str] = Field(default=None, description="degraded 상세 메시지")
 
     @classmethod
-    def create(cls, data: List[Any], total: int, page: int, size: int, next_page_token: Optional[str] = None):
+    def create(
+        cls,
+        data: List[Any],
+        total: int,
+        page: int,
+        size: int,
+        next_page_token: Optional[str] = None,
+        degraded: Optional[bool] = None,
+        degraded_reason: Optional[str] = None,
+        degraded_message: Optional[str] = None,
+    ):
         """페이징 응답 생성 헬퍼"""
         total_pages = (total + size - 1) // size if size > 0 else 0
         return cls(
@@ -205,7 +221,10 @@ class AnyCloudPagedResponse(BaseModel):
             size=size,
             total_pages=total_pages,
             has_next=bool(next_page_token) or page < total_pages,
-            nextPageToken=next_page_token
+            nextPageToken=next_page_token,
+            degraded=degraded,
+            degradedReason=degraded_reason,
+            degradedMessage=degraded_message,
         )
 
 

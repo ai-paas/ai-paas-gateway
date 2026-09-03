@@ -143,6 +143,33 @@ class AnyCloudService:
             size=size
         )
 
+    async def _request_text(
+            self,
+            method: str,
+            path: str,
+            user_info: Optional[Dict[str, str]] = None,
+            accept: str = "text/plain",
+            **kwargs
+    ) -> str:
+        """JSON 이 아닌 응답(YAML/PEM/로그)을 그대로 문자열로 받는다.
+
+        `_make_request` 는 성공 응답에 무조건 `response.json()` 을 호출하므로
+        text/plain·application/yaml 응답에서 JSONDecodeError → 500 이 된다.
+        """
+        headers = self._get_headers(user_info)
+        headers['Accept'] = accept
+        url = f"{self.base_url}{path}"
+        try:
+            response = await getattr(self.client, method.lower())(url, headers=headers, **kwargs)
+        except httpx.TimeoutException:
+            raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, detail="Any Cloud service timeout")
+        except httpx.ConnectError:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Any Cloud service unavailable")
+        except httpx.RequestError:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail="Any Cloud connection error")
+        raise_for_upstream(response, url)
+        return response.text
+
     async def _make_request(
             self,
             method: str,
@@ -504,10 +531,10 @@ class AnyCloudService:
     async def issue_vm_ssh_key(self, vm_name: str, user_info: dict, fmt: str = "json") -> Any:
         """VM SSH private key 발급 (json=metadata, pem=raw file)"""
         if fmt == "pem":
-            # raw PEM 응답 — text/plain. _make_request 의 JSON 가정 우회 필요하여 직접 처리.
-            return await self._make_request(
+            # raw PEM 응답은 text/plain — JSON 파싱 경로를 타면 500 이 된다.
+            return await self._request_text(
                 "POST", f"/v1/vms/{_seg(vm_name)}/ssh-key",
-                user_info=user_info, params={"format": "pem"}
+                user_info=user_info, accept="text/plain", params={"format": "pem"}
             )
         return await self.generic_post(
             path=f"/v1/vms/{_seg(vm_name)}/ssh-key", data={}, user_info=user_info, format=fmt
@@ -515,8 +542,9 @@ class AnyCloudService:
 
     async def download_vm_kubeconfig(self, vm_name: str, user_info: dict, **params) -> Any:
         """VM 의 kubeconfig YAML 다운로드 (단기 SA token)"""
-        return await self._make_request(
-            "GET", f"/v1/vms/{_seg(vm_name)}/kubeconfig", user_info=user_info, params=params
+        return await self._request_text(
+            "GET", f"/v1/vms/{_seg(vm_name)}/kubeconfig",
+            user_info=user_info, accept="application/yaml", params=params
         )
 
     async def get_helm_repos(
@@ -637,8 +665,14 @@ class AnyCloudService:
 
         raw_data = response.get("data", [])
         next_token = None
+        degraded = degraded_reason = degraded_message = None
 
         if isinstance(raw_data, dict):
+            # upstream PagedKubeResourceResponse 의 부분가용 신호. 누락하면 장애가
+            # "리소스 없음"(빈 목록)으로 보인다.
+            degraded = raw_data.get("degraded")
+            degraded_reason = raw_data.get("degradedReason")
+            degraded_message = raw_data.get("degradedMessage")
             data = raw_data.get("items")
             if data is None:
                 data = raw_data.get("data", [])
@@ -660,20 +694,27 @@ class AnyCloudService:
             data = []
 
         if search:
-            return self._apply_client_side_pagination(
+            paged = self._apply_client_side_pagination(
                 data=data,
                 page=page,
                 size=size,
                 search=search,
                 search_fields=["metadata.name"]
             )
+            paged.degraded = degraded
+            paged.degradedReason = degraded_reason
+            paged.degradedMessage = degraded_message
+            return paged
 
         return AnyCloudPagedResponse.create(
             data=data,
             total=len(data),
             page=page,
             size=size,
-            next_page_token=next_token
+            next_page_token=next_token,
+            degraded=degraded,
+            degraded_reason=degraded_reason,
+            degraded_message=degraded_message,
         )
 
     async def get_kubernetes_resource_name(self, resource_type: str, resource_name: str, clusterName: str, namespace: str, user_info: dict) -> dict:
@@ -1069,31 +1110,17 @@ class AnyCloudService:
 
     async def get_cluster_kubeconfig(self, cluster_name: str, user_info: dict) -> str:
         """클러스터 kubeconfig 다운로드 (YAML 텍스트)"""
-        headers = self._get_headers(user_info)
-        headers['Accept'] = 'application/yaml'
-        url = f"{self.base_url}/v1/clusters/{_seg(cluster_name)}/kubeconfig"
-        try:
-            response = await self.client.get(url, headers=headers)
-        except httpx.TimeoutException:
-            raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, detail="Any Cloud service timeout")
-        except httpx.ConnectError:
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Any Cloud service unavailable")
-        raise_for_upstream(response, url)
-        return response.text
+        return await self._request_text(
+            "GET", f"/v1/clusters/{_seg(cluster_name)}/kubeconfig",
+            user_info=user_info, accept="application/yaml"
+        )
 
     async def get_cluster_agent_manifest(self, cluster_name: str, user_info: dict) -> str:
         """클러스터 agent 설치 manifest 다운로드 (YAML 텍스트)"""
-        headers = self._get_headers(user_info)
-        headers['Accept'] = 'application/yaml'
-        url = f"{self.base_url}/v1/clusters/{_seg(cluster_name)}/agent-manifest.yaml"
-        try:
-            response = await self.client.get(url, headers=headers)
-        except httpx.TimeoutException:
-            raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, detail="Any Cloud service timeout")
-        except httpx.ConnectError:
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Any Cloud service unavailable")
-        raise_for_upstream(response, url)
-        return response.text
+        return await self._request_text(
+            "GET", f"/v1/clusters/{_seg(cluster_name)}/agent-manifest.yaml",
+            user_info=user_info, accept="application/yaml"
+        )
 
     async def get_cluster_health(self, cluster_name: str, user_info: dict) -> dict:
         """클러스터 종합 health 조회"""
@@ -1342,11 +1369,14 @@ class AnyCloudService:
             clusterName: Optional[str] = None,
             versionPrefix: Optional[str] = None,
             lastSeenOlderThanSec: Optional[int] = None,
-            page: int = 0,
+            page: int = 1,
             size: int = 50,
     ) -> AnyCloudPagedResponse:
-        """Admin fleet — cluster-agent 전체 목록 조회"""
-        query_params: Dict[str, Any] = {"page": page, "size": size}
+        """Admin fleet — cluster-agent 전체 목록 조회.
+
+        public 은 1-based(`page`), upstream 은 0-based 라 adapter 에서 변환한다.
+        """
+        query_params: Dict[str, Any] = {"page": max(page - 1, 0), "size": size}
         if status:
             query_params["status"] = status
         if clusterName:
@@ -1434,17 +1464,11 @@ class AnyCloudService:
     ) -> str:
         """파드 로그 (text/plain)"""
         ns_path = namespace if namespace else "-"
-        headers = self._get_headers(user_info)
-        headers['Accept'] = 'text/plain'
-        url = f"{self.base_url}/v1/clusters/{_seg(cluster_name)}/namespaces/{_seg(ns_path)}/pods/{_seg(pod_name)}/logs"
-        try:
-            response = await self.client.get(url, headers=headers, params=query_params)
-        except httpx.TimeoutException:
-            raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, detail="Any Cloud service timeout")
-        except httpx.ConnectError:
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Any Cloud service unavailable")
-        raise_for_upstream(response, url)
-        return response.text
+        return await self._request_text(
+            "GET",
+            f"/v1/clusters/{_seg(cluster_name)}/namespaces/{_seg(ns_path)}/pods/{_seg(pod_name)}/logs",
+            user_info=user_info, accept="text/plain", params=query_params
+        )
 
     async def create_kubernetes_resource(
             self, resource_type: str, clusterName: str, namespace: str, data: dict, user_info: dict
