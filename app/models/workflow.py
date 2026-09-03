@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Index, Sequence
+from sqlalchemy import Boolean, Column, Integer, String, Text, DateTime, ForeignKey, Index, Sequence
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -40,10 +40,20 @@ class Workflow(Base):
 
     created_by = Column(String(100), ForeignKey("members.member_id"), nullable=False)
     surro_workflow_id = Column(String(255), nullable=False, index=True)  # UUID 문자열
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_by = Column(String(100), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
 
     creator = relationship("Member", backref="created_workflows")
 
     __table_args__ = (
-        Index('idx_workflows_surro_id', 'surro_workflow_id', unique=True),
+        Index('idx_workflows_active', 'surro_workflow_id', 'is_active', 'deleted_at'),
+        Index(
+            'idx_workflows_unique_active',
+            'surro_workflow_id',
+            unique=True,
+            postgresql_where=Column('deleted_at').is_(None),
+            sqlite_where=Column('deleted_at').is_(None),
+        ),
         {'extend_existing': True}
     )

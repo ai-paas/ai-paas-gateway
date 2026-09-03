@@ -15,7 +15,8 @@ class ExperimentCRUD:
         experiments = db.query(Experiment).filter(
             and_(
                 Experiment.created_by == member_id,
-                Experiment.deleted_at.is_(None)
+                Experiment.deleted_at.is_(None),
+                Experiment.is_active == True,
             )
         ).all()
         return [e.surro_experiment_id for e in experiments if e.surro_experiment_id]
@@ -40,6 +41,7 @@ class ExperimentCRUD:
             and_(
                 Experiment.created_by == member_id,
                 Experiment.deleted_at.is_(None),
+                Experiment.is_active == True,
             )
         )
 
@@ -71,7 +73,8 @@ class ExperimentCRUD:
             and_(
                 Experiment.surro_experiment_id == surro_experiment_id,
                 Experiment.created_by == member_id,
-                Experiment.deleted_at.is_(None)
+                Experiment.deleted_at.is_(None),
+                Experiment.is_active == True,
             )
         ).first()
 

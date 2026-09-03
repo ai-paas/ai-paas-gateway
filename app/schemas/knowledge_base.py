@@ -124,8 +124,10 @@ class KnowledgeBaseUpdate(BaseModel):
 class KnowledgeBaseResponse(BaseModel):
     """지식베이스 응답"""
 
-    id: int = Field(..., description="Gateway Knowledge Base ID")
-    surro_knowledge_id: int = Field(..., description="외부 Knowledge Base ID")
+    id: int = Field(..., description="Gateway 내부 PK (경로 파라미터로 사용 금지)")
+    surro_knowledge_id: int = Field(
+        ..., description="Knowledge Base ID — 조회/수정/삭제/파일/검색 경로에 사용하는 값"
+    )
     created_at: datetime = Field(..., description="Gateway 생성 시간")
     updated_at: datetime = Field(..., description="Gateway 수정 시간")
     created_by: str = Field(..., description="생성자 member_id")
@@ -143,8 +145,10 @@ class KnowledgeBaseResponse(BaseModel):
 class KnowledgeBaseDetailResponse(BaseModel):
     """지식베이스 상세 응답"""
 
-    id: int = Field(..., description="Gateway Knowledge Base ID")
-    surro_knowledge_id: int = Field(..., description="외부 Knowledge Base ID")
+    id: int = Field(..., description="Gateway 내부 PK (경로 파라미터로 사용 금지)")
+    surro_knowledge_id: int = Field(
+        ..., description="Knowledge Base ID — 조회/수정/삭제/파일/검색 경로에 사용하는 값"
+    )
     created_at: datetime = Field(..., description="Gateway 생성 시간")
     updated_at: datetime = Field(..., description="Gateway 수정 시간")
     created_by: str = Field(..., description="생성자 member_id")

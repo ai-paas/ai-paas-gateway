@@ -1,21 +1,36 @@
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Path, File, UploadFile, Form, Request
 from sqlalchemy.orm import Session
 
-from app.auth import get_current_user
+from app.auth import get_current_admin_user, get_current_user
 from app.common.sort import parse_sort, sort_in_memory
+from app.config import settings
 from app.cruds import model_crud
 from app.database import get_db
-from app.models import Member, Model
+from app.models import Member
 from app.schemas.model import (
     ModelResponse, ModelCreateRequest,
     ModelCreateResponse,
-    InnoUserInfo
+    ModelFileDownloadUrlResponse,
+    ModelFileListWrapper,
+    InnoUserInfo,
+    ModelBaseDeploymentStatusRequest,
+    ModelFormatListWrapper,
+    ModelListWrapper,
+    ModelProviderListWrapper,
+    ModelTypeListWrapper,
+    PredefinedModelKey,
 )
 from app.services.audit_service import Action, ResourceType, emit_from_request
-from app.services.model_service import model_service
+from app.services.model_service import (
+    apply_relation_visibility,
+    collect_relation_model_ids,
+    model_service,
+    normalize_visibility,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +46,14 @@ _MODEL_SORT_GETTERS = {
 }
 _MODEL_SORT_DEFAULT = [("created_at", True)]
 _MODEL_SORT_TIE_BREAKER = lambda m: m.id
+
+_MODEL_FILE_SORT_GETTERS = {
+    "name": lambda file: file.name,
+    "size_bytes": lambda file: file.size_bytes,
+    "last_modified": lambda file: file.last_modified,
+}
+_MODEL_FILE_SORT_DEFAULT = [("name", False)]
+_MODEL_FILE_SORT_TIE_BREAKER = lambda file: file.name
 
 
 def _create_inno_user_info(user: Member) -> InnoUserInfo:
@@ -51,17 +74,93 @@ def _create_pagination_response(data: List[Any], total: int, page: int, size: in
     }
 
 
+def _derive_is_catalog(visibility: Optional[str]) -> bool:
+    """생성 모델의 분류 캐시. 누락/미지원 값은 호출자 역할과 무관하게 CUSTOM."""
+    normalized = normalize_visibility(visibility)
+    return normalized == "CATALOG"
+
+
+def _ensure_model_file_access(db: Session, model_id: int, member_id: str) -> None:
+    """현재 사용자의 활성 모델 매핑 또는 활성 카탈로그 매핑을 확인."""
+    visibility_by_id = model_crud.get_accessible_visibility_map(
+        db=db,
+        surro_model_ids=[model_id],
+        member_id=member_id,
+    )
+    if model_id not in visibility_by_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Model {model_id} not found or access denied",
+        )
+
+
+def _prepare_model_classifier(db: Session, models: List[ModelResponse], member_id: str):
+    """목록 분류기 생성 + is_catalog 캐시 read-through 동기화.
+
+    분류(CATALOG/CUSTOM)의 소스는 MLOps `visibility` 필드, 노출 권한과 soft-delete는
+    gateway DB 매핑이 소스:
+    - CATALOG: 활성(미삭제) 매핑이 하나라도 있으면 모두에게 노출
+    - CUSTOM: 현재 사용자(created_by)의 활성 매핑이 있어야 노출
+    - visibility가 없는 구형 upstream 응답은 is_catalog 캐시로 분류 (fallback)
+
+    반환: classify(model) -> 'catalog' | 'custom' | None(비노출)
+    """
+    ids = [m.id for m in models]
+
+    # read-through: upstream visibility ≠ 캐시면 정정 (조회 실패가 목록을 막으면 안 됨)
+    vis_map = {
+        m.id: v == "CATALOG"
+        for m in models
+        if (v := normalize_visibility(m.visibility)) is not None
+    }
+    try:
+        synced = model_crud.sync_visibility_cache(db, vis_map)
+        if synced:
+            logger.info(f"visibility cache synced: {synced} row(s)")
+    except Exception as sync_error:
+        logger.warning(f"visibility cache sync failed (목록 응답은 계속): {sync_error}")
+        db.rollback()
+
+    rows = model_crud.get_active_mappings_brief(db, ids)
+    active_ids = {r[0] for r in rows}
+    my_ids = {r[0] for r in rows if r[2] == member_id}
+    cached_catalog_ids = {r[0] for r in rows if r[1]}
+
+    def classify(model: ModelResponse) -> Optional[str]:
+        vis = normalize_visibility(model.visibility)
+        if vis is None:
+            if model.visibility is not None and str(model.visibility).strip():
+                logger.warning(
+                    "unsupported model visibility: model_id=%s",
+                    model.id,
+                )
+                return None
+            vis = "CATALOG" if model.id in cached_catalog_ids else "CUSTOM"
+        if vis == "CATALOG":
+            return "catalog" if model.id in active_ids else None
+        return "custom" if model.id in my_ids else None
+
+    return classify
+
+
 @router.post("", response_model=ModelCreateResponse)
 async def create_model(
         request: Request,
         name: str = Form(..., description="모델 이름"),
-        repo_id: str = Form(..., description="모델 저장소 ID"),
+        repo_id: Optional[str] = Form(None, description="모델 저장소 ID"),
         provider_id: int = Form(..., description="프로바이더 ID"),
         type_id: int = Form(..., description="모델 타입 ID"),
         format_id: int = Form(..., description="모델 포맷 ID"),
         description: Optional[str] = Form(None, description="모델 설명"),
         parent_model_id: Optional[int] = Form(None, description="부모 모델 ID (내부 시스템 전용)"),
-        task: Optional[str] = Form(None, max_length=500, description="모델 태스크"),
+        task: Optional[str] = Form(
+            None,
+            max_length=500,
+            description=(
+                "모델 태스크: embedding | text-generation | object-detection | fill-mask | "
+                "protein-classification | protein-structure-prediction | vqa"
+            ),
+        ),
         parameter: Optional[str] = Form(None, max_length=100, description="모델 파라미터"),
         sample_code: Optional[str] = Form(None, description="샘플 코드"),
         model_registry_schema: Optional[str] = Form(None, description="모델 레지스트리 스키마 (내부 시스템 전용)"),
@@ -74,8 +173,8 @@ async def create_model(
 
     Model Registry에 모델을 등록합니다.
     제공자(provider)에 따라 HuggingFace 모델 또는 커스텀 모델로 등록됩니다.
-    게이트웨이는 MLOps에 등록한 뒤, 게이트웨이 DB에 사용자-모델 매핑을 저장합니다
-    (admin이 호출하면 `is_catalog=true`로 분류).
+    게이트웨이는 MLOps에 등록한 뒤, 게이트웨이 DB에 사용자-모델 매핑을 저장합니다.
+    모델 분류(`CATALOG`/`CUSTOM`)는 MLOps 응답의 `visibility` 값을 따릅니다.
 
     ## Request Body (multipart/form-data)
     - **name** (str, required): 모델 이름
@@ -96,8 +195,8 @@ async def create_model(
     - **parent_model_id** (int, optional): 부모 모델 ID
         - 내부 시스템 전용 — 프론트엔드에서 전달 금지
     - **task** (str, optional): 모델 태스크
-        - 허용 값: "embedding", "text-generation", "object-detection" 중 하나
-        - 다른 값 입력 시 422 에러 발생
+        - 지원 값: `embedding`, `text-generation`, `object-detection`, `fill-mask`,
+          `protein-classification`, `protein-structure-prediction`, `vqa`
     - **parameter** (str, optional): 모델 파라미터 (최대 100자)
     - **sample_code** (str, optional): 샘플 코드
     - **file** (UploadFile, optional): 커스텀 모델 파일 (binary)
@@ -118,7 +217,7 @@ async def create_model(
     - **format_info** (ModelFormatReadSchema): 모델 포맷 정보
         - id / name / description
     - **parent_model_id** (int, optional): 부모 모델 ID
-    - **task** (str, optional): 모델 태스크
+    - **task** (str, optional): 모델 태스크 (지원 값 7종은 Request Body 설명 참고)
     - **parameter** (str, optional): 모델 파라미터
     - **sample_code** (str, optional): 샘플 코드
     - **registry** (ModelRegistryReadSchema): 모델 레지스트리 정보
@@ -145,6 +244,18 @@ async def create_model(
     - **500**: 모델 등록 중 서버 내부 오류
     """
     try:
+        if parent_model_id is not None:
+            accessible_parent = model_crud.get_accessible_visibility_map(
+                db=db,
+                surro_model_ids=[parent_model_id],
+                member_id=current_user.member_id,
+            )
+            if parent_model_id not in accessible_parent:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Parent model not found or access denied",
+                )
+
         # 파일 처리
         file_data = None
         file_name = None
@@ -182,8 +293,10 @@ async def create_model(
 
         # 2. Inno DB에 사용자-모델 매핑 저장
         try:
-            # 관리자(admin)가 생성한 모델은 카탈로그 모델로 설정
-            is_catalog = current_user.role.lower() == 'admin'
+            # 분류는 MLOps visibility가 소스. 누락 시 호출자 역할과 무관하게 CUSTOM.
+            is_catalog = _derive_is_catalog(
+                getattr(created_model, "visibility", None)
+            )
 
             model_crud.create_model_mapping(
                 db=db,
@@ -197,6 +310,7 @@ async def create_model(
                 f"member_id={current_user.member_id}, is_catalog={is_catalog}"
             )
         except Exception as mapping_error:
+            db.rollback()
             logger.error(f"Failed to create model mapping: {str(mapping_error)}")
             # 매핑 저장에 실패해도 Surro API에는 이미 생성되었으므로, 경고만 로그
             logger.warning(f"Model {created_model.id} created in Surro API but mapping failed")
@@ -211,6 +325,8 @@ async def create_model(
         )
         return created_model
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating model for user {current_user.member_id}: {str(e)}")
         raise HTTPException(
@@ -219,7 +335,7 @@ async def create_model(
         )
 
 
-@router.get("")
+@router.get("", response_model=ModelListWrapper)
 async def get_all_models(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
@@ -227,7 +343,19 @@ async def get_all_models(
         model_type_id: Optional[int] = Query(None, description="모델 타입 ID로 필터링"),
         model_provider_id: Optional[int] = Query(None, description="모델 제공자 ID로 필터링"),
         model_format_id: Optional[int] = Query(None, description="모델 포맷 ID로 필터링"),
-        filter_type: Optional[str] = Query(None, description="필터 타입: 'custom'(내 모델만), 'catalog'(카탈로그만), None(전체)"),
+        visibility: Optional[str] = Query(
+            None,
+            pattern=r"(?i)^(catalog|custom)$",
+            description=(
+                "모델 분류 필터 (MLOps 명세와 동일): 'catalog'(카탈로그만), "
+                "'custom'(내 커스텀 모델만), 생략 시 전체(카탈로그 + 내 커스텀). 대소문자 무관"
+            ),
+        ),
+        filter_type: Optional[Literal["custom", "catalog"]] = Query(
+            None,
+            deprecated=True,
+            description="(deprecated) `visibility`의 이전 이름 — 호환 유지용. visibility가 있으면 무시됨",
+        ),
         sort: Optional[str] = Query(
             None,
             description=(
@@ -249,10 +377,12 @@ async def get_all_models(
     모델 목록 조회
 
     등록된 모델들의 목록을 페이지네이션하여 조회합니다.
-    model_type_id, model_provider_id, model_format_id, filter_type을 사용하여 필터링할 수 있습니다.
+    model_type_id, model_provider_id, model_format_id, visibility를 사용하여 필터링할 수 있습니다.
 
-    게이트웨이는 MLOps 목록을 받아 게이트웨이 DB의 사용자-모델 매핑과 교차하여
-    현재 사용자가 접근 가능한 모델(본인 소유 + 카탈로그)만 반환합니다.
+    모델 분류(`CATALOG`/`CUSTOM`)는 **MLOps의 `visibility` 값**을 그대로 따릅니다.
+    게이트웨이 DB 매핑은 노출 권한에만 사용됩니다: 카탈로그 모델은 모든 사용자에게,
+    커스텀 모델은 등록한 본인에게만 노출되며, 게이트웨이에서 삭제(soft-delete)된
+    모델은 결과에서 제외됩니다.
 
     ## Query Parameters
     - **page** (int, optional): 페이지 번호 (1부터 시작, 기본값 1)
@@ -265,10 +395,13 @@ async def get_all_models(
         - `GET /api/v1/models/providers` API로 제공자 목록 조회 가능
     - **model_format_id** (int, optional): 모델 포맷 ID로 필터링
         - `GET /api/v1/models/formats` API로 포맷 목록 조회 가능
-    - **filter_type** (str, optional): 목록 구분 필터 (MLOps 원본의 `visibility`에 대응)
-        - `catalog`: 카탈로그 모델만 반환 (초기 등록 모델, 최적화 비대상)
-        - `custom`: 커스텀 모델만 반환 (사용자가 직접 등록한 모델)
-        - 생략 시: 본인 소유 + 카탈로그 전체 반환
+    - **visibility** (str, optional): 모델 분류 필터 (MLOps 명세와 동일한 이름/값)
+        - `catalog`: 카탈로그 모델만 반환 (초기 등록 모델, 최적화 파생 모델 제외)
+        - `custom`: 내 커스텀 모델만 반환 (내가 등록한 모델 + 내 최적화 파생 모델)
+        - 생략 시: 카탈로그 전체 + 내 커스텀 모델 반환
+        - 대소문자 무관 (`catalog` = `CATALOG`)
+    - **filter_type** (str, optional, deprecated): `visibility`의 이전 이름
+        - 기존 프론트 호환용으로 유지. `visibility`와 함께 주면 `visibility`가 우선
 
     ## Response (WrappedList)
     게이트웨이-프론트 계약에 따라 `{data, total, page, size}` 래퍼로 반환:
@@ -297,16 +430,22 @@ async def get_all_models(
 
     ## Notes
     - page와 size 모두 지정되지 않으면 기본값(1, 20)으로 조회합니다
-    - 필터링 파라미터(model_type_id, model_provider_id, model_format_id, filter_type)는 함께 사용 가능
-    - 게이트웨이는 MLOps에서 받은 목록을 게이트웨이 DB의 매핑 정보로 필터링 후 페이지네이션합니다
-    - `search`/`filter_type`은 게이트웨이에서 처리되므로, MLOps에는 전달되지 않을 수 있습니다
+    - 필터링 파라미터(model_type_id, model_provider_id, model_format_id, visibility)는 함께 사용 가능
+    - 분류는 MLOps `visibility` 값 기준이며, 게이트웨이 DB 매핑은 노출 권한
+      (커스텀은 본인만)과 soft-delete 제외에만 사용됩니다
+    - `search`는 게이트웨이에서 처리되므로, MLOps에는 전달되지 않을 수 있습니다
 
     ## Errors
     - **401**: 인증되지 않은 사용자
-    - **422**: filter_type 값이 유효하지 않음 ('catalog' 또는 'custom'만 허용)
+    - **422**: visibility 값이 유효하지 않음 ('catalog' 또는 'custom'만 허용, 대소문자 무관)
     - **500**: 서버 내부 오류
     """
     try:
+        # visibility 우선, filter_type은 호환용 별칭
+        effective_filter = (visibility or filter_type or None)
+        if effective_filter:
+            effective_filter = effective_filter.lower()
+
         # 1. Surro API에서 모델 조회 (MLOps 파라미터 변환은 서비스 내부에서 처리)
         all_surro_models = await model_service.get_models(
             skip=0,
@@ -315,7 +454,7 @@ async def get_all_models(
             provider_id=model_provider_id,
             type_id=model_type_id,
             format_id=model_format_id,
-            filter_type=filter_type,
+            filter_type=effective_filter,
             user_info={
                 'member_id': current_user.member_id,
                 'role': current_user.role,
@@ -323,35 +462,12 @@ async def get_all_models(
             }
         )
 
-        # 2. 로컬 DB에서 모델 정보 조회
-        user_model_ids = []
-        catalog_model_ids = []
-
-        if filter_type != 'catalog':  # catalog만 조회하는 경우가 아니면 user 모델도 조회
-            user_models = db.query(Model).filter(
-                Model.created_by == current_user.member_id,
-                Model.deleted_at.is_(None)
-            ).all()
-            user_model_ids = [model.surro_model_id for model in user_models if model.surro_model_id]
-
-        if filter_type != 'custom':  # custom만 조회하는 경우가 아니면 catalog 모델도 조회
-            catalog_models = db.query(Model).filter(
-                Model.is_catalog == True,
-                Model.deleted_at.is_(None)
-            ).all()
-            catalog_model_ids = [model.surro_model_id for model in catalog_models if model.surro_model_id]
-
-        # 3. filter_type에 따라 모델 필터링
-        if filter_type == 'custom':
-            # 내 모델만
-            filtered_models = [m for m in all_surro_models if m.id in user_model_ids]
-        elif filter_type == 'catalog':
-            # 카탈로그 모델만
-            filtered_models = [m for m in all_surro_models if m.id in catalog_model_ids]
+        # 2. 분류(MLOps visibility) + 노출 권한(gateway DB) 판정, is_catalog 캐시 동기화
+        classify = _prepare_model_classifier(db, all_surro_models, current_user.member_id)
+        if effective_filter:
+            filtered_models = [m for m in all_surro_models if classify(m) == effective_filter]
         else:
-            # 전체 (중복 제거)
-            all_model_ids = set(user_model_ids) | set(catalog_model_ids)
-            filtered_models = [m for m in all_surro_models if m.id in all_model_ids]
+            filtered_models = [m for m in all_surro_models if classify(m) is not None]
 
         # 4. 검색어 필터링
         if search:
@@ -412,7 +528,7 @@ async def get_all_models(
             detail=f"Failed to get models: {str(e)}"
         )
 
-@router.get("/custom-models")
+@router.get("/custom-models", response_model=ModelListWrapper)
 async def get_user_models(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
@@ -426,9 +542,9 @@ async def get_user_models(
     """
     내 커스텀 모델 목록 조회 (게이트웨이 확장)
 
-    현재 로그인한 사용자가 직접 등록한 커스텀 모델만 조회합니다.
+    MLOps 분류가 `CUSTOM`인 모델 중 현재 로그인한 사용자가 등록한 모델만 조회합니다.
     이 엔드포인트는 게이트웨이 전용이며, MLOps 원본 스펙에는 없습니다.
-    `GET /api/v1/models?filter_type=custom` 과 동등한 결과를 반환합니다.
+    `GET /api/v1/models?visibility=custom` 과 동등한 결과를 반환합니다.
 
     ## Query Parameters
     - **page** (int, optional): 페이지 번호 (1부터 시작, 기본값 1)
@@ -446,7 +562,8 @@ async def get_user_models(
     - **size** (int): 요청한 페이지 크기
 
     ## Notes
-    - 게이트웨이 DB의 `created_by == 현재 사용자`인 모델만 대상
+    - 분류는 MLOps `visibility == CUSTOM` 기준 (최적화 파생 모델 포함)
+    - 노출 권한은 게이트웨이 DB 기준: `created_by == 현재 사용자`인 모델만 대상
     - 삭제된 모델(`deleted_at` 설정됨)은 제외
     - MLOps 원본에는 없는 게이트웨이 확장 엔드포인트
 
@@ -455,22 +572,12 @@ async def get_user_models(
     - **500**: 서버 내부 오류
     """
     try:
-        # 1. 사용자 커스텀 모델 ID 목록 조회 (전체)
-        user_models = db.query(Model).filter(
-            Model.created_by == current_user.member_id,
-            Model.deleted_at.is_(None)
-        ).all()
-
-        user_model_ids = [model.surro_model_id for model in user_models if model.surro_model_id]
-
-        if not user_model_ids:
-            return _create_pagination_response([], 0, page, size)
-
-        # 2. Surro API에서 전체 모델 조회 (필터 없이)
+        # 1. Surro API에서 커스텀 모델 조회 (visibility 필터는 upstream에도 전달)
         all_surro_models = await model_service.get_models(
             skip=0,
             limit=1000,
             search=None,
+            filter_type='custom',
             user_info={
                 'member_id': current_user.member_id,
                 'role': current_user.role,
@@ -478,8 +585,9 @@ async def get_user_models(
             }
         )
 
-        # 3. 사용자 커스텀 모델만 필터링
-        filtered_models = [m for m in all_surro_models if m.id in user_model_ids]
+        # 2. 분류(MLOps visibility) + 노출 권한(gateway DB) 판정
+        classify = _prepare_model_classifier(db, all_surro_models, current_user.member_id)
+        filtered_models = [m for m in all_surro_models if classify(m) == 'custom']
 
         # 4. 로컬에서 검색어 필터링 적용
         if search:
@@ -530,7 +638,7 @@ async def get_user_models(
         )
 
 
-@router.get("/model-catalog")
+@router.get("/model-catalog", response_model=ModelListWrapper)
 async def get_catalog_models(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
@@ -544,10 +652,10 @@ async def get_catalog_models(
     """
     카탈로그 모델 목록 조회 (게이트웨이 확장)
 
-    관리자(admin)가 등록하여 카탈로그로 분류된(`is_catalog=true`) 모델만 조회합니다.
+    MLOps 분류가 `CATALOG`인 모델만 조회합니다.
     모든 사용자가 열람 가능한 공용 모델 목록입니다.
     이 엔드포인트는 게이트웨이 전용이며, MLOps 원본 스펙에는 없습니다.
-    `GET /api/v1/models?filter_type=catalog` 과 동등한 결과를 반환합니다.
+    `GET /api/v1/models?visibility=catalog` 과 동등한 결과를 반환합니다.
 
     ## Query Parameters
     - **page** (int, optional): 페이지 번호 (1부터 시작, 기본값 1)
@@ -565,8 +673,8 @@ async def get_catalog_models(
     - **size** (int): 요청한 페이지 크기
 
     ## Notes
-    - 게이트웨이 DB의 `is_catalog=true`이며 `deleted_at`이 없는 모델만 대상
-    - 카탈로그 모델은 관리자 등록 시점에 자동으로 분류되며, 사용자 삭제 불가
+    - 분류는 MLOps `visibility == CATALOG` 기준
+    - 게이트웨이에서 삭제(soft-delete)된 모델은 제외
     - MLOps 원본에는 없는 게이트웨이 확장 엔드포인트
 
     ## Errors
@@ -574,22 +682,12 @@ async def get_catalog_models(
     - **500**: 서버 내부 오류
     """
     try:
-        # 1. 카탈로그 모델 ID 목록 조회 (전체)
-        catalog_models = db.query(Model).filter(
-            Model.is_catalog == True,
-            Model.deleted_at.is_(None)
-        ).all()
-
-        catalog_model_ids = [model.surro_model_id for model in catalog_models if model.surro_model_id]
-
-        if not catalog_model_ids:
-            return _create_pagination_response([], 0, page, size)
-
-        # 2. Surro API에서 전체 모델 조회 (필터 없이)
+        # 1. Surro API에서 카탈로그 모델 조회 (visibility 필터는 upstream에도 전달)
         all_surro_models = await model_service.get_models(
             skip=0,
             limit=1000,
             search=None,
+            filter_type='catalog',
             user_info={
                 'member_id': current_user.member_id,
                 'role': current_user.role,
@@ -597,8 +695,9 @@ async def get_catalog_models(
             }
         )
 
-        # 3. 카탈로그 모델만 필터링
-        filtered_models = [m for m in all_surro_models if m.id in catalog_model_ids]
+        # 2. 분류(MLOps visibility) + 노출 판정 (soft-delete 제외)
+        classify = _prepare_model_classifier(db, all_surro_models, current_user.member_id)
+        filtered_models = [m for m in all_surro_models if classify(m) == 'catalog']
 
         # 4. 로컬에서 검색어 필터링 적용
         if search:
@@ -648,7 +747,7 @@ async def get_catalog_models(
             detail=f"Failed to get catalog models: {str(e)}"
         )
 
-@router.get("/providers")
+@router.get("/providers", response_model=ModelProviderListWrapper)
 async def get_providers(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
@@ -731,7 +830,7 @@ async def get_providers(
         )
 
 
-@router.get("/types")
+@router.get("/types", response_model=ModelTypeListWrapper)
 async def get_model_types(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
@@ -814,7 +913,7 @@ async def get_model_types(
         )
 
 
-@router.get("/formats")
+@router.get("/formats", response_model=ModelFormatListWrapper)
 async def get_model_formats(
         page: int = Query(1, ge=1, description="페이지 번호 (1부터 시작)"),
         size: int = Query(20, ge=1, le=100, description="페이지 크기"),
@@ -897,9 +996,9 @@ async def get_model_formats(
             detail=f"Failed to get model formats: {str(e)}"
         )
 
-@router.post("/auto-generate")
+@router.post("/auto-generate", response_model=ModelCreateResponse)
 async def auto_generate_model(
-        model_key: str = Query(..., description="등록할 사전 정의 모델 키"),
+        model_key: PredefinedModelKey = Query(..., description="등록할 사전 정의 모델 키"),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
@@ -938,7 +1037,8 @@ async def auto_generate_model(
     - **created_at** / **updated_at** (datetime)
 
     게이트웨이는 MLOps 응답을 그대로 전달하며, 추가로 게이트웨이 DB에
-    사용자-모델 매핑을 생성합니다 (admin이 호출하면 카탈로그 모델로 분류).
+    사용자-모델 매핑을 생성합니다. 모델 분류(`CATALOG`/`CUSTOM`)는
+    MLOps 응답의 `visibility` 값을 따릅니다.
 
     ## Notes
     - 각 모델의 provider_id, type_id, format_id는 MLOps DB에서 이름으로 자동 조회됩니다
@@ -960,17 +1060,18 @@ async def auto_generate_model(
         }
 
         created = await model_service.auto_generate_model(
-            model_key=model_key, user_info=user_info
+            model_key=model_key.value, user_info=user_info
         )
 
         # 게이트웨이 DB에 사용자-모델 매핑 저장
         try:
-            is_catalog = current_user.role.lower() == 'admin'
+            # 분류는 MLOps visibility가 소스. 누락 시 호출자 역할과 무관하게 CUSTOM.
+            is_catalog = _derive_is_catalog(created.get('visibility'))
             model_crud.create_model_mapping(
                 db=db,
                 surro_model_id=created.get('id'),
                 member_id=current_user.member_id,
-                model_name=created.get('name', model_key),
+                model_name=created.get('name', model_key.value),
                 is_catalog=is_catalog,
             )
             logger.info(
@@ -978,6 +1079,7 @@ async def auto_generate_model(
                 f"member_id={current_user.member_id}, is_catalog={is_catalog}"
             )
         except Exception as mapping_error:
+            db.rollback()
             logger.warning(
                 f"Model {created.get('id')} auto-generated in MLOps but mapping failed: {mapping_error}"
             )
@@ -987,7 +1089,7 @@ async def auto_generate_model(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error auto-generating model ({model_key}) for {current_user.member_id}: {str(e)}")
+        logger.error(f"Error auto-generating model ({model_key.value}) for {current_user.member_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to auto-generate model: {str(e)}"
@@ -997,12 +1099,8 @@ async def auto_generate_model(
 @router.put("/base-deployments/{model_id}/status")
 async def update_model_base_deployment_status(
         model_id: int = Path(..., description="모델 ID"),
-        service_name: str = Form(...),
-        service_hostname: str = Form(...),
-        deployment_status: str = Form(..., alias="status"),
-        internal_url: Optional[str] = Form(None),
-        error_message: Optional[str] = Form(None),
-        current_user: Member = Depends(get_current_user)
+        payload: ModelBaseDeploymentStatusRequest = ...,
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """
     모델 기본 배포 상태 업데이트 (백엔드 서버 내부 전용 API)
@@ -1021,7 +1119,7 @@ async def update_model_base_deployment_status(
     ## Path Parameters
     - **model_id** (int): 모델 ID
 
-    ## Request Body (Form Data)
+    ## Request Body (application/json)
     - **service_name** (str, required): 서비스 이름
     - **service_hostname** (str, required): 서비스 호스트명
     - **status** (str, required): 배포 상태 ("deployed", "deploying", "failed")
@@ -1051,11 +1149,11 @@ async def update_model_base_deployment_status(
         }
         return await model_service.update_base_deployment_status(
             model_id=model_id,
-            service_name=service_name,
-            service_hostname=service_hostname,
-            deployment_status=deployment_status,
-            internal_url=internal_url,
-            error_message=error_message,
+            service_name=payload.service_name,
+            service_hostname=payload.service_hostname,
+            deployment_status=payload.status,
+            internal_url=payload.internal_url,
+            error_message=payload.error_message,
             user_info=user_info,
         )
     except HTTPException:
@@ -1066,6 +1164,127 @@ async def update_model_base_deployment_status(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update base deployment status: {str(e)}"
         )
+
+
+@router.get(
+    "/{model_id}/files/download-url",
+    response_model=ModelFileDownloadUrlResponse,
+    summary="모델 파일 다운로드 URL 발급",
+    responses={
+        401: {"description": "Gateway 인증 실패"},
+        404: {"description": "모델 또는 파일이 없거나 모델 접근 권한 없음"},
+        409: {"description": "파일 다운로드를 제공하지 않는 저장 유형"},
+        500: {"description": "Gateway 내부 오류"},
+        502: {"description": "MLOps 또는 스토리지 연동 실패"},
+        504: {"description": "MLOps 응답 시간 초과"},
+    },
+)
+async def get_model_file_download_url(
+        model_id: int = Path(..., description="Gateway DB에 매핑된 MLOps 모델 ID"),
+        name: str = Query(
+            ...,
+            description="파일 목록 응답의 data[].name 값. 상대 경로를 그대로 전달",
+        ),
+        db: Session = Depends(get_db),
+        current_user: Member = Depends(get_current_user),
+):
+    """
+    모델 파일의 실제 스토리지 서명 URL을 다운로드 직전에 발급합니다.
+
+    현재 로그인 사용자의 활성 Gateway DB 매핑 또는 활성 카탈로그 매핑을 먼저 확인한 뒤
+    MLOps에 요청합니다. 응답의 `download_url`은 5분 동안 유효하며 인증 없이 접근할 수
+    있으므로 저장하거나 로그에 남기지 않아야 합니다. 브라우저는 발급 직후 해당 URL로
+    이동하고 파일 본문을 JavaScript 메모리에 적재하지 않는 방식을 권장합니다.
+
+    MLOps가 반환한 `404`와 `409`는 그대로 전달합니다. MLOps의 스토리지 장애를 포함한
+    5xx는 Gateway 표준에 따라 `502`, 시간 초과는 `504`로 변환합니다.
+    """
+    _ensure_model_file_access(db, model_id, current_user.member_id)
+    return await model_service.get_model_file_download_url(
+        model_id=model_id,
+        name=name,
+        user_info=_create_inno_user_info(current_user).model_dump(),
+    )
+
+
+@router.get(
+    "/{model_id}/files",
+    response_model=ModelFileListWrapper,
+    summary="모델 저장 파일 목록 조회",
+    responses={
+        401: {"description": "Gateway 인증 실패"},
+        404: {"description": "모델이 없거나 접근 권한 없음"},
+        500: {"description": "Gateway 내부 오류"},
+        502: {"description": "MLOps 또는 스토리지 연동 실패"},
+        504: {"description": "MLOps 응답 시간 초과"},
+    },
+)
+async def get_model_files(
+        model_id: int = Path(..., description="Gateway DB에 매핑된 MLOps 모델 ID"),
+        page: int = Query(1, ge=1, description="페이지 번호"),
+        size: int = Query(20, ge=1, le=100, description="페이지당 항목 수"),
+        sort: Optional[str] = Query(
+            None,
+            description=(
+                "정렬 기준. name, size_bytes, last_modified를 지원하며 "
+                "내림차순은 - 접두사를 사용"
+            ),
+        ),
+        db: Session = Depends(get_db),
+        current_user: Member = Depends(get_current_user),
+):
+    """
+    현재 로그인 사용자가 접근할 수 있는 모델의 저장 파일을 조회합니다.
+
+    MLflow 아티팩트의 평면 파일 목록을 `{data,total,page,size}` 형식으로 반환합니다.
+    MLOps cursor는 Gateway가 내부에서 모두 수집하며 공개 API에는 노출하지 않습니다.
+    기본 정렬은 `name` 오름차순이고 `name`, `size_bytes`, `last_modified` 다중 정렬을
+    지원합니다. `.cache` 경로는 MLOps에서 제외합니다. `OLLAMA`와 `NONE` 모델은 오류가
+    아니라 HTTP 200과 빈 `data`를 반환합니다.
+
+    `data[].download_url`은 파일 주소가 아니라 이 Gateway의 서명 URL 발급 API 경로입니다.
+    현재 사용자의 활성 Gateway DB 매핑 또는 활성 카탈로그 매핑을 원격 호출 전에 확인합니다.
+    MLOps의 스토리지 장애를 포함한 5xx는 `502`, 시간 초과는 `504`로 변환합니다.
+    """
+    _ensure_model_file_access(db, model_id, current_user.member_id)
+    parsed_sort = parse_sort(sort)
+    # 허용 필드 검증을 upstream 전체 cursor 조회보다 먼저 수행한다.
+    sort_in_memory(
+        [],
+        parsed=parsed_sort,
+        getters=_MODEL_FILE_SORT_GETTERS,
+        default=_MODEL_FILE_SORT_DEFAULT,
+        tie_breaker_getter=_MODEL_FILE_SORT_TIE_BREAKER,
+    )
+    result = await model_service.get_all_model_files(
+        model_id=model_id,
+        user_info=_create_inno_user_info(current_user).model_dump(),
+    )
+    sorted_files = sort_in_memory(
+        result.files,
+        parsed=parsed_sort,
+        getters=_MODEL_FILE_SORT_GETTERS,
+        default=_MODEL_FILE_SORT_DEFAULT,
+        tie_breaker_getter=_MODEL_FILE_SORT_TIE_BREAKER,
+    )
+    start = (page - 1) * size
+    data = [
+        file.model_copy(
+            update={
+                "download_url": (
+                    f"{settings.API_V1_STR}/models/{model_id}/files/download-url?"
+                    f"{urlencode({'name': file.name})}"
+                )
+            }
+        )
+        for file in sorted_files[start:start + size]
+    ]
+    return _create_pagination_response(
+        data=data,
+        total=len(sorted_files),
+        page=page,
+        size=size,
+    )
 
 
 @router.get("/{model_id}", response_model=ModelResponse)
@@ -1101,7 +1320,9 @@ async def get_model(
         - id / name / description
     - **parent_model_id** (int, optional): 부모 모델 ID
         - 파인튜닝된 모델인 경우 원본 모델 ID
-    - **task** (str, optional): 모델 태스크
+    - **task** (str, optional): 모델 태스크 (`embedding`, `text-generation`,
+      `object-detection`, `fill-mask`, `protein-classification`,
+      `protein-structure-prediction`, `vqa`)
     - **parameter** (str, optional): 모델 파라미터
     - **sample_code** (str, optional): 샘플 코드
     - **registry** (ModelRegistryReadSchema): 모델 레지스트리 정보
@@ -1113,9 +1334,11 @@ async def get_model(
         - created_at / updated_at (datetime)
     - **parent_model** (ModelReadParentSchema, optional): 부모 모델 정보
         - id / name / description
+        - visibility (str, optional): 부모 모델 분류 (`CATALOG` 또는 `CUSTOM`) — 게이트웨이 보강
         - parent_model (ModelReadParentSchema, optional): 상위 부모 모델 (재귀적)
     - **child_models** (List[ModelReadChildSchema], optional): 자식 모델 목록
         - id / name / description
+        - visibility (str, optional): 자식 모델 분류 (`CATALOG` 또는 `CUSTOM`) — 게이트웨이 보강
         - child_models (List[ModelReadChildSchema], optional): 하위 자식 모델 (재귀적)
     - **created_at** (datetime): 모델 생성 시각
     - **updated_at** (datetime): 모델 수정 시각
@@ -1123,27 +1346,20 @@ async def get_model(
     ## Notes
     - 모델의 모든 관련 정보(제공자, 타입, 포맷, 레지스트리)를 포함하여 반환
     - 부모/자식 모델 관계는 재귀적으로 조회
-    - 게이트웨이는 접근 권한 체크 후 MLOps 응답을 그대로 전달
+    - 게이트웨이는 접근 권한 체크 후 MLOps 응답을 전달하되, parent_model/child_models의
+      각 노드에 `visibility`를 보강한다. 현재 사용자가 접근 가능한 gateway DB 매핑만 사용하며,
+      매핑이 없거나 다른 사용자 전용 모델이면 해당 노드는 `null`이다.
 
     ## Errors
     - **401**: 인증되지 않은 사용자
     - **404**: 모델을 찾을 수 없거나 접근 권한이 없음
         - 본인 소유 모델도 아니고 카탈로그 모델도 아닌 경우
-    - **500**: 서버 내부 오류
+    - **500**: 게이트웨이 내부 오류
+    - **502 / 504**: upstream 오류 / upstream 타임아웃
     """
     try:
-        # 1. 사용자가 해당 모델을 소유하고 있는지 확인
-        is_owner = model_crud.check_model_ownership(db, model_id, current_user.member_id)
-
-        # 2. 소유하지 않았다면, 카탈로그 모델인지 확인
-        catalog_model = db.query(Model).filter(
-            Model.is_catalog == True,
-            Model.deleted_at.is_(None),
-            Model.surro_model_id == model_id
-        ).first()
-
-        # 3. 사용자 소유 모델도 아니고, 카탈로그 모델도 아닐 경우 접근 불가
-        if not is_owner and not catalog_model:
+        # 1. 외부 ID만으로 upstream을 호출하지 않도록 활성 gateway 매핑을 먼저 확인
+        if not model_crud.get_active_mappings_brief(db, [model_id]):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Model {model_id} not found or access denied"
@@ -1164,6 +1380,23 @@ async def get_model(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Model {model_id} not found"
             )
+
+        # 3. MLOps 최신 visibility로 최종 노출 권한 판정 + is_catalog 캐시 동기화
+        classify = _prepare_model_classifier(db, [model], current_user.member_id)
+        if classify(model) is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Model {model_id} not found or access denied"
+            )
+
+        # 4. 관계 노드는 gateway DB의 현재 사용자/카탈로그 매핑으로만 visibility 보강
+        relation_ids = list(collect_relation_model_ids(model))
+        visibility_by_id = model_crud.get_accessible_visibility_map(
+            db=db,
+            surro_model_ids=relation_ids,
+            member_id=current_user.member_id,
+        )
+        apply_relation_visibility(model, visibility_by_id)
 
         return model
 

@@ -2,6 +2,7 @@
 import pytest
 
 from app.cruds.workflow import workflow_crud
+from app.models.workflow import Workflow
 
 
 class TestWorkflowCRUD:
@@ -117,6 +118,10 @@ class TestWorkflowCRUD:
         result = workflow_crud.delete_workflow(db, created.id)
         assert result is True
         assert workflow_crud.get_workflow(db, created.id) is None
+        deleted = db.query(Workflow).filter(Workflow.id == created.id).one()
+        assert deleted.deleted_at is not None
+        assert deleted.deleted_by == "system"
+        assert deleted.is_active is False
 
     def test_delete_workflow_by_surro_id(self, db, sample_member):
         """외부 ID로 삭제"""
@@ -124,11 +129,31 @@ class TestWorkflowCRUD:
         result = workflow_crud.delete_workflow_by_surro_id(db, "wf-del2")
         assert result is True
         assert workflow_crud.get_workflow_by_surro_id(db, "wf-del2") is None
+        deleted = db.query(Workflow).filter(
+            Workflow.surro_workflow_id == "wf-del2"
+        ).one()
+        assert deleted.deleted_at is not None
+        assert deleted.is_active is False
 
     def test_delete_workflow_not_found(self, db):
         """존재하지 않는 워크플로우 삭제"""
         assert workflow_crud.delete_workflow(db, 99999) is False
         assert workflow_crud.delete_workflow_by_surro_id(db, "nonexistent") is False
+
+    def test_recreate_workflow_preserves_soft_deleted_history(self, db, sample_member):
+        old = self._create_wf(
+            db, sample_member.member_id, surro_id="wf-reused", name="old"
+        )
+        assert workflow_crud.delete_workflow_by_surro_id(db, "wf-reused")
+
+        current = self._create_wf(
+            db, sample_member.member_id, surro_id="wf-reused", name="current"
+        )
+
+        assert current.id != old.id
+        db.refresh(old)
+        assert old.deleted_at is not None
+        assert old.is_active is False
 
     def test_get_workflows_ordering(self, db, sample_member):
         """목록 최신순 정렬"""
@@ -138,3 +163,33 @@ class TestWorkflowCRUD:
         wfs, _ = workflow_crud.get_workflows(db)
         # 최신순이므로 second가 먼저
         assert wfs[0].name == "second"
+
+    def test_soft_delete_missing_mappings(self, db, sample_member):
+        """외부 목록에 없는 활성 매핑만 soft-delete"""
+        keep = self._create_wf(db, sample_member.member_id, surro_id="wf-keep", name="keep")
+        stale = self._create_wf(db, sample_member.member_id, surro_id="wf-stale", name="stale")
+
+        n = workflow_crud.soft_delete_missing_mappings(
+            db=db,
+            active_surro_workflow_ids=["wf-keep"],
+            deleted_by="system:workflow-reconcile",
+        )
+
+        assert n == 1
+        db.refresh(keep)
+        db.refresh(stale)
+        assert keep.is_active is True and keep.deleted_at is None
+        assert stale.is_active is False
+        assert stale.deleted_at is not None
+        assert stale.deleted_by == "system:workflow-reconcile"
+
+    def test_soft_delete_missing_mappings_skips_already_deleted(self, db, sample_member):
+        """이미 soft-deleted 된 매핑은 다시 세지 않는다"""
+        self._create_wf(db, sample_member.member_id, surro_id="wf-gone", name="gone")
+        assert workflow_crud.delete_workflow_by_surro_id(db, "wf-gone")
+
+        n = workflow_crud.soft_delete_missing_mappings(
+            db=db, active_surro_workflow_ids=[],
+        )
+
+        assert n == 0

@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Path, Query, \
     Request, UploadFile, WebSocket, WebSocketDisconnect, status
 
-from app.auth import get_current_user
+from app.auth import get_current_admin_user, get_current_user
 from app.config import settings
 from app.models import Member
 from app.schemas.any_cloud import AnyCloudResponse, ClusterCreateRequest, \
@@ -114,6 +114,40 @@ def _create_user_info_dict(user: Member) -> Dict[str, str]:
         'role': user.role,
         'name': user.name
     }
+
+
+_ALLOWED_KUBERNETES_RESOURCE_TYPES = {
+    "daemonSets",
+    "deployments",
+    "replicaSets",
+    "statefulSets",
+    "jobs",
+    "cronJobs",
+    "endpoints",
+    "namespaces",
+    "nodes",
+    "persistentVolumes",
+    "persistentVolumeClaims",
+    "pods",
+    "services",
+    "servies",
+    "serviceAccounts",
+    "configMaps",
+    "events",
+    "horizontalPodAutoscalers",
+    "horizontalPodAuoscalers",
+    "ingresses",
+    "storageClasses",
+}
+
+
+def _validate_kubernetes_resource_type(resource_type: str) -> str:
+    if resource_type not in _ALLOWED_KUBERNETES_RESOURCE_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Kubernetes resource type is not allowed",
+        )
+    return resource_type
 
 # 클러스터 목록 조회 API
 @router_cluster.get("/clusters", response_model=AnyCloudPagedResponse)
@@ -253,7 +287,7 @@ async def update_any_cloud_cluster(
             }
         ),
         cluster_id: str = Path(..., description="수정할 클러스터 이름 (RFC 1123 label)"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """클러스터 수정 (현재 워커 수 변경만 지원)"""
     try:
@@ -359,7 +393,7 @@ async def create_any_cloud_cluster(
                 }
             }
         ),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """클러스터 등록 (외부 K8s cluster 만).
 
@@ -406,7 +440,7 @@ async def create_any_cloud_cluster(
 @router_cluster.post("/cluster/{cluster_id}/refresh")
 async def cluster_refresh(
         cluster_id: str = Path(..., description="조회할 클러스터 ID"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """
     클러스터 상태를 강제로 업데이트합니다.
@@ -441,7 +475,7 @@ async def cluster_refresh(
 @router_cluster.delete("/cluster/{cluster_id}")
 async def cluster_delete_api(
         cluster_id: str = Path(..., description="cluster_id"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """
     클러스터를 삭제합니다.
@@ -597,7 +631,7 @@ async def create_helm_repo(
                 }
             }
         ),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """헬름 저장소 등록"""
     try:
@@ -635,7 +669,7 @@ async def create_helm_repo(
 @router_helm.delete("/helm-repos/{helm_repo_name}", response_model=AnyCloudResponse)
 async def helm_repo_delete_api(
         helm_repo_name: str = Path(..., description="헬름 저장소 이름"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """
     헬름 저장소를 삭제합니다.
@@ -803,6 +837,34 @@ async def test_cluster(
             detail="Failed to test cluster connectivity"
         )
 
+# 클러스터 연결 테스트 API
+@router_package.get("/kubernetes/test-connection", response_model=AnyCloudResponse)
+async def test_cluster(
+        clusterName: str = Query(..., description="조회할 cluster 이름", examples=["openstack"]),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    클러스터 연결 상태를 테스트합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.get_kubernetes_test(
+            clusterName=clusterName,
+            user_info=user_info
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting kubernetes cluster for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve kubernetes cluster"
+        )
+
 # 클러스터 특정 리소스 목록 조회 API
 @router_package.get("/kubernetes/{resource_type}", response_model=AnyCloudPagedResponse)
 async def get_kubernetes_resource(
@@ -820,6 +882,7 @@ async def get_kubernetes_resource(
     쿠버네티스 특정 리소스 전체를 조회합니다.
     """
     try:
+        resource_type = _validate_kubernetes_resource_type(resource_type)
         user_info = _create_user_info_dict(current_user)
 
         response = await any_cloud_service.get_kubernetes_resource(
@@ -858,6 +921,7 @@ async def get_kubernetes_resource_name(
     쿠버네티스 특정 리소스 전체를 조회합니다.
     """
     try:
+        resource_type = _validate_kubernetes_resource_type(resource_type)
         user_info = _create_user_info_dict(current_user)
 
         response = await any_cloud_service.get_kubernetes_resource_name(
@@ -987,12 +1051,13 @@ async def delete_kubernetes_resource_name(
         resource_name: str = Path(..., description="조회할 Resource 이름", examples=["master"]),
         clusterName: str = Query(..., description="조회할 cluster 이름", examples=["aws-kubernetes-001"]),
         namespace: str = Query("", description="조회할 namespace 이름", examples=["default"]),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """
     쿠버네티스 특정 리소스를 삭제합니다.
     """
     try:
+        resource_type = _validate_kubernetes_resource_type(resource_type)
         user_info = _create_user_info_dict(current_user)
 
         response = await any_cloud_service.delete_kubernetes_resource(
@@ -1281,7 +1346,7 @@ async def post_catalog_deploy(
             default=None,
             description="values.yaml 파일 — Helm CLI 의 -f 인자로 전달. JSON values 사용이 더 깔끔."
         ),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """차트 배포 (values.yaml 파일 업로드 가능)"""
     try:

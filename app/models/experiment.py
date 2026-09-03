@@ -32,7 +32,8 @@ class Experiment(Base):
         Index('idx_experiments_member_active', 'created_by', 'is_active', 'deleted_at'),
         Index('idx_experiments_surro_member', 'surro_experiment_id', 'created_by'),
         Index('idx_experiments_unique_mapping', 'surro_experiment_id', 'created_by', unique=True,
-              postgresql_where=Column('deleted_at').is_(None)),
+              postgresql_where=Column('deleted_at').is_(None),
+              sqlite_where=Column('deleted_at').is_(None)),
         {'comment': '사용자별 학습 실험 매핑 테이블'}
     )
 

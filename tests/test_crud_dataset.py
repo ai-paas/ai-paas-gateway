@@ -475,3 +475,19 @@ class TestLongDescription:
         )
         assert total == 1
         assert results[0].surro_dataset_id == 4000
+
+
+def test_upsert_dataset_mapping_preserves_soft_deleted_history(db, sample_member):
+    old = dataset_crud.create_dataset_mapping(
+        db, 4100, sample_member.member_id, dataset_name="old-dataset"
+    )
+    assert dataset_crud.delete_dataset_mapping(db, 4100, sample_member.member_id)
+
+    current = dataset_crud.upsert_dataset_mapping(
+        db, 4100, sample_member.member_id, dataset_name="new-dataset"
+    )
+
+    assert current.id != old.id
+    db.refresh(old)
+    assert old.deleted_at is not None
+    assert old.is_active is False

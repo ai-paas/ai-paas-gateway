@@ -34,7 +34,7 @@ class Prompt(Base):
     )
 
     created_by = Column(String(100), ForeignKey("members.member_id"), nullable=False)
-    surro_prompt_id = Column(Integer, nullable=False, index=True)
+    surro_prompt_id = Column(Integer, nullable=False)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     deleted_by = Column(String(100), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
@@ -42,7 +42,13 @@ class Prompt(Base):
     creator = relationship("Member", backref="created_prompts")
 
     __table_args__ = (
-        Index('idx_prompts_surro_prompt_id', 'surro_prompt_id', unique=True),
         Index('idx_prompts_active', 'surro_prompt_id', 'is_active', 'deleted_at'),
+        Index(
+            'idx_prompts_unique_active',
+            'surro_prompt_id',
+            unique=True,
+            postgresql_where=Column('deleted_at').is_(None),
+            sqlite_where=Column('deleted_at').is_(None),
+        ),
         {'extend_existing': True}
     )
