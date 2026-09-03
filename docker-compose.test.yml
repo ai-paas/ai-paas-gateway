@@ -4,10 +4,11 @@
 #   cp .env.example .env.test
 #   python -c "import secrets; print('JWT_SECRET_KEY=' + secrets.token_urlsafe(48))" >> .env.test
 #
-# Usage:
-#   docker compose -f docker-compose.test.yml up -d --build
-#   docker compose -f docker-compose.test.yml logs -f app
-#   docker compose -f docker-compose.test.yml down -v   # postgres 데이터까지 삭제
+# Usage: --env-file 은 필수다. compose 의 ${...} 보간은 env_file: 값을 쓰지 않고
+# 호스트 환경변수 또는 --env-file 만 참조한다.
+#   docker compose --env-file .env.test -f docker-compose.test.yml up -d --build
+#   docker compose --env-file .env.test -f docker-compose.test.yml logs -f app
+#   docker compose --env-file .env.test -f docker-compose.test.yml down -v
 
 services:
   postgres:

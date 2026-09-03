@@ -7,6 +7,8 @@ PR #81 에서 확인된 4건을 고정한다.
 4. `install-all` 이 `{rule_set_id}` wildcard 에 먹히지 않는지
 """
 
+import re
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -190,3 +192,156 @@ def test_public_pagination_params_use_gateway_vocabulary():
                     and path != f"{API}/any-cloud/monit/{{cluster_name}}/query_range":
                 offenders.append(f"{path} -> {param.name}")
     assert offenders == [], f"upstream 키워드 노출: {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# 2차 리뷰 대응 — upstream v0.3.0 lockstep / 텍스트 응답 / 페이지 기준
+# ---------------------------------------------------------------------------
+
+# upstream ClusterKubernetesController 가 문서화한 지원 kind (release/v0.3.0)
+UPSTREAM_KINDS = {
+    "pods", "services", "deployments", "statefulsets", "daemonsets", "replicasets",
+    "configmaps", "secrets", "persistentvolumeclaims", "jobs", "cronjobs",
+    "nodes", "namespaces", "persistentvolumes", "storageclasses",
+    "customresourcedefinitions",
+}
+# 정책상 게이트웨이가 막는 kind (tests/test_security_p0.py 가 고정)
+POLICY_BLOCKED = {"secrets", "customresourcedefinitions"}
+# upstream ApiValidationConstants.K8S_KIND_PATTERN
+K8S_KIND_PATTERN = re.compile(r"^[a-z][a-z0-9]{0,49}$")
+
+
+def test_resource_type_allowlist_matches_upstream_contract():
+    """게이트웨이 화이트리스트가 upstream 규격보다 좁으면 프론트가 여기서 먼저 403 을 받는다."""
+    from app.routes.any_cloud import _ALLOWED_KUBERNETES_RESOURCE_TYPES as allowed
+
+    bad_case = sorted(k for k in allowed if not K8S_KIND_PATTERN.match(k))
+    assert bad_case == [], f"upstream K8S_KIND_PATTERN 위반(대문자 등): {bad_case}"
+    # upstream 이 모르는 kind 를 허용하면 안 되고, 정책 차단분은 빠져 있어야 한다
+    assert allowed <= UPSTREAM_KINDS
+    assert allowed == UPSTREAM_KINDS - POLICY_BLOCKED
+
+
+@pytest.mark.parametrize("kind", sorted(["statefulsets", "replicasets", "daemonsets", "configmaps"]))
+def test_frontend_resource_types_pass_validation(kind):
+    """현재 프론트가 실제로 호출하는 kind 는 통과해야 한다."""
+    from app.routes.any_cloud import _validate_kubernetes_resource_type
+
+    assert _validate_kubernetes_resource_type(kind) == kind
+
+
+def test_unknown_resource_type_is_rejected():
+    from fastapi import HTTPException as _HTTPException
+
+    from app.routes.any_cloud import _validate_kubernetes_resource_type
+
+    for bad in ("../secrets", "statefulSets", "secrets", "clusterRoleBindings"):
+        with pytest.raises(_HTTPException) as exc:
+            _validate_kubernetes_resource_type(bad)
+        assert exc.value.status_code == 403, bad
+
+
+def test_every_resource_type_route_validates_kind():
+    """{resource_type} 을 받는 라우트는 전부 화이트리스트를 통과시켜야 한다."""
+    import inspect
+
+    from app.routes import any_cloud as mod
+
+    missing = []
+    for route, path, _ in _any_cloud_routes():
+        if "{resource_type}" not in path:
+            continue
+        fn = getattr(route, "endpoint", None)
+        if fn is None:
+            continue
+        if "_validate_kubernetes_resource_type" not in inspect.getsource(fn):
+            missing.append(f"{sorted(route.methods)[0]} {path}")
+    assert missing == [], f"kind 검증 누락: {missing}"
+
+
+def _mock_service(monkeypatch, handler):
+    from app.services import any_cloud_service as mod
+
+    svc = mod.any_cloud_service
+    monkeypatch.setattr(svc, "base_url", "http://backend:8888")
+    monkeypatch.setattr(svc, "client", httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    return svc
+
+
+def test_text_responses_do_not_500(monkeypatch):
+    """PEM / kubeconfig 는 JSON 이 아니다 — _make_request 경로를 타면 500 이 된다."""
+    import asyncio
+
+    def handler(request):
+        if request.url.path.endswith("/ssh-key"):
+            return httpx.Response(200, text="-----BEGIN RSA PRIVATE KEY-----",
+                                  headers={"content-type": "text/plain"})
+        return httpx.Response(200, text="apiVersion: v1\nkind: Config",
+                              headers={"content-type": "application/yaml"})
+
+    svc = _mock_service(monkeypatch, handler)
+    ui = {"member_id": "a", "role": "admin", "name": "T"}
+
+    pem = asyncio.run(svc.issue_vm_ssh_key("vm1", ui, fmt="pem"))
+    assert pem.startswith("-----BEGIN RSA PRIVATE KEY-----")
+
+    kubeconfig = asyncio.run(svc.download_vm_kubeconfig("vm1", ui))
+    assert kubeconfig.startswith("apiVersion: v1")
+
+
+def test_degraded_signal_is_forwarded(monkeypatch):
+    """agent 장애로 인한 부분가용을 '리소스 없음'으로 보이게 두지 않는다."""
+    import asyncio
+
+    def handler(request):
+        return httpx.Response(200, json={
+            "items": [], "degraded": True, "degradedReason": "AGENT_INACTIVE",
+            "degradedMessage": "Cluster agent not connected",
+        })
+
+    svc = _mock_service(monkeypatch, handler)
+    result = asyncio.run(svc.get_kubernetes_resource(
+        "pods", "c1", "default", {"member_id": "a", "role": "admin", "name": "T"}))
+    assert result.data == []
+    assert result.degraded is True
+    assert result.degradedReason == "AGENT_INACTIVE"
+
+
+def test_admin_agents_page_is_one_based(monkeypatch):
+    """public page 는 1-based, upstream 은 0-based — adapter 에서 변환한다."""
+    import asyncio
+
+    seen = {}
+
+    def handler(request):
+        seen["page"] = request.url.params.get("page")
+        return httpx.Response(200, json={"items": [{"id": "a1"}], "total": 1})
+
+    svc = _mock_service(monkeypatch, handler)
+    result = asyncio.run(svc.get_admin_agents(
+        {"member_id": "a", "role": "admin", "name": "T"}, page=1, size=50))
+    assert seen["page"] == "0"
+    assert result.page == 1
+    assert result.has_next is False
+
+
+def test_disabled_provider_returns_503(monkeypatch):
+    from app.routes import any_cloud as mod
+
+    monkeypatch.setattr(mod.settings, "ANY_CLOUD_ENABLED", False)
+    client = TestClient(app)
+    response = client.get(f"{API}/any-cloud/system/clusters")
+    assert response.status_code == 503
+    assert "disabled" in response.json()["detail"]
+
+
+def test_no_unencoded_path_interpolation_in_routes():
+    """라우트 파일에서 upstream 경로를 조립할 때도 세그먼트를 인코딩해야 한다."""
+    import pathlib
+
+    source = pathlib.Path("app/routes/any_cloud.py").read_text(encoding="utf-8")
+    offenders = [
+        line.strip() for line in source.splitlines()
+        if 'path=f"' in line and "_seg(" not in line and "quote(" not in line
+    ]
+    assert offenders == [], f"미인코딩 경로 보간: {offenders}"

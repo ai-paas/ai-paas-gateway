@@ -20,23 +20,36 @@ from app.services.any_cloud_service import any_cloud_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Test"])
-router_cluster = APIRouter(prefix="/any-cloud/system", tags=["Any Cloud - Cluster"])
-router_helm = APIRouter(prefix="/any-cloud", tags=["Any Cloud - HelmRepository"])
-router_monit = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Monitoring"])
-router_package = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Kubernetes"])
-router_catalog = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Catalog"])
-router_ops = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Operations"])
-router_provider = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Providers"])
-router_credential = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Credentials"])
-router_addon = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Addons"])
-router_admin = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Admin"])
-router_obs = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Observability"])
-router_workflow = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Workflow"])
-router_admin_cluster = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Admin Cluster"])
-router_admin_agent = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Admin Agent"])
-router_fleet = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Fleet Upgrade"])
-router_vm = APIRouter(prefix="/any-cloud/vms", tags=["Any Cloud - VM"])
+
+def require_any_cloud_enabled() -> None:
+    """ANY_CLOUD_ENABLED=false 면 503. 플래그를 껐는데 upstream 연결 실패(502)로
+    보이던 문제를 없앤다. Swagger 계약은 그대로 유지된다."""
+    if not settings.ANY_CLOUD_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Any Cloud provider is disabled (ANY_CLOUD_ENABLED=false)",
+        )
+
+
+_enabled = [Depends(require_any_cloud_enabled)]
+
+router = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Test"], dependencies=_enabled)
+router_cluster = APIRouter(prefix="/any-cloud/system", tags=["Any Cloud - Cluster"], dependencies=_enabled)
+router_helm = APIRouter(prefix="/any-cloud", tags=["Any Cloud - HelmRepository"], dependencies=_enabled)
+router_monit = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Monitoring"], dependencies=_enabled)
+router_package = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Kubernetes"], dependencies=_enabled)
+router_catalog = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Catalog"], dependencies=_enabled)
+router_ops = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Operations"], dependencies=_enabled)
+router_provider = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Providers"], dependencies=_enabled)
+router_credential = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Credentials"], dependencies=_enabled)
+router_addon = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Addons"], dependencies=_enabled)
+router_admin = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Admin"], dependencies=_enabled)
+router_obs = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Observability"], dependencies=_enabled)
+router_workflow = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Workflow"], dependencies=_enabled)
+router_admin_cluster = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Admin Cluster"], dependencies=_enabled)
+router_admin_agent = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Admin Agent"], dependencies=_enabled)
+router_fleet = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Fleet Upgrade"], dependencies=_enabled)
+router_vm = APIRouter(prefix="/any-cloud/vms", tags=["Any Cloud - VM"], dependencies=_enabled)
 
 
 def _backend_ws_base() -> str:
@@ -117,6 +130,11 @@ async def pod_exec_proxy(
         logger.warning(f"pod_exec_proxy: {e}")
     await websocket.close()
 
+def _attachment(filename: str) -> str:
+    """Content-Disposition 헤더 값. 파일명은 사용자 입력에서 오므로 quote 한다."""
+    return f"attachment; filename=\"{quote(filename)}\""
+
+
 def _create_user_info_dict(user: Member) -> Dict[str, str]:
     """Member 객체에서 user_info 딕셔너리 생성"""
     return {
@@ -126,28 +144,30 @@ def _create_user_info_dict(user: Member) -> Dict[str, str]:
     }
 
 
+# 허용 kind = (upstream v0.3.0 ClusterKubernetesController 지원 목록)
+#            ∩ (develop 이 의도적으로 차단한 secrets/RBAC 제외)
+#
+# 값은 반드시 소문자다. upstream 검증이 K8S_KIND_PATTERN `^[a-z][a-z0-9]{0,49}$` 이므로
+# camelCase 를 넣으면 게이트웨이는 통과시키고 upstream 이 400 을 낸다(lockstep 위반).
+# secrets / roles / roleBindings / clusterRoles / clusterRoleBindings 는 정책상 차단 —
+# tests/test_security_p0.py 가 고정하고 있다.
 _ALLOWED_KUBERNETES_RESOURCE_TYPES = {
-    "daemonSets",
-    "deployments",
-    "replicaSets",
-    "statefulSets",
-    "jobs",
-    "cronJobs",
-    "endpoints",
-    "namespaces",
-    "nodes",
-    "persistentVolumes",
-    "persistentVolumeClaims",
+    # namespaced
     "pods",
     "services",
-    "servies",
-    "serviceAccounts",
-    "configMaps",
-    "events",
-    "horizontalPodAutoscalers",
-    "horizontalPodAuoscalers",
-    "ingresses",
-    "storageClasses",
+    "deployments",
+    "statefulsets",
+    "daemonsets",
+    "replicasets",
+    "configmaps",
+    "persistentvolumeclaims",
+    "jobs",
+    "cronjobs",
+    # cluster-scoped ({namespace} 자리에 "-" 사용)
+    "nodes",
+    "namespaces",
+    "persistentvolumes",
+    "storageclasses",
 }
 
 
@@ -939,6 +959,7 @@ async def list_kubernetes_resource_events(
     core/v1 Event 만 지원.
     """
     try:
+        resource_type = _validate_kubernetes_resource_type(resource_type)
         user_info = _create_user_info_dict(current_user)
         return await any_cloud_service.get_kubernetes_resource_events(
             resource_type=resource_type,
@@ -975,6 +996,7 @@ async def restart_kubernetes_resource(
     - 그 외 kind 는 400.
     """
     try:
+        resource_type = _validate_kubernetes_resource_type(resource_type)
         user_info = _create_user_info_dict(current_user)
         return await any_cloud_service.restart_kubernetes_resource(
             resource_type=resource_type,
@@ -1007,6 +1029,7 @@ async def scale_kubernetes_resource(
     replicas 변경. deployments/replicasets/statefulsets 만 지원. 그 외 kind 는 400.
     """
     try:
+        resource_type = _validate_kubernetes_resource_type(resource_type)
         user_info = _create_user_info_dict(current_user)
         return await any_cloud_service.scale_kubernetes_resource(
             resource_type=resource_type,
@@ -2079,7 +2102,7 @@ async def download_cluster_kubeconfig(
         return PlainTextResponse(
             content,
             media_type="application/yaml",
-            headers={"Content-Disposition": f'attachment; filename="{cluster_name}-kubeconfig.yaml"'}
+            headers={"Content-Disposition": _attachment(f"{cluster_name}-kubeconfig.yaml")}
         )
     except HTTPException:
         raise
@@ -2102,7 +2125,7 @@ async def get_cluster_agent_bootstrap(
     try:
         user_info = _create_user_info_dict(current_user)
         return await any_cloud_service.generic_get_unwrapped(
-            path=f"/v1/clusters/{cluster_name}/agent-bootstrap",
+            path=f"/v1/clusters/{quote(cluster_name, safe='')}/agent-bootstrap",
             user_info=user_info,
         )
     except HTTPException:
@@ -2134,7 +2157,7 @@ async def download_cluster_agent_manifest(
         return PlainTextResponse(
             content,
             media_type="application/yaml",
-            headers={"Content-Disposition": f'attachment; filename="{cluster_name}-agent-manifest.yaml"'}
+            headers={"Content-Disposition": _attachment(f"{cluster_name}-agent-manifest.yaml")}
         )
     except HTTPException:
         raise
@@ -2745,8 +2768,8 @@ async def list_admin_agents(
         clusterName: Optional[str] = Query(None, description="콤마 multi"),
         versionPrefix: Optional[str] = Query(None),
         lastSeenOlderThanSec: Optional[int] = Query(None, ge=0),
-        page: int = Query(0, ge=0),
-        size: int = Query(50, ge=1, le=200),
+        page: int = Query(1, ge=1, description="페이지 번호 (1부터)"),
+        size: int = Query(50, ge=1, le=200, description="페이지 크기"),
         current_user: Member = Depends(get_current_admin_user),
 ):
     """Admin fleet — cluster-agent 전체 목록"""
@@ -2931,6 +2954,7 @@ async def create_kubernetes_resource(
 ):
     """쿠버네티스 리소스 생성 (JSON 또는 YAML 객체 형태)"""
     try:
+        resource_type = _validate_kubernetes_resource_type(resource_type)
         user_info = _create_user_info_dict(current_user)
         return await any_cloud_service.create_kubernetes_resource(
             resource_type=resource_type,
@@ -3101,12 +3125,19 @@ async def issue_vm_ssh_key(
         format: str = Query("json", pattern="^(json|pem)$"),
         current_user: Member = Depends(get_current_admin_user),
 ):
-    """VM SSH private key 발급. format=pem 이면 raw PEM."""
+    """VM SSH private key 발급. format=pem 이면 raw PEM 파일로 내려간다."""
     user_info = _create_user_info_dict(current_user)
-    return await any_cloud_service.issue_vm_ssh_key(vm_name=vm_name, user_info=user_info, fmt=format)
+    result = await any_cloud_service.issue_vm_ssh_key(vm_name=vm_name, user_info=user_info, fmt=format)
+    if format == "pem":
+        return PlainTextResponse(
+            result,
+            media_type="application/x-pem-file",
+            headers={"Content-Disposition": _attachment(f"{vm_name}.pem")},
+        )
+    return result
 
 
-@router_vm.get("/{vm_name}/kubeconfig")
+@router_vm.get("/{vm_name}/kubeconfig", response_class=PlainTextResponse)
 async def download_vm_kubeconfig(
         vm_name: str = Path(...),
         serviceAccount: Optional[str] = Query(None),
@@ -3121,4 +3152,9 @@ async def download_vm_kubeconfig(
         "namespace": namespace,
         "ttlSeconds": ttlSeconds,
     }.items() if v is not None}
-    return await any_cloud_service.download_vm_kubeconfig(vm_name=vm_name, user_info=user_info, **params)
+    content = await any_cloud_service.download_vm_kubeconfig(vm_name=vm_name, user_info=user_info, **params)
+    return PlainTextResponse(
+        content,
+        media_type="application/yaml",
+        headers={"Content-Disposition": _attachment(f"{vm_name}-kubeconfig.yaml")},
+    )
