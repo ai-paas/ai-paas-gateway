@@ -21,6 +21,38 @@ def _seg(value: Any) -> str:
     return quote(str(value), safe="")
 
 
+_UPSTREAM_DETAIL_MAX = 500
+
+
+def _upstream_detail(response: httpx.Response) -> str:
+    """upstream 4xx 본문에서 사용자에게 보여줄 사유만 추출 (내부 스택/덤프 노출 방지)."""
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text[:_UPSTREAM_DETAIL_MAX]
+    if isinstance(body, dict):
+        for key in ("detail", "message", "error"):
+            value = body.get(key)
+            if isinstance(value, str) and value:
+                return value[:_UPSTREAM_DETAIL_MAX]
+    return str(body)[:_UPSTREAM_DETAIL_MAX]
+
+
+def raise_for_upstream(response: httpx.Response, path: str) -> None:
+    """upstream 응답을 게이트웨이 표준 상태코드로 매핑 (conventions-error-handling.md).
+
+    4xx 는 사용자 입력 문제이므로 상태코드와 사유를 그대로 전달하고,
+    5xx 는 upstream 장애이므로 502 로 바꾼다 (내부 오류 본문을 프론트로 흘리지 않는다).
+    """
+    if response.status_code < 400:
+        return
+    if response.status_code < 500:
+        logger.warning(f"Any Cloud 4xx: {response.status_code} {path}")
+        raise HTTPException(status_code=response.status_code, detail=_upstream_detail(response))
+    logger.error(f"Any Cloud 5xx: {response.status_code} {path}")
+    raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Any Cloud service error")
+
+
 class AnyCloudService:
     """Any Cloud 연결 서비스 - 외부 Any Cloud API 라우팅 게이트웨이"""
 
@@ -132,26 +164,19 @@ class AnyCloudService:
                 kwargs['headers'] = headers
 
             logger.info(f"Making {method} request to Any Cloud: {url}")
-            if kwargs.get('params'):
-                logger.info(f"Parameters: {kwargs['params']}")
 
             # 요청 실행
             response = await getattr(self.client, method.lower())(url, **kwargs)
 
-            if 200 <= response.status_code < 300:
-                if response.status_code == 204 or not response.content:
-                    return {"data": None}
-                response_data = response.json()
-                # success/data 형태로 감싸 내려오는 응답은 data 만 추출
-                if isinstance(response_data, dict) and "data" in response_data and "success" in response_data:
-                    response_data = response_data["data"]
-                return {"data": response_data}
-            else:
-                logger.error(f"Any Cloud API error: {response.status_code} - {response.text}")
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Any Cloud API request failed: {response.text}"
-                )
+            raise_for_upstream(response, path)
+
+            if response.status_code == 204 or not response.content:
+                return {"data": None}
+            response_data = response.json()
+            # success/data 형태로 감싸 내려오는 응답은 data 만 추출
+            if isinstance(response_data, dict) and "data" in response_data and "success" in response_data:
+                response_data = response_data["data"]
+            return {"data": response_data}
 
         except httpx.TimeoutException as e:
             logger.error(f"Timeout calling Any Cloud API {path}: {str(e)}")
@@ -165,13 +190,19 @@ class AnyCloudService:
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Any Cloud service unavailable"
             )
+        except httpx.RequestError as e:
+            logger.error(f"Request failed calling Any Cloud API {path}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Any Cloud connection error"
+            )
         except HTTPException:
             raise
-        except Exception as e:
-            logger.error(f"Error calling Any Cloud API {path}: {str(e)}")
+        except Exception:
+            logger.exception(f"Unexpected error calling Any Cloud API {path}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Internal error: {str(e)}"
+                detail="Internal server error"
             )
 
     async def generic_get_unwrapped(
@@ -324,9 +355,7 @@ class AnyCloudService:
         except httpx.ConnectError:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Any Cloud service unavailable")
 
-        if not (200 <= response.status_code < 300):
-            logger.error(f"Any Cloud API error: {response.status_code} - {response.text}")
-            raise HTTPException(response.status_code, detail=f"Any Cloud API request failed: {response.text}")
+        raise_for_upstream(response, url)
 
         if response.status_code == 204 or not response.content:
             return {"data": None}
@@ -1049,9 +1078,7 @@ class AnyCloudService:
             raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, detail="Any Cloud service timeout")
         except httpx.ConnectError:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Any Cloud service unavailable")
-        if not (200 <= response.status_code < 300):
-            logger.error(f"Any Cloud API error: {response.status_code} - {response.text}")
-            raise HTTPException(response.status_code, detail=f"Any Cloud API request failed: {response.text}")
+        raise_for_upstream(response, url)
         return response.text
 
     async def get_cluster_agent_manifest(self, cluster_name: str, user_info: dict) -> str:
@@ -1065,9 +1092,7 @@ class AnyCloudService:
             raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, detail="Any Cloud service timeout")
         except httpx.ConnectError:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Any Cloud service unavailable")
-        if not (200 <= response.status_code < 300):
-            logger.error(f"Any Cloud API error: {response.status_code} - {response.text}")
-            raise HTTPException(response.status_code, detail=f"Any Cloud API request failed: {response.text}")
+        raise_for_upstream(response, url)
         return response.text
 
     async def get_cluster_health(self, cluster_name: str, user_info: dict) -> dict:
@@ -1418,9 +1443,7 @@ class AnyCloudService:
             raise HTTPException(status.HTTP_504_GATEWAY_TIMEOUT, detail="Any Cloud service timeout")
         except httpx.ConnectError:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="Any Cloud service unavailable")
-        if not (200 <= response.status_code < 300):
-            logger.error(f"Any Cloud API error: {response.status_code} - {response.text}")
-            raise HTTPException(response.status_code, detail=f"Any Cloud API request failed: {response.text}")
+        raise_for_upstream(response, url)
         return response.text
 
     async def create_kubernetes_resource(
