@@ -132,6 +132,8 @@ class Settings:
 
     ANY_CLOUD_ENABLED: bool = _get_bool("ANY_CLOUD_ENABLED", False)
     ANY_CLOUD_TARGET_BASE_URL: str = os.getenv("ANY_CLOUD_TARGET_BASE_URL", "")
+    # 비워두면 TARGET_BASE_URL 의 scheme 만 ws/wss 로 바꿔 사용. WS 만 다른 호스트일 때 지정.
+    ANY_CLOUD_TARGET_WS_URL: str = os.getenv("ANY_CLOUD_TARGET_WS_URL", "")
     ANY_CLOUD_TIMEOUT: float = float(os.getenv("ANY_CLOUD_TIMEOUT", "30.0"))
     ANY_CLOUD_CONNECT_TIMEOUT: float = float(os.getenv("ANY_CLOUD_CONNECT_TIMEOUT", "5.0"))
     ANY_CLOUD_MAX_CONNECTIONS: int = int(os.getenv("ANY_CLOUD_MAX_CONNECTIONS", "100"))

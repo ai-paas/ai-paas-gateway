@@ -1,0 +1,59 @@
+# 로컬 테스트용 compose. 운영 환경 사용 금지.
+#
+# 시크릿은 이 파일에 두지 않는다 (public repo). .env.test 를 만들어서 쓴다:
+#   cp .env.example .env.test
+#   python -c "import secrets; print('JWT_SECRET_KEY=' + secrets.token_urlsafe(48))" >> .env.test
+#
+# Usage: --env-file 은 필수다. compose 의 ${...} 보간은 env_file: 값을 쓰지 않고
+# 호스트 환경변수 또는 --env-file 만 참조한다.
+#   docker compose --env-file .env.test -f docker-compose.test.yml up -d --build
+#   docker compose --env-file .env.test -f docker-compose.test.yml logs -f app
+#   docker compose --env-file .env.test -f docker-compose.test.yml down -v
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: gateway-postgres-test
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gateway}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?.env.test 에 POSTGRES_PASSWORD 를 설정하세요}
+      POSTGRES_DB: ${POSTGRES_DB:-gateway}
+    ports:
+      # 호스트 루프백에만 바인딩 (전체 인터페이스 노출 방지)
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gateway} -d ${POSTGRES_DB:-gateway}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gateway-app-test
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    extra_hosts:
+      # macOS Docker Desktop 은 자동, Linux 는 host-gateway 매핑 필요
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env.test
+    environment:
+      # compose 네트워크 기준으로만 덮어쓴다 (나머지는 .env.test)
+      DATABASE_URL: postgresql://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-gateway}
+      HOST: 0.0.0.0
+      PORT: 8000
+    volumes:
+      # 소스 hot reload — Dockerfile 의 uvicorn --reload 와 함께 동작
+      - .:/app
+    restart: unless-stopped
+
+volumes:
+  postgres_test_data:
