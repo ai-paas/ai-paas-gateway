@@ -1,11 +1,14 @@
 import asyncio
 import logging
 from typing import Any, Dict, Optional
+from urllib.parse import quote, urlencode
 
+import websockets as ws_lib
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Path, Query, \
     Request, UploadFile, WebSocket, WebSocketDisconnect, status
 
-from app.auth import get_current_admin_user, get_current_user
+from app.auth import get_current_admin_user, get_current_user, get_ws_admin_user, \
+    ws_bearer_subprotocol
 from app.config import settings
 from app.models import Member
 from app.schemas.any_cloud import AnyCloudResponse, ClusterCreateRequest, \
@@ -35,13 +38,9 @@ router_fleet = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Fleet Upgrade"]
 router_vm = APIRouter(prefix="/any-cloud/vms", tags=["Any Cloud - VM"])
 
 
-import os
-import websockets as ws_lib
-
-
 def _backend_ws_base() -> str:
     """ANY_CLOUD_TARGET_WS_URL override 가 있으면 사용, 아니면 HTTP base 의 scheme 만 ws/wss 로 치환."""
-    override = os.environ.get("ANY_CLOUD_TARGET_WS_URL", "").strip()
+    override = (settings.ANY_CLOUD_TARGET_WS_URL or "").strip()
     if override:
         return override.rstrip("/")
     base = (settings.ANY_CLOUD_TARGET_BASE_URL or "").rstrip("/")
@@ -81,16 +80,26 @@ async def pod_exec_proxy(
         command: str = Query("/bin/sh", description="실행 명령"),
         tty: bool = Query(True, description="TTY 할당 여부"),
         stdin: bool = Query(True, description="stdin 연결 여부"),
+        current_user: Member = Depends(get_ws_admin_user),
 ):
-    """Pod exec WebSocket proxy. backend WS handler 로 frame 양방향 전달. 인증은 미적용."""
-    await websocket.accept()
-    qs = "&".join([
-        *([f"container={container}"] if container else []),
-        *([f"command={command}"] if command else []),
-        f"tty={'true' if tty else 'false'}",
-        f"stdin={'true' if stdin else 'false'}",
-    ])
-    backend_url = f"{_backend_ws_base()}/v1/clusters/{cluster_name}/pods/{namespace}/{pod_name}/exec?{qs}"
+    """Pod exec WebSocket proxy (admin 전용).
+
+    파드 셸을 그대로 여는 통로라 REST 변경계와 동일하게 admin 으로 제한한다.
+    토큰 전달: `Authorization: Bearer <token>` 헤더, 또는 브라우저에서는
+    `new WebSocket(url, ["bearer", "<access_token>"])` 서브프로토콜.
+    """
+    await websocket.accept(subprotocol=ws_bearer_subprotocol(websocket))
+    logger.info(f"pod_exec_proxy opened by {current_user.member_id}: {cluster_name}/{namespace}/{pod_name}")
+    qs = urlencode({
+        **({"container": container} if container else {}),
+        **({"command": command} if command else {}),
+        "tty": "true" if tty else "false",
+        "stdin": "true" if stdin else "false",
+    })
+    backend_path = "/".join(
+        quote(seg, safe="") for seg in ("v1", "clusters", cluster_name, "pods", namespace, pod_name, "exec")
+    )
+    backend_url = f"{_backend_ws_base()}/{backend_path}?{qs}"
 
     try:
         async with ws_lib.connect(backend_url) as backend_ws:
@@ -837,34 +846,6 @@ async def test_cluster(
             detail="Failed to test cluster connectivity"
         )
 
-# 클러스터 연결 테스트 API
-@router_package.get("/kubernetes/test-connection", response_model=AnyCloudResponse)
-async def test_cluster(
-        clusterName: str = Query(..., description="조회할 cluster 이름", examples=["openstack"]),
-        current_user: Member = Depends(get_current_user)
-):
-    """
-    클러스터 연결 상태를 테스트합니다.
-    """
-    try:
-        user_info = _create_user_info_dict(current_user)
-
-        response = await any_cloud_service.get_kubernetes_test(
-            clusterName=clusterName,
-            user_info=user_info
-        )
-
-        return response
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting kubernetes cluster for {current_user.member_id}: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve kubernetes cluster"
-        )
-
 # 클러스터 특정 리소스 목록 조회 API
 @router_package.get("/kubernetes/{resource_type}", response_model=AnyCloudPagedResponse)
 async def get_kubernetes_resource(
@@ -982,7 +963,7 @@ async def restart_kubernetes_resource(
         resource_name: str = Path(..., description="Resource 이름", examples=["my-deployment"]),
         clusterName: str = Query(..., description="조회할 cluster 이름", examples=["aws-kubernetes-001"]),
         namespace: str = Query("", description="namespace", examples=["default"]),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """
     리소스 재시작.
@@ -1019,7 +1000,7 @@ async def scale_kubernetes_resource(
         clusterName: str = Query(..., description="조회할 cluster 이름", examples=["aws-kubernetes-001"]),
         namespace: str = Query("", description="namespace", examples=["default"]),
         replicas: int = Query(..., ge=0, le=1000, description="목표 replicas (0..1000)", examples=[3]),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """
     replicas 변경. deployments/replicasets/statefulsets 만 지원. 그 외 kind 는 400.
@@ -1452,7 +1433,7 @@ async def get_operation(
 @router_ops.post("/operations/{operation_id}/cancel", response_model=OperationResponse)
 async def cancel_operation(
         operation_id: str = Path(..., description="작업 ID"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """진행 중 작업 취소 요청"""
     try:
@@ -1510,7 +1491,7 @@ async def validate_cluster(
                 }
             }
         ),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """VM 클러스터 생성 사전 검증 (정적 검증만, 실제 자원 생성 X)
 
@@ -1554,7 +1535,7 @@ async def preview_cluster(
                 }
             }
         ),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """VM 클러스터 생성 미리보기 — 실제 생성될 자원 계획만 반환 (실제 생성 X)
 
@@ -1685,7 +1666,7 @@ async def get_provider_images(
 @router_credential.get("/credentials")
 async def list_credentials(
         request: Request,
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """CSP 자격증명 목록 조회"""
     try:
@@ -1705,7 +1686,7 @@ async def list_credentials(
 @router_credential.get("/credentials/{credential_id}")
 async def get_credential(
         credential_id: str = Path(..., description="자격증명 ID"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """CSP 자격증명 단건 조회 (secret 은 마스킹 처리됨)"""
     try:
@@ -1762,7 +1743,7 @@ async def create_credential(
                 }
             }
         ),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """CSP 자격증명 등록 — credentials 에 키/값 직접 입력 (백엔드에서 암호화 저장).
 
@@ -1787,7 +1768,7 @@ async def create_credential(
 @router_credential.delete("/credentials/{credential_id}")
 async def delete_credential(
         credential_id: str = Path(..., description="자격증명 ID"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """CSP 자격증명 삭제"""
     try:
@@ -1917,7 +1898,7 @@ async def install_cluster_addon(
                 }
             }
         ),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """애드온 설치 요청"""
     try:
@@ -1941,7 +1922,7 @@ async def install_cluster_addon(
 async def uninstall_cluster_addon(
         cluster_name: str = Path(..., description="클러스터 이름"),
         addon_id: str = Path(..., description="애드온 ID"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """애드온 제거 요청"""
     try:
@@ -1965,7 +1946,7 @@ async def uninstall_cluster_addon(
 async def retry_cluster_addon(
         cluster_name: str = Path(..., description="클러스터 이름"),
         addon_id: str = Path(..., description="애드온 ID"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """실패한 애드온 재시도"""
     try:
@@ -2026,7 +2007,7 @@ async def install_helm_release(
                 }
             }
         ),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """Helm 릴리즈 설치 (JSON body)
 
@@ -2053,7 +2034,7 @@ async def install_helm_release(
 @router_admin.get("/audit-logs")
 async def list_audit_logs(
         request: Request,
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """감사 로그 조회"""
     try:
@@ -2085,7 +2066,7 @@ from fastapi.responses import PlainTextResponse
 )
 async def download_cluster_kubeconfig(
         cluster_name: str = Path(..., description="클러스터 이름"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """클러스터 kubeconfig 다운로드 (YAML)"""
     try:
@@ -2114,7 +2095,7 @@ async def download_cluster_kubeconfig(
 @router_cluster.get("/cluster/{cluster_name}/agent-bootstrap")
 async def get_cluster_agent_bootstrap(
         cluster_name: str = Path(..., description="클러스터 이름"),
-        current_user: Member = Depends(get_current_user),
+        current_user: Member = Depends(get_current_admin_user),
 ):
     """Cluster-agent bootstrap 정보 (helmInstallCommand / kubectlApplyCommand / token / expiresAt)"""
     try:
@@ -2140,7 +2121,7 @@ async def get_cluster_agent_bootstrap(
 )
 async def download_cluster_agent_manifest(
         cluster_name: str = Path(..., description="클러스터 이름"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """클러스터 agent install manifest 다운로드 (YAML)"""
     try:
@@ -2191,7 +2172,7 @@ async def get_cluster_health(
 @router_cluster.get("/agents/health")
 async def get_agents_health(
         request: Request,
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """모든 클러스터의 에이전트 health 요약"""
     try:
@@ -2265,7 +2246,7 @@ async def get_cluster_state_history(
 async def post_cluster_ssh_key(
         cluster_name: str = Path(..., description="클러스터 이름"),
         body: Optional[Dict[str, Any]] = Body(default=None),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """VM 클러스터 SSH 키 발급/조회"""
     try:
@@ -2368,7 +2349,7 @@ async def list_alert_silences(
 async def create_alert_silence(
         cluster_name: str = Path(..., description="클러스터 이름"),
         body: Dict[str, Any] = Body(...),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """alert silence 생성"""
     try:
@@ -2387,7 +2368,7 @@ async def create_alert_silence(
 async def delete_alert_silence(
         cluster_name: str = Path(..., description="클러스터 이름"),
         silence_id: str = Path(..., description="silence id"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """alert silence 제거"""
     try:
@@ -2415,11 +2396,27 @@ async def list_alert_rules(current_user: Member = Depends(get_current_user)):
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list alert rules")
 
 
+@router_obs.post("/clusters/{cluster_name}/observability/alert-rules/install-all")
+async def install_all_alert_rules(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        current_user: Member = Depends(get_current_admin_user)
+):
+    """alert rule 전체 설치"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.install_all_alert_rules(cluster_name, user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error installing all rules: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to install all alert rules")
+
+
 @router_obs.post("/clusters/{cluster_name}/observability/alert-rules/{rule_set_id}")
 async def install_alert_rule(
         cluster_name: str = Path(..., description="클러스터 이름"),
         rule_set_id: str = Path(..., description="rule set id"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """alert rule set 설치"""
     try:
@@ -2434,27 +2431,11 @@ async def install_alert_rule(
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to install alert rule")
 
 
-@router_obs.post("/clusters/{cluster_name}/observability/alert-rules/install-all")
-async def install_all_alert_rules(
-        cluster_name: str = Path(..., description="클러스터 이름"),
-        current_user: Member = Depends(get_current_user)
-):
-    """alert rule 전체 설치"""
-    try:
-        user_info = _create_user_info_dict(current_user)
-        return await any_cloud_service.install_all_alert_rules(cluster_name, user_info)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error installing all rules: {str(e)}")
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to install all alert rules")
-
-
 @router_obs.delete("/clusters/{cluster_name}/observability/alert-rules/{rule_set_id}")
 async def delete_alert_rule(
         cluster_name: str = Path(..., description="클러스터 이름"),
         rule_set_id: str = Path(..., description="rule set id"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """alert rule set 제거"""
     try:
@@ -2544,7 +2525,7 @@ async def get_standard_metric(
 @router_workflow.get("/workflow/queues")
 async def list_workflow_queues(
         request: Request,
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """워크플로우 큐 상태"""
     try:
@@ -2561,7 +2542,7 @@ async def list_workflow_queues(
 @router_workflow.get("/workflow/dead-letter-messages")
 async def list_dead_letter_messages(
         request: Request,
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """DLQ 메시지 목록"""
     try:
@@ -2579,7 +2560,7 @@ async def list_dead_letter_messages(
 async def operate_dead_letter_message(
         message_id: str = Path(..., description="DLQ 메시지 id"),
         body: Dict[str, Any] = Body(...),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """DLQ 메시지 처리 (재시도 / 폐기)"""
     try:
@@ -2597,7 +2578,7 @@ async def operate_dead_letter_message(
 @router_admin_cluster.delete("/admin/clusters/{cluster_name}/force")
 async def admin_force_delete_cluster(
         cluster_name: str = Path(..., description="클러스터 이름"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """클러스터 강제 삭제 (admin)"""
     try:
@@ -2613,7 +2594,7 @@ async def admin_force_delete_cluster(
 @router_admin_cluster.delete("/admin/clusters/{stack_name}/orphan-state")
 async def admin_delete_orphan_state(
         stack_name: str = Path(..., description="Pulumi stack 이름"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """오펀 Pulumi state 삭제 (admin)"""
     try:
@@ -2629,7 +2610,7 @@ async def admin_delete_orphan_state(
 @router_admin_cluster.get("/admin/clusters/{cluster_name}/drift")
 async def admin_get_cluster_drift(
         cluster_name: str = Path(..., description="클러스터 이름"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """클러스터 drift 조회"""
     try:
@@ -2645,7 +2626,7 @@ async def admin_get_cluster_drift(
 @router_admin_cluster.post("/admin/clusters/{cluster_name}/refresh-state")
 async def admin_refresh_cluster_state(
         cluster_name: str = Path(..., description="클러스터 이름"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """클러스터 state 강제 갱신"""
     try:
@@ -2661,7 +2642,7 @@ async def admin_refresh_cluster_state(
 @router_fleet.get("/fleet/upgrade/preview")
 async def fleet_upgrade_preview(
         request: Request,
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """fleet upgrade 미리보기"""
     try:
@@ -2678,7 +2659,7 @@ async def fleet_upgrade_preview(
 @router_fleet.get("/fleet/upgrade/runs")
 async def fleet_upgrade_runs(
         request: Request,
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """fleet upgrade 실행 이력"""
     try:
@@ -2696,7 +2677,7 @@ async def fleet_upgrade_runs(
 async def patch_cluster_upgrade_wave(
         cluster_name: str = Path(..., description="클러스터 이름"),
         body: Dict[str, Any] = Body(...),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """클러스터 upgrade wave 변경"""
     try:
@@ -2713,7 +2694,7 @@ async def patch_cluster_upgrade_wave(
 async def trigger_cluster_upgrade(
         cluster_name: str = Path(..., description="클러스터 이름"),
         body: Dict[str, Any] = Body(...),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """클러스터 upgrade 실행"""
     try:
@@ -2734,7 +2715,7 @@ async def list_admin_agents(
         lastSeenOlderThanSec: Optional[int] = Query(None, ge=0),
         page: int = Query(0, ge=0),
         size: int = Query(50, ge=1, le=200),
-        current_user: Member = Depends(get_current_user),
+        current_user: Member = Depends(get_current_admin_user),
 ):
     """Admin fleet — cluster-agent 전체 목록"""
     try:
@@ -2760,7 +2741,7 @@ async def list_admin_agents(
 
 @router_admin_agent.get("/admin/agent/heartbeat-staleness")
 async def admin_agent_heartbeat_staleness(
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """에이전트 heartbeat 정체 상태"""
     try:
@@ -2776,7 +2757,7 @@ async def admin_agent_heartbeat_staleness(
 @router_admin_agent.post("/admin/agent/heartbeat-staleness")
 async def admin_agent_heartbeat_staleness_run(
         body: Dict[str, Any] = Body(default={}),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """heartbeat 정체 처리 실행"""
     try:
@@ -2792,7 +2773,7 @@ async def admin_agent_heartbeat_staleness_run(
 @router_admin_agent.get("/admin/agent/policy/preview")
 async def admin_agent_policy_preview(
         request: Request,
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """에이전트 정책 미리보기"""
     try:
@@ -2809,7 +2790,7 @@ async def admin_agent_policy_preview(
 @router_admin_agent.get("/admin/agent/policy/audit")
 async def admin_agent_policy_audit(
         request: Request,
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """에이전트 정책 audit"""
     try:
@@ -2827,7 +2808,7 @@ async def admin_agent_policy_audit(
 async def admin_put_cluster_agent_policy(
         cluster_name: str = Path(..., description="클러스터 이름"),
         body: Dict[str, Any] = Body(...),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """클러스터 에이전트 정책 적용"""
     try:
@@ -2844,7 +2825,7 @@ async def admin_put_cluster_agent_policy(
 async def admin_patch_cluster_agent_policy(
         cluster_name: str = Path(..., description="클러스터 이름"),
         body: Dict[str, Any] = Body(...),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """클러스터 에이전트 정책 부분 변경"""
     try:
@@ -2861,7 +2842,7 @@ async def admin_patch_cluster_agent_policy(
 async def admin_reinstall_cluster_agent(
         cluster_name: str = Path(..., description="클러스터 이름"),
         body: Dict[str, Any] = Body(default={}),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """클러스터 에이전트 재설치"""
     try:
@@ -2914,7 +2895,7 @@ async def create_kubernetes_resource(
         body: Dict[str, Any] = Body(...),
         clusterName: str = Query(..., description="클러스터 이름"),
         namespace: str = Query("", description="네임스페이스"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """쿠버네티스 리소스 생성 (JSON 또는 YAML 객체 형태)"""
     try:
@@ -2986,7 +2967,7 @@ async def get_vm(
 @router_vm.post("")
 async def create_vm(
         request: VmGatewayCreateRequest = Body(...),
-        current_user: Member = Depends(get_current_user),
+        current_user: Member = Depends(get_current_admin_user),
 ):
     """VM 생성 (Pulumi provision) — 202 + Operation"""
     try:
@@ -3006,7 +2987,7 @@ async def create_vm(
 async def patch_vm(
         vm_name: str = Path(...),
         request: VmGatewayPatchRequest = Body(...),
-        current_user: Member = Depends(get_current_user),
+        current_user: Member = Depends(get_current_admin_user),
 ):
     """VM scale (workerCount 변경) — 202 + Operation"""
     try:
@@ -3026,7 +3007,7 @@ async def patch_vm(
 @router_vm.delete("/{vm_name}")
 async def delete_vm(
         vm_name: str = Path(...),
-        current_user: Member = Depends(get_current_user),
+        current_user: Member = Depends(get_current_admin_user),
 ):
     """VM 삭제 (Pulumi destroy) — 202 + Operation"""
     try:
@@ -3054,7 +3035,7 @@ async def list_vm_operations(
 async def create_vm_operation(
         vm_name: str = Path(...),
         op_type: str = Body(..., embed=True, alias="type"),
-        current_user: Member = Depends(get_current_user),
+        current_user: Member = Depends(get_current_admin_user),
 ):
     """VM 액션 (retryWorkflow / retryRegistration / refreshStatus)"""
     user_info = _create_user_info_dict(current_user)
@@ -3086,7 +3067,7 @@ async def get_vm_nodes(
 async def issue_vm_ssh_key(
         vm_name: str = Path(...),
         format: str = Query("json", regex="^(json|pem)$"),
-        current_user: Member = Depends(get_current_user),
+        current_user: Member = Depends(get_current_admin_user),
 ):
     """VM SSH private key 발급. format=pem 이면 raw PEM."""
     user_info = _create_user_info_dict(current_user)
@@ -3099,7 +3080,7 @@ async def download_vm_kubeconfig(
         serviceAccount: Optional[str] = Query(None),
         namespace: Optional[str] = Query(None),
         ttlSeconds: Optional[int] = Query(None),
-        current_user: Member = Depends(get_current_user),
+        current_user: Member = Depends(get_current_admin_user),
 ):
     """VM 의 kubeconfig YAML 다운로드 (단기 SA token)"""
     user_info = _create_user_info_dict(current_user)

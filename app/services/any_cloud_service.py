@@ -1,5 +1,6 @@
 import logging
 from typing import Dict, Any, Optional, List
+from urllib.parse import quote
 
 import httpx
 from fastapi import HTTPException, status
@@ -8,6 +9,16 @@ from app.config import settings
 from app.schemas.any_cloud import AnyCloudPagedResponse
 
 logger = logging.getLogger(__name__)
+
+
+def _seg(value: Any) -> str:
+    """upstream 경로 세그먼트 인코딩.
+
+    클러스터명/네임스페이스 등은 사용자 입력(Path·Query)에서 오므로 그대로 f-string 에
+    넣으면 `../` 로 upstream 의 다른 엔드포인트를 호출할 수 있다(httpx 가 dot-segment 를
+    정규화한다). 정상 값(RFC 1123 label 등)에는 인코딩 대상 문자가 없어 no-op.
+    """
+    return quote(str(value), safe="")
 
 
 class AnyCloudService:
@@ -353,7 +364,7 @@ class AnyCloudService:
         """클러스터 존재 여부 확인 — 별도 엔드포인트가 없어 상세조회의 404 여부로 판정"""
         try:
             await self.generic_get_unwrapped(
-                path=f"/v1/clusters/{cluster_id}",
+                path=f"/v1/clusters/{_seg(cluster_id)}",
                 user_info=user_info
             )
             return {"data": {"exists": True}}
@@ -365,21 +376,21 @@ class AnyCloudService:
     async def get_cluster_detail(self, cluster_id: str, user_info: dict) -> dict:
         """클러스터 상세 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/v1/clusters/{cluster_id}",
+            path=f"/v1/clusters/{_seg(cluster_id)}",
             user_info=user_info
         )
 
     async def get_cluster_test_connection(self, cluster_id: str, user_info: dict) -> dict:
         """클러스터 연결 상태 확인"""
         return await self.simple_post(
-            path=f"/v1/clusters/{cluster_id}/connectivity-checks",
+            path=f"/v1/clusters/{_seg(cluster_id)}/connectivity-checks",
             user_info=user_info
         )
 
     async def cluster_refresh(self, cluster_id: str, user_info: dict) -> dict:
         """클러스터 상태 강제 갱신"""
         return await self.generic_post(
-            path=f"/v1/clusters/{cluster_id}/operations",
+            path=f"/v1/clusters/{_seg(cluster_id)}/operations",
             data={"type": "refreshStatus"},
             user_info=user_info
         )
@@ -418,7 +429,7 @@ class AnyCloudService:
 
     async def get_vm_detail(self, vm_name: str, user_info: dict) -> dict:
         """VM 상세 (workflow / stack outputs)"""
-        return await self.generic_get_unwrapped(path=f"/v1/vms/{vm_name}", user_info=user_info)
+        return await self.generic_get_unwrapped(path=f"/v1/vms/{_seg(vm_name)}", user_info=user_info)
 
     async def create_vm(self, request_data: Dict[str, Any], user_info: dict) -> dict:
         """VM 생성 (Pulumi provision 트리거 — 202 + Operation)"""
@@ -427,7 +438,7 @@ class AnyCloudService:
     async def patch_vm(self, vm_name: str, request_data: Dict[str, Any], user_info: dict) -> dict:
         """VM scale — workerCount 변경"""
         response = await self._make_request(
-            "PATCH", f"/v1/vms/{vm_name}", user_info=user_info, json=request_data
+            "PATCH", f"/v1/vms/{_seg(vm_name)}", user_info=user_info, json=request_data
         )
         if isinstance(response, dict) and "data" in response:
             return response["data"]
@@ -435,18 +446,18 @@ class AnyCloudService:
 
     async def delete_vm(self, vm_name: str, user_info: dict) -> dict:
         """VM 삭제 (Pulumi destroy — 202 + Operation)"""
-        return await self.generic_delete(path=f"/v1/vms/{vm_name}", user_info=user_info)
+        return await self.generic_delete(path=f"/v1/vms/{_seg(vm_name)}", user_info=user_info)
 
     async def list_vm_operations(self, vm_name: str, user_info: dict, page_size: int = 50) -> dict:
         """VM 의 operation 이력"""
         return await self.generic_get_unwrapped(
-            path=f"/v1/vms/{vm_name}/operations", user_info=user_info, pageSize=page_size
+            path=f"/v1/vms/{_seg(vm_name)}/operations", user_info=user_info, pageSize=page_size
         )
 
     async def create_vm_operation(self, vm_name: str, op_type: str, user_info: dict) -> dict:
         """VM 액션 (retryWorkflow / retryRegistration / refreshStatus)"""
         return await self.generic_post(
-            path=f"/v1/vms/{vm_name}/operations",
+            path=f"/v1/vms/{_seg(vm_name)}/operations",
             data={"type": op_type},
             user_info=user_info
         )
@@ -454,29 +465,29 @@ class AnyCloudService:
     async def get_vm_state_history(self, vm_name: str, user_info: dict, page_size: int = 50) -> dict:
         """VM workflow state transition history"""
         return await self.generic_get_unwrapped(
-            path=f"/v1/vms/{vm_name}/state-history", user_info=user_info, pageSize=page_size
+            path=f"/v1/vms/{_seg(vm_name)}/state-history", user_info=user_info, pageSize=page_size
         )
 
     async def get_vm_nodes(self, vm_name: str, user_info: dict) -> dict:
         """VM 노드 목록 (role / publicIp / privateIp)"""
-        return await self.generic_get_unwrapped(path=f"/v1/vms/{vm_name}/nodes", user_info=user_info)
+        return await self.generic_get_unwrapped(path=f"/v1/vms/{_seg(vm_name)}/nodes", user_info=user_info)
 
     async def issue_vm_ssh_key(self, vm_name: str, user_info: dict, fmt: str = "json") -> Any:
         """VM SSH private key 발급 (json=metadata, pem=raw file)"""
         if fmt == "pem":
             # raw PEM 응답 — text/plain. _make_request 의 JSON 가정 우회 필요하여 직접 처리.
             return await self._make_request(
-                "POST", f"/v1/vms/{vm_name}/ssh-key",
+                "POST", f"/v1/vms/{_seg(vm_name)}/ssh-key",
                 user_info=user_info, params={"format": "pem"}
             )
         return await self.generic_post(
-            path=f"/v1/vms/{vm_name}/ssh-key", data={}, user_info=user_info, format=fmt
+            path=f"/v1/vms/{_seg(vm_name)}/ssh-key", data={}, user_info=user_info, format=fmt
         )
 
     async def download_vm_kubeconfig(self, vm_name: str, user_info: dict, **params) -> Any:
         """VM 의 kubeconfig YAML 다운로드 (단기 SA token)"""
         return await self._make_request(
-            "GET", f"/v1/vms/{vm_name}/kubeconfig", user_info=user_info, params=params
+            "GET", f"/v1/vms/{_seg(vm_name)}/kubeconfig", user_info=user_info, params=params
         )
 
     async def get_helm_repos(
@@ -508,7 +519,7 @@ class AnyCloudService:
         """헬름 저장소 존재 여부 확인 — 별도 엔드포인트가 없어 상세조회의 404 여부로 판정"""
         try:
             await self.generic_get_unwrapped(
-                path=f"/v1/helm-repos/{helm_repo_name}",
+                path=f"/v1/helm-repos/{_seg(helm_repo_name)}",
                 user_info=user_info
             )
             return {"data": {"exists": True}}
@@ -520,7 +531,7 @@ class AnyCloudService:
     async def get_helm_repos_detail(self, helm_repo_name: str, user_info: dict) -> dict:
         """헬름 저장소 상세 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/v1/helm-repos/{helm_repo_name}",
+            path=f"/v1/helm-repos/{_seg(helm_repo_name)}",
             user_info=user_info
         )
 
@@ -532,7 +543,7 @@ class AnyCloudService:
     ) -> dict:
         """Prometheus instant query (raw passthrough). _make_request 의 outer data wrap 만 strip."""
         return await self.generic_get_unwrapped(
-            path=f"/v1/clusters/{cluster_name}/metrics/query",
+            path=f"/v1/clusters/{_seg(cluster_name)}/metrics/query",
             user_info=user_info,
             **query_params
         )
@@ -545,7 +556,7 @@ class AnyCloudService:
     ) -> dict:
         """Prometheus range query (raw passthrough)."""
         return await self.generic_get_unwrapped(
-            path=f"/v1/clusters/{cluster_name}/metrics/query_range",
+            path=f"/v1/clusters/{_seg(cluster_name)}/metrics/query_range",
             user_info=user_info,
             **query_params
         )
@@ -558,7 +569,7 @@ class AnyCloudService:
     ) -> dict:
         """N개의 PromQL 을 한 번에 backend 로 위임 — name → Prometheus envelope map."""
         return await self.generic_post(
-            path=f"/v1/clusters/{cluster_name}/metrics/multi-query",
+            path=f"/v1/clusters/{_seg(cluster_name)}/metrics/multi-query",
             data={"queries": queries},
             user_info=user_info
         )
@@ -590,7 +601,7 @@ class AnyCloudService:
             backend_params["labelSelector"] = labelSelector
 
         response = await self.generic_get(
-            path=f"/v1/clusters/{clusterName}/namespaces/{ns_path}/{resource_type}",
+            path=f"/v1/clusters/{_seg(clusterName)}/namespaces/{_seg(ns_path)}/{_seg(resource_type)}",
             user_info=user_info,
             **backend_params
         )
@@ -640,7 +651,7 @@ class AnyCloudService:
         """쿠버네티스 리소스 단건 조회"""
         ns_path = namespace if namespace else "-"
         return await self.generic_get(
-            path=f"/v1/clusters/{clusterName}/namespaces/{ns_path}/{resource_type}/{resource_name}",
+            path=f"/v1/clusters/{_seg(clusterName)}/namespaces/{_seg(ns_path)}/{_seg(resource_type)}/{_seg(resource_name)}",
             user_info=user_info
         )
 
@@ -648,7 +659,7 @@ class AnyCloudService:
         """쿠버네티스 리소스 삭제"""
         ns_path = namespace if namespace else "-"
         return await self.generic_delete(
-            path=f"/v1/clusters/{clusterName}/namespaces/{ns_path}/{resource_type}/{resource_name}",
+            path=f"/v1/clusters/{_seg(clusterName)}/namespaces/{_seg(ns_path)}/{_seg(resource_type)}/{_seg(resource_name)}",
             user_info=user_info
         )
 
@@ -656,7 +667,7 @@ class AnyCloudService:
         """쿠버네티스 리소스의 K8s Event 목록 (involvedObject 필터)"""
         ns_path = namespace if namespace else "-"
         return await self.generic_get(
-            path=f"/v1/clusters/{clusterName}/namespaces/{ns_path}/{resource_type}/{resource_name}/events",
+            path=f"/v1/clusters/{_seg(clusterName)}/namespaces/{_seg(ns_path)}/{_seg(resource_type)}/{_seg(resource_name)}/events",
             user_info=user_info
         )
 
@@ -664,7 +675,7 @@ class AnyCloudService:
         """쿠버네티스 리소스 재시작 (pods: delete / deployments+: rollout restart annotation)"""
         ns_path = namespace if namespace else "-"
         return await self.simple_post(
-            path=f"/v1/clusters/{clusterName}/namespaces/{ns_path}/{resource_type}/{resource_name}/restart",
+            path=f"/v1/clusters/{_seg(clusterName)}/namespaces/{_seg(ns_path)}/{_seg(resource_type)}/{_seg(resource_name)}/restart",
             user_info=user_info
         )
 
@@ -672,7 +683,7 @@ class AnyCloudService:
         """쿠버네티스 리소스 스케일 (replicas 변경) — deployments/replicasets/statefulsets"""
         ns_path = namespace if namespace else "-"
         return await self.simple_post(
-            path=f"/v1/clusters/{clusterName}/namespaces/{ns_path}/{resource_type}/{resource_name}/scale",
+            path=f"/v1/clusters/{_seg(clusterName)}/namespaces/{_seg(ns_path)}/{_seg(resource_type)}/{_seg(resource_name)}/scale",
             user_info=user_info,
             replicas=replicas
         )
@@ -680,7 +691,7 @@ class AnyCloudService:
     async def get_kubernetes_test(self, clusterName: str, user_info: dict) -> dict:
         """클러스터 연결 상태 확인"""
         return await self.simple_post(
-            path=f"/v1/clusters/{clusterName}/connectivity-checks",
+            path=f"/v1/clusters/{_seg(clusterName)}/connectivity-checks",
             user_info=user_info
         )
 
@@ -696,7 +707,7 @@ class AnyCloudService:
         """클러스터 수정"""
         logger.info(f"Sending data to Any Cloud: {data}")
         response = await self._make_request(
-            "PATCH", f"/v1/clusters/{cluster_id}", user_info=user_info, json=data
+            "PATCH", f"/v1/clusters/{_seg(cluster_id)}", user_info=user_info, json=data
         )
         if isinstance(response, dict) and "data" in response:
             return response["data"]
@@ -713,14 +724,14 @@ class AnyCloudService:
     async def delete_cluster(self, cluster_id: str, user_info: dict) -> dict:
         """클러스터 삭제"""
         return await self.generic_delete(
-            path=f"/v1/clusters/{cluster_id}",
+            path=f"/v1/clusters/{_seg(cluster_id)}",
             user_info=user_info
         )
 
     async def delete_helm_repo(self, helm_repo_name: str, user_info: dict) -> dict:
         """헬름 저장소 삭제"""
         return await self.generic_delete(
-            path=f"/v1/helm-repos/{helm_repo_name}",
+            path=f"/v1/helm-repos/{_seg(helm_repo_name)}",
             user_info=user_info
         )
 
@@ -737,7 +748,7 @@ class AnyCloudService:
         # backend 가 namespace 를 정규식으로 검증 — 빈 문자열 거절. 전체 namespace 는 '_all'.
         ns_query = namespace if namespace else "_all"
         response = await self.generic_get(
-            path=f"/v1/clusters/{clusterId}/helm-releases",
+            path=f"/v1/clusters/{_seg(clusterId)}/helm-releases",
             namespace=ns_query,
             user_info=user_info
         )
@@ -766,7 +777,7 @@ class AnyCloudService:
     ) -> AnyCloudPagedResponse:
         """Helm 차트 목록 조회"""
         response = await self.generic_get(
-            path=f"/v1/helm-repos/{repoName}/charts",
+            path=f"/v1/helm-repos/{_seg(repoName)}/charts",
             user_info=user_info
         )
 
@@ -791,7 +802,7 @@ class AnyCloudService:
         if version:
             params["version"] = version
         return await self.generic_get_unwrapped(
-            path=f"/v1/helm-repos/{repoName}/charts/{chartName}",
+            path=f"/v1/helm-repos/{_seg(repoName)}/charts/{_seg(chartName)}",
             user_info=user_info,
             **params
         )
@@ -802,7 +813,7 @@ class AnyCloudService:
         if version:
             params["version"] = version
         return await self.generic_get_unwrapped(
-            path=f"/v1/helm-repos/{repoName}/charts/{chartName}/readme",
+            path=f"/v1/helm-repos/{_seg(repoName)}/charts/{_seg(chartName)}/readme",
             user_info=user_info,
             **params
         )
@@ -810,7 +821,7 @@ class AnyCloudService:
     async def get_catalog_status(self, repoName: str, chartName: str, releaseName: str, clusterId: str, namespace: str, user_info: dict) -> dict:
         """릴리즈 상태 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/v1/clusters/{clusterId}/helm-releases/{releaseName}",
+            path=f"/v1/clusters/{_seg(clusterId)}/helm-releases/{_seg(releaseName)}",
             namespace=namespace,
             user_info=user_info
         )
@@ -821,7 +832,7 @@ class AnyCloudService:
         if version:
             params["version"] = version
         return await self.generic_get_unwrapped(
-            path=f"/v1/helm-repos/{repoName}/charts/{chartName}/values",
+            path=f"/v1/helm-repos/{_seg(repoName)}/charts/{_seg(chartName)}/values",
             user_info=user_info,
             **params
         )
@@ -829,7 +840,7 @@ class AnyCloudService:
     async def get_catalog_resources(self, clusterId: str, namespace: str, releaseName: str, user_info: dict) -> dict:
         """릴리즈 리소스 목록 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/v1/clusters/{clusterId}/helm-releases/{releaseName}/resources",
+            path=f"/v1/clusters/{_seg(clusterId)}/helm-releases/{_seg(releaseName)}/resources",
             namespace=namespace,
             user_info=user_info
         )
@@ -858,7 +869,7 @@ class AnyCloudService:
             deploy_data["valuesFile"] = base64.b64encode(valuesFile).decode('utf-8')
 
         return await self.generic_post_file(
-            path=f"/v1/clusters/{clusterId}/helm-releases",
+            path=f"/v1/clusters/{_seg(clusterId)}/helm-releases",
             data=deploy_data,
             user_info=user_info
         )
@@ -874,14 +885,14 @@ class AnyCloudService:
     async def get_operation(self, operation_id: str, user_info: dict) -> dict:
         """작업 단건 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/v1/operations/{operation_id}",
+            path=f"/v1/operations/{_seg(operation_id)}",
             user_info=user_info
         )
 
     async def cancel_operation(self, operation_id: str, user_info: dict) -> dict:
         """진행 중 작업 취소"""
         return await self.simple_post(
-            path=f"/v1/operations/{operation_id}/cancel",
+            path=f"/v1/operations/{_seg(operation_id)}/cancel",
             user_info=user_info
         )
 
@@ -911,14 +922,14 @@ class AnyCloudService:
     async def get_provider_regions(self, provider: str, user_info: dict) -> dict:
         """CSP 별 region 목록 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/v1/providers/{provider}/regions",
+            path=f"/v1/providers/{_seg(provider)}/regions",
             user_info=user_info
         )
 
     async def get_provider_specs(self, provider: str, user_info: dict, **query_params) -> dict:
         """CSP 별 VM spec 목록 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/v1/providers/{provider}/specs",
+            path=f"/v1/providers/{_seg(provider)}/specs",
             user_info=user_info,
             **query_params
         )
@@ -926,14 +937,14 @@ class AnyCloudService:
     async def get_provider_config_schema(self, provider: str, user_info: dict) -> dict:
         """CSP 별 클러스터 설정 스키마 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/v1/providers/{provider}/config-schema",
+            path=f"/v1/providers/{_seg(provider)}/config-schema",
             user_info=user_info
         )
 
     async def get_provider_images(self, provider: str, user_info: dict, **query_params) -> dict:
         """CSP 별 OS 이미지 목록 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/v1/providers/{provider}/images",
+            path=f"/v1/providers/{_seg(provider)}/images",
             user_info=user_info,
             **query_params
         )
@@ -949,7 +960,7 @@ class AnyCloudService:
     async def get_credential(self, credential_id: str, user_info: dict) -> dict:
         """CSP 자격증명 단건 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/v1/credentials/{credential_id}",
+            path=f"/v1/credentials/{_seg(credential_id)}",
             user_info=user_info
         )
 
@@ -964,7 +975,7 @@ class AnyCloudService:
     async def delete_credential(self, credential_id: str, user_info: dict) -> dict:
         """CSP 자격증명 삭제"""
         return await self.generic_delete(
-            path=f"/v1/credentials/{credential_id}",
+            path=f"/v1/credentials/{_seg(credential_id)}",
             user_info=user_info
         )
 
@@ -978,21 +989,21 @@ class AnyCloudService:
     async def list_cluster_addons(self, cluster_name: str, user_info: dict) -> dict:
         """클러스터에 설치된 애드온 목록 조회"""
         return await self.generic_get(
-            path=f"/v1/clusters/{cluster_name}/addons",
+            path=f"/v1/clusters/{_seg(cluster_name)}/addons",
             user_info=user_info
         )
 
     async def get_cluster_addon(self, cluster_name: str, addon_id: str, user_info: dict) -> dict:
         """애드온 단건 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/v1/clusters/{cluster_name}/addons/{addon_id}",
+            path=f"/v1/clusters/{_seg(cluster_name)}/addons/{_seg(addon_id)}",
             user_info=user_info
         )
 
     async def install_cluster_addon(self, cluster_name: str, data: dict, user_info: dict) -> dict:
         """애드온 설치"""
         return await self.generic_post(
-            path=f"/v1/clusters/{cluster_name}/addons",
+            path=f"/v1/clusters/{_seg(cluster_name)}/addons",
             data=data,
             user_info=user_info
         )
@@ -1000,21 +1011,21 @@ class AnyCloudService:
     async def uninstall_cluster_addon(self, cluster_name: str, addon_id: str, user_info: dict) -> dict:
         """애드온 제거"""
         return await self.generic_delete(
-            path=f"/v1/clusters/{cluster_name}/addons/{addon_id}",
+            path=f"/v1/clusters/{_seg(cluster_name)}/addons/{_seg(addon_id)}",
             user_info=user_info
         )
 
     async def retry_cluster_addon(self, cluster_name: str, addon_id: str, user_info: dict) -> dict:
         """실패한 애드온 재시도"""
         return await self.simple_post(
-            path=f"/v1/clusters/{cluster_name}/addons/{addon_id}/retry",
+            path=f"/v1/clusters/{_seg(cluster_name)}/addons/{_seg(addon_id)}/retry",
             user_info=user_info
         )
 
     async def install_helm_release(self, cluster_name: str, data: dict, user_info: dict) -> dict:
         """Helm 릴리즈 설치"""
         return await self.generic_post(
-            path=f"/v1/clusters/{cluster_name}/helm-releases",
+            path=f"/v1/clusters/{_seg(cluster_name)}/helm-releases",
             data=data,
             user_info=user_info
         )
@@ -1031,7 +1042,7 @@ class AnyCloudService:
         """클러스터 kubeconfig 다운로드 (YAML 텍스트)"""
         headers = self._get_headers(user_info)
         headers['Accept'] = 'application/yaml'
-        url = f"{self.base_url}/v1/clusters/{cluster_name}/kubeconfig"
+        url = f"{self.base_url}/v1/clusters/{_seg(cluster_name)}/kubeconfig"
         try:
             response = await self.client.get(url, headers=headers)
         except httpx.TimeoutException:
@@ -1047,7 +1058,7 @@ class AnyCloudService:
         """클러스터 agent 설치 manifest 다운로드 (YAML 텍스트)"""
         headers = self._get_headers(user_info)
         headers['Accept'] = 'application/yaml'
-        url = f"{self.base_url}/v1/clusters/{cluster_name}/agent-manifest.yaml"
+        url = f"{self.base_url}/v1/clusters/{_seg(cluster_name)}/agent-manifest.yaml"
         try:
             response = await self.client.get(url, headers=headers)
         except httpx.TimeoutException:
@@ -1062,7 +1073,7 @@ class AnyCloudService:
     async def get_cluster_health(self, cluster_name: str, user_info: dict) -> dict:
         """클러스터 종합 health 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/v1/clusters/{cluster_name}/health",
+            path=f"/v1/clusters/{_seg(cluster_name)}/health",
             user_info=user_info
         )
 
@@ -1077,7 +1088,7 @@ class AnyCloudService:
     async def get_cluster_operations(self, cluster_name: str, user_info: dict, **query_params) -> dict:
         """클러스터별 작업 이력 조회"""
         return await self.generic_get(
-            path=f"/v1/clusters/{cluster_name}/operations",
+            path=f"/v1/clusters/{_seg(cluster_name)}/operations",
             user_info=user_info,
             **query_params
         )
@@ -1085,7 +1096,7 @@ class AnyCloudService:
     async def get_cluster_state_history(self, cluster_name: str, user_info: dict, **query_params) -> dict:
         """VM 클러스터 workflow state 변경 이력"""
         return await self.generic_get(
-            path=f"/v1/clusters/{cluster_name}/state-history",
+            path=f"/v1/clusters/{_seg(cluster_name)}/state-history",
             user_info=user_info,
             **query_params
         )
@@ -1093,7 +1104,7 @@ class AnyCloudService:
     async def post_cluster_ssh_key(self, cluster_name: str, user_info: dict, data: Optional[dict] = None) -> dict:
         """VM 클러스터 SSH 키 발급/조회"""
         return await self.generic_post(
-            path=f"/v1/clusters/{cluster_name}/ssh-key",
+            path=f"/v1/clusters/{_seg(cluster_name)}/ssh-key",
             data=data or {},
             user_info=user_info
         )
@@ -1101,7 +1112,7 @@ class AnyCloudService:
     async def get_cluster_resource_kinds(self, cluster_name: str, user_info: dict) -> dict:
         """클러스터가 지원하는 K8s kind 목록"""
         return await self.generic_get(
-            path=f"/v1/clusters/{cluster_name}/resource-kinds",
+            path=f"/v1/clusters/{_seg(cluster_name)}/resource-kinds",
             user_info=user_info
         )
 
@@ -1110,14 +1121,14 @@ class AnyCloudService:
     async def get_observability_targets(self, cluster_name: str, user_info: dict) -> dict:
         """Prometheus scrape target 상태"""
         return await self.generic_get(
-            path=f"/v1/clusters/{cluster_name}/observability/targets",
+            path=f"/v1/clusters/{_seg(cluster_name)}/observability/targets",
             user_info=user_info
         )
 
     async def get_observability_alerts(self, cluster_name: str, user_info: dict, **query_params) -> dict:
         """발생 중 alert 목록"""
         return await self.generic_get(
-            path=f"/v1/clusters/{cluster_name}/observability/alerts",
+            path=f"/v1/clusters/{_seg(cluster_name)}/observability/alerts",
             user_info=user_info,
             **query_params
         )
@@ -1125,14 +1136,14 @@ class AnyCloudService:
     async def get_observability_alert_silences(self, cluster_name: str, user_info: dict) -> dict:
         """alert silence 목록"""
         return await self.generic_get(
-            path=f"/v1/clusters/{cluster_name}/observability/alert-silences",
+            path=f"/v1/clusters/{_seg(cluster_name)}/observability/alert-silences",
             user_info=user_info
         )
 
     async def create_observability_alert_silence(self, cluster_name: str, data: dict, user_info: dict) -> dict:
         """alert silence 생성"""
         return await self.generic_post(
-            path=f"/v1/clusters/{cluster_name}/observability/alert-silences",
+            path=f"/v1/clusters/{_seg(cluster_name)}/observability/alert-silences",
             data=data,
             user_info=user_info
         )
@@ -1140,7 +1151,7 @@ class AnyCloudService:
     async def delete_observability_alert_silence(self, cluster_name: str, silence_id: str, user_info: dict) -> dict:
         """alert silence 제거"""
         return await self.generic_delete(
-            path=f"/v1/clusters/{cluster_name}/observability/alert-silences/{silence_id}",
+            path=f"/v1/clusters/{_seg(cluster_name)}/observability/alert-silences/{_seg(silence_id)}",
             user_info=user_info
         )
 
@@ -1154,28 +1165,28 @@ class AnyCloudService:
     async def install_alert_rule(self, cluster_name: str, rule_set_id: str, user_info: dict) -> dict:
         """alert rule set 설치"""
         return await self.simple_post(
-            path=f"/v1/clusters/{cluster_name}/observability/alert-rules/{rule_set_id}",
+            path=f"/v1/clusters/{_seg(cluster_name)}/observability/alert-rules/{_seg(rule_set_id)}",
             user_info=user_info
         )
 
     async def install_all_alert_rules(self, cluster_name: str, user_info: dict) -> dict:
         """alert rule 전체 설치"""
         return await self.simple_post(
-            path=f"/v1/clusters/{cluster_name}/observability/alert-rules/install-all",
+            path=f"/v1/clusters/{_seg(cluster_name)}/observability/alert-rules/install-all",
             user_info=user_info
         )
 
     async def delete_alert_rule(self, cluster_name: str, rule_set_id: str, user_info: dict) -> dict:
         """alert rule set 제거"""
         return await self.generic_delete(
-            path=f"/v1/clusters/{cluster_name}/observability/alert-rules/{rule_set_id}",
+            path=f"/v1/clusters/{_seg(cluster_name)}/observability/alert-rules/{_seg(rule_set_id)}",
             user_info=user_info
         )
 
     async def get_observability_dashboard(self, cluster_name: str, user_info: dict) -> dict:
         """클러스터 대시보드 메타"""
         return await self.generic_get(
-            path=f"/v1/clusters/{cluster_name}/observability/dashboard",
+            path=f"/v1/clusters/{_seg(cluster_name)}/observability/dashboard",
             user_info=user_info
         )
 
@@ -1201,7 +1212,7 @@ class AnyCloudService:
     ) -> dict:
         """표준 metric — metric 종류: node-cpu / node-memory / namespace-cpu / namespace-memory / pod-phases / top-cpu"""
         return await self.generic_get_unwrapped(
-            path=f"/v1/clusters/{cluster_name}/metrics/standard/{metric}",
+            path=f"/v1/clusters/{_seg(cluster_name)}/metrics/standard/{_seg(metric)}",
             user_info=user_info,
             **query_params
         )
@@ -1227,7 +1238,7 @@ class AnyCloudService:
     async def operate_dead_letter_message(self, message_id: str, data: dict, user_info: dict) -> dict:
         """DLQ 메시지 처리 (재시도 / 폐기)"""
         return await self.generic_post(
-            path=f"/v1/workflow/dead-letter-messages/{message_id}/operations",
+            path=f"/v1/workflow/dead-letter-messages/{_seg(message_id)}/operations",
             data=data,
             user_info=user_info
         )
@@ -1237,28 +1248,28 @@ class AnyCloudService:
     async def admin_force_delete_cluster(self, cluster_name: str, user_info: dict) -> dict:
         """클러스터 강제 삭제 (admin)"""
         return await self.generic_delete(
-            path=f"/v1/admin/clusters/{cluster_name}/force",
+            path=f"/v1/admin/clusters/{_seg(cluster_name)}/force",
             user_info=user_info
         )
 
     async def admin_delete_orphan_state(self, stack_name: str, user_info: dict) -> dict:
         """오펀 Pulumi state 삭제 (admin)"""
         return await self.generic_delete(
-            path=f"/v1/admin/clusters/{stack_name}/orphan-state",
+            path=f"/v1/admin/clusters/{_seg(stack_name)}/orphan-state",
             user_info=user_info
         )
 
     async def admin_get_cluster_drift(self, cluster_name: str, user_info: dict) -> dict:
         """클러스터 drift 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/v1/admin/clusters/{cluster_name}/drift",
+            path=f"/v1/admin/clusters/{_seg(cluster_name)}/drift",
             user_info=user_info
         )
 
     async def admin_refresh_cluster_state(self, cluster_name: str, user_info: dict) -> dict:
         """클러스터 state 강제 갱신"""
         return await self.simple_post(
-            path=f"/v1/admin/clusters/{cluster_name}/refresh-state",
+            path=f"/v1/admin/clusters/{_seg(cluster_name)}/refresh-state",
             user_info=user_info
         )
 
@@ -1283,7 +1294,7 @@ class AnyCloudService:
     async def patch_cluster_upgrade_wave(self, cluster_name: str, data: dict, user_info: dict) -> dict:
         """클러스터 업그레이드 그룹 변경"""
         response = await self._make_request(
-            "PATCH", f"/v1/clusters/{cluster_name}/upgrade-wave", user_info=user_info, json=data
+            "PATCH", f"/v1/clusters/{_seg(cluster_name)}/upgrade-wave", user_info=user_info, json=data
         )
         if isinstance(response, dict) and "data" in response:
             return response["data"]
@@ -1292,7 +1303,7 @@ class AnyCloudService:
     async def trigger_cluster_upgrade(self, cluster_name: str, data: dict, user_info: dict) -> dict:
         """클러스터 업그레이드 실행"""
         return await self.generic_post(
-            path=f"/v1/clusters/{cluster_name}/upgrade",
+            path=f"/v1/clusters/{_seg(cluster_name)}/upgrade",
             data=data,
             user_info=user_info
         )
@@ -1369,7 +1380,7 @@ class AnyCloudService:
     async def admin_put_cluster_agent_policy(self, cluster_name: str, data: dict, user_info: dict) -> dict:
         """클러스터 에이전트 정책 적용"""
         return await self.generic_put(
-            path=f"/v1/admin/clusters/{cluster_name}/agent-policy",
+            path=f"/v1/admin/clusters/{_seg(cluster_name)}/agent-policy",
             data=data,
             user_info=user_info
         )
@@ -1377,7 +1388,7 @@ class AnyCloudService:
     async def admin_patch_cluster_agent_policy(self, cluster_name: str, data: dict, user_info: dict) -> dict:
         """클러스터 에이전트 정책 부분 변경"""
         response = await self._make_request(
-            "PATCH", f"/v1/admin/clusters/{cluster_name}/agent-policy", user_info=user_info, json=data
+            "PATCH", f"/v1/admin/clusters/{_seg(cluster_name)}/agent-policy", user_info=user_info, json=data
         )
         if isinstance(response, dict) and "data" in response:
             return response["data"]
@@ -1386,7 +1397,7 @@ class AnyCloudService:
     async def admin_reinstall_cluster_agent(self, cluster_name: str, data: dict, user_info: dict) -> dict:
         """클러스터 에이전트 재설치"""
         return await self.generic_post(
-            path=f"/v1/admin/clusters/{cluster_name}/agent/reinstall",
+            path=f"/v1/admin/clusters/{_seg(cluster_name)}/agent/reinstall",
             data=data,
             user_info=user_info
         )
@@ -1400,7 +1411,7 @@ class AnyCloudService:
         ns_path = namespace if namespace else "-"
         headers = self._get_headers(user_info)
         headers['Accept'] = 'text/plain'
-        url = f"{self.base_url}/v1/clusters/{cluster_name}/namespaces/{ns_path}/pods/{pod_name}/logs"
+        url = f"{self.base_url}/v1/clusters/{_seg(cluster_name)}/namespaces/{_seg(ns_path)}/pods/{_seg(pod_name)}/logs"
         try:
             response = await self.client.get(url, headers=headers, params=query_params)
         except httpx.TimeoutException:
@@ -1418,7 +1429,7 @@ class AnyCloudService:
         """쿠버네티스 리소스 생성 (apply JSON body)"""
         ns_path = namespace if namespace else "-"
         return await self.generic_post(
-            path=f"/v1/clusters/{clusterName}/namespaces/{ns_path}/{resource_type}",
+            path=f"/v1/clusters/{_seg(clusterName)}/namespaces/{_seg(ns_path)}/{_seg(resource_type)}",
             data=data,
             user_info=user_info
         )
