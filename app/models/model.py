@@ -48,7 +48,7 @@ class Model(Base):
     deleted_by = Column(String(50), nullable=True, comment="삭제자 member_id")
     is_active = Column(Boolean, default=True, nullable=False, comment="활성화 상태")
 
-    is_catalog = Column(Boolean, default=True, nullable=False, comment="모델 카탈로그 여부")
+    is_catalog = Column(Boolean, default=False, nullable=False, comment="MLOps visibility의 카탈로그 여부 캐시")
 
     # 추가 메타데이터 (JSON 형태로 확장 가능한 필드)
     metadatas = Column(Text, nullable=True, comment="추가 메타데이터 (JSON)")
@@ -66,7 +66,8 @@ class Model(Base):
 
         # 유니크 제약: 동일한 Surro 모델을 같은 사용자가 중복 매핑하는 것 방지
         Index('idx_models_unique_mapping', 'surro_model_id', 'created_by', unique=True,
-              postgresql_where=Column('deleted_at').is_(None)),
+              postgresql_where=Column('deleted_at').is_(None),
+              sqlite_where=Column('deleted_at').is_(None)),
 
         {'comment': '사용자별 Surro 모델 매핑 테이블'}
     )

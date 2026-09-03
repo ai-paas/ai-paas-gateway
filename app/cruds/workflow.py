@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 from sqlalchemy.orm import Session
@@ -28,7 +29,11 @@ class WorkflowCRUD:
 
     def get_workflow(self, db: Session, workflow_id: int) -> Optional[Workflow]:
         """내부 ID로 조회"""
-        return db.query(Workflow).filter(Workflow.id == workflow_id).first()
+        return db.query(Workflow).filter(
+            Workflow.id == workflow_id,
+            Workflow.deleted_at.is_(None),
+            Workflow.is_active.is_(True),
+        ).first()
 
     def get_workflow_by_surro_id(
             self,
@@ -37,7 +42,9 @@ class WorkflowCRUD:
     ) -> Optional[Workflow]:
         """외부 API ID로 조회"""
         return db.query(Workflow).filter(
-            Workflow.surro_workflow_id == surro_workflow_id
+            Workflow.surro_workflow_id == surro_workflow_id,
+            Workflow.deleted_at.is_(None),
+            Workflow.is_active.is_(True),
         ).first()
 
     def get_workflows(
@@ -50,7 +57,10 @@ class WorkflowCRUD:
             status: Optional[str] = None
     ) -> Tuple[List[Workflow], int]:
         """워크플로우 목록 조회"""
-        query = db.query(Workflow)
+        query = db.query(Workflow).filter(
+            Workflow.deleted_at.is_(None),
+            Workflow.is_active.is_(True),
+        )
 
         # 검색 조건 추가 (이름, 설명)
         if search:
@@ -67,7 +77,7 @@ class WorkflowCRUD:
         total = query.count()
 
         # 정렬 (최신순)
-        query = query.order_by(Workflow.created_at.desc())
+        query = query.order_by(Workflow.created_at.desc(), Workflow.id.desc())
 
         # 페이지네이션 적용 (skip, limit이 있을 때만)
         if skip is not None and limit is not None:
@@ -116,23 +126,65 @@ class WorkflowCRUD:
             db.refresh(db_workflow)
         return db_workflow
 
-    def delete_workflow(self, db: Session, workflow_id: int) -> bool:
-        """내부 ID로 워크플로우 삭제"""
+    def delete_workflow(
+            self, db: Session, workflow_id: int,
+            deleted_by: str = "system"
+    ) -> bool:
+        """내부 ID로 워크플로우 soft-delete."""
         db_workflow = self.get_workflow(db, workflow_id)
         if db_workflow:
-            db.delete(db_workflow)
+            db_workflow.deleted_at = datetime.now(timezone.utc)
+            db_workflow.deleted_by = deleted_by
+            db_workflow.is_active = False
             db.commit()
             return True
         return False
 
-    def delete_workflow_by_surro_id(self, db: Session, surro_workflow_id: str) -> bool:
-        """외부 ID로 워크플로우 삭제"""
+    def delete_workflow_by_surro_id(
+            self, db: Session, surro_workflow_id: str,
+            deleted_by: str = "system"
+    ) -> bool:
+        """외부 ID로 워크플로우 soft-delete."""
         db_workflow = self.get_workflow_by_surro_id(db, surro_workflow_id)
         if db_workflow:
-            db.delete(db_workflow)
+            db_workflow.deleted_at = datetime.now(timezone.utc)
+            db_workflow.deleted_by = deleted_by
+            db_workflow.is_active = False
             db.commit()
             return True
         return False
+
+    def soft_delete_missing_mappings(
+            self,
+            db: Session,
+            active_surro_workflow_ids: List[str],
+            deleted_by: str = "system",
+    ) -> int:
+        """외부 목록에 없는 활성 매핑을 soft-delete 한다.
+
+        목록 조회 라우트는 원격 장애나 service/status 필터가 만든 빈 결과로
+        멀쩡한 매핑을 지울 수 있어 이 작업을 하지 않는다. 호출자는 필터 없는
+        전체 목록을 넘겨야 한다.
+        """
+        active_id_set = set(active_surro_workflow_ids)
+        targets = db.query(Workflow).filter(
+            Workflow.deleted_at.is_(None),
+            Workflow.is_active == True,
+        ).all()
+
+        now = datetime.now(timezone.utc)
+        deleted_count = 0
+        for workflow in targets:
+            if workflow.surro_workflow_id in active_id_set:
+                continue
+            workflow.is_active = False
+            workflow.deleted_at = now
+            workflow.deleted_by = deleted_by
+            deleted_count += 1
+
+        if deleted_count:
+            db.commit()
+        return deleted_count
 
 
 # 전역 CRUD 인스턴스

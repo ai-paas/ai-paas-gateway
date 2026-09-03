@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, List, NoReturn, Optional
 
 import httpx
 from fastapi import HTTPException, UploadFile
@@ -17,9 +17,56 @@ from app.schemas.workflow import (
     WorkflowExecuteResponse,
     WorkflowTestResponse,
     WorkflowValidateResponse,
+    WorkflowProteinClassificationTestResponse,
+    WorkflowFillMaskTestResponse,
+    WorkflowProteinStructurePredictionTestResponse,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _upstream_error_detail(response: httpx.Response) -> Any:
+    try:
+        error_body = response.json()
+    except ValueError:
+        error_body = None
+    detail = error_body.get("detail") if isinstance(error_body, dict) else None
+    return detail if isinstance(detail, (str, list, dict)) else "upstream request rejected"
+
+
+def _raise_workflow_proxy_error(
+        response: httpx.Response,
+        operation: str,
+) -> NoReturn:
+    """일반 workflow proxy 오류를 상태·구조를 보존해 변환한다."""
+    if 400 <= response.status_code < 500:
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=_upstream_error_detail(response),
+        )
+    logger.error("upstream error: %s, status=%s", operation, response.status_code)
+    raise HTTPException(status_code=502, detail="upstream service error")
+
+
+def _raise_workflow_upstream_error(
+        response: httpx.Response,
+        operation: str,
+) -> NoReturn:
+    """워크플로우 추론 upstream 오류를 gateway HTTP 계약으로 변환."""
+    if (
+        response.status_code < 400
+        or response.status_code == 401
+        or response.status_code >= 500
+    ):
+        logger.error(
+            f"upstream error: {operation}, status={response.status_code}"
+        )
+        raise HTTPException(status_code=502, detail="upstream service error")
+
+    raise HTTPException(
+        status_code=response.status_code,
+        detail=_upstream_error_detail(response),
+    )
 
 
 class WorkflowService:
@@ -65,9 +112,17 @@ class WorkflowService:
                     self.token_expires_at = datetime.now() + timedelta(seconds=expires_in - 300)
                     return access_token
             raise HTTPException(status_code=response.status_code, detail="Authentication failed")
-        except Exception as e:
-            logger.error(f"Authentication error: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Authentication failed: {str(e)}")
+        except HTTPException:
+            raise
+        except httpx.TimeoutException as e:
+            logger.warning("MLOps authentication timeout: %r", e)
+            raise HTTPException(status_code=504, detail="upstream service timeout")
+        except httpx.RequestError as e:
+            logger.error("MLOps authentication request failed: %s", e)
+            raise HTTPException(status_code=502, detail="upstream connection error")
+        except Exception:
+            logger.exception("Unexpected MLOps authentication error")
+            raise HTTPException(status_code=500, detail="internal server error")
 
     async def _get_valid_token(self) -> str:
         async with self._auth_lock:
@@ -89,24 +144,33 @@ class WorkflowService:
 
     async def _make_authenticated_request(self, method: str, url: str, user_info: Optional[Dict] = None,
                                           **kwargs) -> httpx.Response:
-        token = await self._get_valid_token()
-        headers = self._get_headers(user_info)
-        headers['Authorization'] = f"Bearer {token}"
-
-        if 'headers' in kwargs:
-            kwargs['headers'].update(headers)
-        else:
-            kwargs['headers'] = headers
-
-        response = await getattr(self.client, method.lower())(url, **kwargs)
-
-        if response.status_code == 401:
-            self.access_token = None
+        try:
             token = await self._get_valid_token()
-            kwargs['headers']['Authorization'] = f"Bearer {token}"
+            headers = self._get_headers(user_info)
+            headers['Authorization'] = f"Bearer {token}"
+
+            if 'headers' in kwargs:
+                kwargs['headers'].update(headers)
+            else:
+                kwargs['headers'] = headers
+
             response = await getattr(self.client, method.lower())(url, **kwargs)
 
-        return response
+            if response.status_code == 401:
+                self.access_token = None
+                token = await self._get_valid_token()
+                kwargs['headers']['Authorization'] = f"Bearer {token}"
+                response = await getattr(self.client, method.lower())(url, **kwargs)
+
+            return response
+        except HTTPException:
+            raise
+        except httpx.TimeoutException as e:
+            logger.warning("MLOps workflow request timeout: %s %s: %r", method, url, e)
+            raise HTTPException(status_code=504, detail="upstream service timeout")
+        except httpx.RequestError as e:
+            logger.error("MLOps workflow request failed: %s %s: %s", method, url, e)
+            raise HTTPException(status_code=502, detail="upstream connection error")
 
     # ===== Workflow Definition 검증 (MLOps v2) =====
 
@@ -129,7 +193,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return WorkflowValidateResponse(**response.json())
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -166,7 +230,7 @@ class WorkflowService:
             if response.status_code in [200, 201]:
                 workflow_data = response.json()
                 return ExternalWorkflowDetailResponse(**workflow_data)
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -201,7 +265,7 @@ class WorkflowService:
                 elif isinstance(data, list):
                     return [ExternalWorkflowBriefResponse(**item) for item in data]
                 return []
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -220,7 +284,7 @@ class WorkflowService:
                 return ExternalWorkflowDetailResponse(**response.json())
             elif response.status_code == 404:
                 return None
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -262,7 +326,7 @@ class WorkflowService:
                 return ExternalWorkflowDetailResponse(**response.json())
             elif response.status_code == 404:
                 return None
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -281,7 +345,7 @@ class WorkflowService:
                 return response.json()
             elif response.status_code == 404:
                 raise HTTPException(status_code=404, detail="Workflow not found")
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -289,13 +353,11 @@ class WorkflowService:
             raise HTTPException(status_code=500, detail=str(e))
 
     async def finalize_deletion(
-            self, workflow_id: str, run_id: Optional[str] = None,
-            user_info: Optional[Dict] = None
+            self, workflow_id: str, user_info: Optional[Dict] = None
     ) -> Dict[str, Any]:
         """워크플로우 삭제 완료 처리
 
-        MLOps v2 spec은 query parameter `run_id`를 받지 않는다.
-        호환성 차원에서 인자는 유지하되 외부에는 전달하지 않는다.
+        MLOps v2 spec은 query parameter를 받지 않는다.
         """
         try:
             url = f"{self.base_url}/workflows/{workflow_id}/finalize-deletion"
@@ -303,7 +365,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -313,13 +375,11 @@ class WorkflowService:
     # ===== Workflow 실행 =====
 
     async def execute_workflow(
-            self, workflow_id: str, parameters: Optional[Dict[str, Any]] = None,
-            user_info: Optional[Dict] = None
+            self, workflow_id: str, user_info: Optional[Dict] = None
     ) -> WorkflowExecuteResponse:
         """워크플로우 실행
 
-        MLOps v2 spec은 request body 없이 호출. parameters 인자는 게이트웨이
-        호환성을 위해 시그니처에 남겨두지만 외부에는 전달하지 않는다.
+        MLOps v2 spec에 따라 request body 없이 호출한다.
         """
         try:
             url = f"{self.base_url}/workflows/{workflow_id}/execute"
@@ -328,7 +388,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return WorkflowExecuteResponse(**response.json())
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -347,7 +407,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -364,7 +424,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -383,7 +443,7 @@ class WorkflowService:
 
             if response.status_code in [200, 202]:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -391,17 +451,16 @@ class WorkflowService:
             raise HTTPException(status_code=500, detail=str(e))
 
     async def finalize_cleanup(
-            self, workflow_id: str, run_id: str, user_info: Optional[Dict] = None
+            self, workflow_id: str, user_info: Optional[Dict] = None
     ) -> Dict[str, Any]:
         """워크플로우 정리 완료 처리"""
         try:
             url = f"{self.base_url}/workflows/{workflow_id}/finalize-cleanup"
-            params = {"run_id": run_id}
-            response = await self._make_authenticated_request("POST", url, user_info=user_info, params=params)
+            response = await self._make_authenticated_request("POST", url, user_info=user_info)
 
             if response.status_code == 200:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -422,12 +481,18 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return WorkflowTestResponse(**response.json())
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_upstream_error(response, "rag")
         except HTTPException:
             raise
-        except Exception as e:
-            logger.error(f"Error testing RAG workflow: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
+        except httpx.TimeoutException:
+            logger.warning(f"upstream timeout: rag, workflow_id={workflow_id}")
+            raise HTTPException(status_code=504, detail="upstream service timeout")
+        except httpx.RequestError as e:
+            logger.error(f"upstream request failed: rag, {e}")
+            raise HTTPException(status_code=502, detail="upstream connection error")
+        except Exception:
+            logger.exception(f"Error testing RAG workflow: {workflow_id}")
+            raise HTTPException(status_code=500, detail="internal server error")
 
     async def test_ml_workflow(
             self, workflow_id: str, image: UploadFile, user_info: Optional[Dict] = None
@@ -441,12 +506,117 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return WorkflowTestResponse(**response.json())
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_upstream_error(response, "ml")
         except HTTPException:
             raise
-        except Exception as e:
-            logger.error(f"Error testing ML workflow: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
+        except httpx.TimeoutException:
+            logger.warning(f"upstream timeout: ml, workflow_id={workflow_id}")
+            raise HTTPException(status_code=504, detail="upstream service timeout")
+        except httpx.RequestError as e:
+            logger.error(f"upstream request failed: ml, {e}")
+            raise HTTPException(status_code=502, detail="upstream connection error")
+        except Exception:
+            logger.exception(f"Error testing ML workflow: {workflow_id}")
+            raise HTTPException(status_code=500, detail="internal server error")
+
+    # ===== BFM(task 기반) 추론 (api-spec 2026-07-01) =====
+    # upstream은 세 엔드포인트 모두 application/json 을 받는다 (rag=form, ml=multipart 과 다름).
+    # 추론이 느릴 수 있어(특히 ESMFold2) TimeoutException 은 504 로 매핑한다.
+
+    async def test_protein_classification_workflow(
+            self, workflow_id: str, epitope: str, cdr3b: str,
+            user_info: Optional[Dict] = None
+    ) -> WorkflowProteinClassificationTestResponse:
+        """BFM protein-classification 워크플로우 테스트 (TCR-Epitope 결합 이진 분류)."""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}/test/protein-classification"
+            payload = {"epitope": epitope, "cdr3b": cdr3b}
+
+            response = await self._make_authenticated_request(
+                "POST", url, user_info=user_info, json=payload
+            )
+
+            if response.status_code == 200:
+                return WorkflowProteinClassificationTestResponse(**response.json())
+            _raise_workflow_upstream_error(response, "protein-classification")
+        except HTTPException:
+            raise
+        except httpx.TimeoutException:
+            logger.warning(f"upstream timeout: protein-classification, workflow_id={workflow_id}")
+            raise HTTPException(status_code=504, detail="upstream service timeout")
+        except httpx.RequestError as e:
+            logger.error(f"upstream request failed: protein-classification, {e}")
+            raise HTTPException(status_code=502, detail="upstream connection error")
+        except Exception:
+            logger.exception(f"Error testing protein-classification workflow: {workflow_id}")
+            raise HTTPException(status_code=500, detail="internal server error")
+
+    async def test_fill_mask_workflow(
+            self, workflow_id: str, sequence: str, top_k: Optional[int] = 5,
+            user_info: Optional[Dict] = None
+    ) -> WorkflowFillMaskTestResponse:
+        """BFM fill-mask 워크플로우 테스트 (마스크 위치별 top-k 토큰 예측)."""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}/test/fill-mask"
+            payload = {"sequence": sequence, "top_k": top_k}
+
+            response = await self._make_authenticated_request(
+                "POST", url, user_info=user_info, json=payload
+            )
+
+            if response.status_code == 200:
+                return WorkflowFillMaskTestResponse(**response.json())
+            _raise_workflow_upstream_error(response, "fill-mask")
+        except HTTPException:
+            raise
+        except httpx.TimeoutException:
+            logger.warning(f"upstream timeout: fill-mask, workflow_id={workflow_id}")
+            raise HTTPException(status_code=504, detail="upstream service timeout")
+        except httpx.RequestError as e:
+            logger.error(f"upstream request failed: fill-mask, {e}")
+            raise HTTPException(status_code=502, detail="upstream connection error")
+        except Exception:
+            logger.exception(f"Error testing fill-mask workflow: {workflow_id}")
+            raise HTTPException(status_code=500, detail="internal server error")
+
+    async def test_protein_structure_prediction_workflow(
+            self, workflow_id: str, sequence: str, num_loops: Optional[int] = 3,
+            num_sampling_steps: Optional[int] = 50, user_info: Optional[Dict] = None
+    ) -> WorkflowProteinStructurePredictionTestResponse:
+        """BFM protein-structure-prediction 워크플로우 테스트 (ESMFold2 3D 구조 예측)."""
+        try:
+            url = f"{self.base_url}/workflows/{workflow_id}/test/protein-structure-prediction"
+            payload = {
+                "sequence": sequence,
+                "num_loops": num_loops,
+                "num_sampling_steps": num_sampling_steps,
+            }
+
+            response = await self._make_authenticated_request(
+                "POST",
+                url,
+                user_info=user_info,
+                json=payload,
+                timeout=httpx.Timeout(
+                    timeout=settings.PROXY_STRUCTURE_PREDICTION_TIMEOUT,
+                    connect=settings.PROXY_CONNECT_TIMEOUT,
+                ),
+            )
+
+            if response.status_code == 200:
+                return WorkflowProteinStructurePredictionTestResponse(**response.json())
+            _raise_workflow_upstream_error(response, "protein-structure-prediction")
+        except HTTPException:
+            raise
+        except httpx.TimeoutException:
+            logger.warning(f"upstream timeout: protein-structure-prediction, workflow_id={workflow_id}")
+            raise HTTPException(status_code=504, detail="upstream service timeout")
+        except httpx.RequestError as e:
+            logger.error(f"upstream request failed: protein-structure-prediction, {e}")
+            raise HTTPException(status_code=502, detail="upstream connection error")
+        except Exception:
+            logger.exception(f"Error testing protein-structure-prediction workflow: {workflow_id}")
+            raise HTTPException(status_code=500, detail="internal server error")
 
     # ===== Template 관련 =====
 
@@ -468,7 +638,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -487,7 +657,7 @@ class WorkflowService:
                 return response.json()
             elif response.status_code == 404:
                 return None
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -513,7 +683,7 @@ class WorkflowService:
 
             if response.status_code in [200, 201]:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -544,7 +714,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -563,7 +733,7 @@ class WorkflowService:
                 return True
             elif response.status_code == 404:
                 return False
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -590,7 +760,7 @@ class WorkflowService:
 
             if response.status_code in [200, 201]:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -609,7 +779,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:
@@ -642,7 +812,7 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return response.json()
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise
         except Exception as e:

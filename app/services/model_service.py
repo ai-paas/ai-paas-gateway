@@ -9,10 +9,98 @@ from fastapi import HTTPException, status
 from app.config import settings
 from app.schemas.model import (
     ModelCreateRequest, ModelUpdate, ModelResponse,
-    ModelCreateResponse
+    ModelCreateResponse, ModelFileDownloadUrlResponse,
+    ModelFileListResponse,
 )
 
 logger = logging.getLogger(__name__)
+
+_MODEL_FILE_MAX_CURSOR_PAGES = 100
+
+
+def _model_upstream_error_detail(response: httpx.Response) -> Any:
+    try:
+        error_body = response.json()
+    except ValueError:
+        error_body = None
+    detail = error_body.get("detail") if isinstance(error_body, dict) else None
+    return detail if isinstance(detail, (str, list, dict)) else "upstream request rejected"
+
+
+def _raise_model_file_upstream_error(
+        response: httpx.Response,
+        model_id: int,
+        operation: str,
+) -> None:
+    """모델 파일 API의 upstream 오류를 Gateway 표준 상태로 변환."""
+    if (
+            response.status_code < 400
+            or response.status_code == status.HTTP_401_UNAUTHORIZED
+            or response.status_code >= 500
+    ):
+        logger.error(
+            "upstream error %s model files: model_id=%s, status=%s",
+            operation,
+            model_id,
+            response.status_code,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="upstream service error",
+        )
+    raise HTTPException(
+        status_code=response.status_code,
+        detail=_model_upstream_error_detail(response),
+    )
+
+
+def normalize_visibility(value: Any) -> Optional[str]:
+    """MLOps visibility 값을 'CATALOG'/'CUSTOM'으로 정규화. 빈값/미지원 값은 None."""
+    if not isinstance(value, str):
+        return None
+    upper = value.strip().upper()
+    return upper if upper in ("CATALOG", "CUSTOM") else None
+
+
+def collect_relation_model_ids(model: ModelResponse) -> set:
+    """parent_model 체인 + child_models 트리의 모든 모델 id 수집."""
+    ids: set = set()
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        nid = node.get("id")
+        if isinstance(nid, int):
+            ids.add(nid)
+        for child in (node.get("child_models") or []):
+            walk(child)
+        walk(node.get("parent_model"))
+
+    walk(model.parent_model)
+    for child in (model.child_models or []):
+        walk(child)
+    return ids
+
+
+def _inject_relation_visibility(node: Any, vis_map: Dict[int, Optional[str]]) -> None:
+    """node 및 하위 트리의 각 dict에 visibility 키 주입 (조회 실패분은 None)."""
+    if not isinstance(node, dict):
+        return
+    node["visibility"] = vis_map.get(node.get("id"))
+    for child in (node.get("child_models") or []):
+        _inject_relation_visibility(child, vis_map)
+    _inject_relation_visibility(node.get("parent_model"), vis_map)
+
+
+def apply_relation_visibility(
+        model: ModelResponse,
+        visibility_by_id: Dict[int, Optional[str]],
+) -> ModelResponse:
+    """gateway DB 매핑에서 계산한 visibility를 관계 노드에 주입."""
+    _inject_relation_visibility(model.parent_model, visibility_by_id)
+    for child in (model.child_models or []):
+        _inject_relation_visibility(child, visibility_by_id)
+    return model
 
 
 class ModelService:
@@ -86,7 +174,7 @@ class ModelService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout during authentication: {str(e)}")
+            logger.error(f"Timeout during authentication: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="Authentication service timeout"
@@ -253,7 +341,7 @@ class ModelService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout getting models: {str(e)}")
+            logger.error(f"Timeout getting models: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -330,26 +418,237 @@ class ModelService:
                 return ModelResponse(**model_data)
             elif response.status_code == 404:
                 return None
-            else:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Failed to get model: {response.text}"
+            elif (
+                response.status_code < 400
+                or response.status_code == 401
+                or response.status_code >= 500
+            ):
+                logger.error(
+                    f"upstream error getting model {model_id}: status={response.status_code}"
                 )
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="upstream service error",
+                )
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=_model_upstream_error_detail(response),
+            )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout getting model {model_id}: {str(e)}")
+            logger.error(f"Timeout getting model {model_id}: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
             )
         except HTTPException:
             raise
-        except Exception as e:
-            logger.error(f"Error getting model {model_id}: {str(e)}")
+        except httpx.RequestError as e:
+            logger.error(f"upstream request failed getting model {model_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="upstream connection error",
+            )
+        except Exception:
+            logger.exception(f"Error getting model {model_id}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Internal error: {str(e)}"
+                detail="internal server error",
             )
+
+    async def _request_model_file_api(
+            self,
+            model_id: int,
+            path_suffix: str,
+            params: Dict[str, str],
+            response_schema,
+            operation: str,
+            user_info: Optional[Dict[str, str]] = None,
+    ) -> Any:
+        """모델 파일 API 공통 요청·응답 검증."""
+        try:
+            url = f"{self.base_url}/models/{model_id}/{path_suffix}"
+            response = await self._make_authenticated_request(
+                "GET",
+                url,
+                user_info=user_info,
+                params=params,
+            )
+
+            if response.status_code != status.HTTP_200_OK:
+                _raise_model_file_upstream_error(response, model_id, operation)
+
+            try:
+                return response_schema.model_validate(response.json())
+            except ValueError:
+                logger.error(
+                    "invalid upstream model file %s response: model_id=%s",
+                    operation,
+                    model_id,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="invalid upstream response",
+                )
+
+        except httpx.TimeoutException as e:
+            logger.error("Timeout during model file %s %s: %r", operation, model_id, e)
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="upstream service timeout",
+            )
+        except HTTPException:
+            raise
+        except httpx.RequestError as e:
+            logger.error(
+                "upstream request failed during model file %s %s: %s",
+                operation,
+                model_id,
+                e,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="upstream connection error",
+            )
+        except Exception:
+            logger.exception("unexpected model file %s error %s", operation, model_id)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="internal server error",
+            )
+
+    async def get_model_files(
+            self,
+            model_id: int,
+            cursor: Optional[str] = None,
+            user_info: Optional[Dict[str, str]] = None,
+    ) -> ModelFileListResponse:
+        """모델 저장 파일 목록 조회. cursor는 해석하지 않고 그대로 전달한다."""
+        params = {"cursor": cursor} if cursor is not None else {}
+        result = await self._request_model_file_api(
+            model_id=model_id,
+            path_suffix="files",
+            params=params,
+            response_schema=ModelFileListResponse,
+            operation="listing",
+            user_info=user_info,
+        )
+        if result.model_id != model_id:
+            logger.error(
+                "upstream model file list id mismatch: requested=%s, returned=%s",
+                model_id,
+                result.model_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="invalid upstream response",
+            )
+        return result
+
+    async def get_all_model_files(
+            self,
+            model_id: int,
+            user_info: Optional[Dict[str, str]] = None,
+    ) -> ModelFileListResponse:
+        """MLOps cursor를 모두 수집해 Gateway 페이지네이션용 목록으로 변환."""
+        first_page: Optional[ModelFileListResponse] = None
+        files = []
+        file_names = set()
+        seen_cursors = set()
+        cursor = None
+
+        # ponytail: 전체 건수 계산 중 비정상 upstream cursor의 무한 순회를 100페이지에서 차단한다.
+        # Upgrade: 정상 모델이 100,000개 초과 파일을 가지면 MLOps total/page API로 교체한다.
+        for _ in range(_MODEL_FILE_MAX_CURSOR_PAGES):
+            page = await self.get_model_files(
+                model_id=model_id,
+                cursor=cursor,
+                user_info=user_info,
+            )
+            if first_page is None:
+                first_page = page
+            elif (
+                    page.model_name != first_page.model_name
+                    or page.storage_type != first_page.storage_type
+                    or page.location != first_page.location
+            ):
+                logger.error(
+                    "inconsistent upstream model file page metadata: model_id=%s",
+                    model_id,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="invalid upstream response",
+                )
+
+            for file in page.files:
+                if file.name in file_names:
+                    logger.error(
+                        "duplicate upstream model file name: model_id=%s, name=%s",
+                        model_id,
+                        file.name,
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail="invalid upstream response",
+                    )
+                file_names.add(file.name)
+                files.append(file)
+
+            next_cursor = page.next_cursor
+            if next_cursor is None:
+                return ModelFileListResponse(
+                    model_id=page.model_id,
+                    model_name=first_page.model_name,
+                    storage_type=first_page.storage_type,
+                    location=first_page.location,
+                    files=files,
+                    next_cursor=None,
+                    message=first_page.message if not files else None,
+                )
+            if not next_cursor or next_cursor in seen_cursors:
+                logger.error(
+                    "invalid or repeated upstream model file cursor: model_id=%s",
+                    model_id,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="invalid upstream response",
+                )
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
+        logger.error("upstream model file cursor page limit exceeded: model_id=%s", model_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="invalid upstream response",
+        )
+
+    async def get_model_file_download_url(
+            self,
+            model_id: int,
+            name: str,
+            user_info: Optional[Dict[str, str]] = None,
+    ) -> ModelFileDownloadUrlResponse:
+        """모델 파일의 5분짜리 스토리지 서명 URL 발급."""
+        result = await self._request_model_file_api(
+            model_id=model_id,
+            path_suffix="files/download-url",
+            params={"name": name},
+            response_schema=ModelFileDownloadUrlResponse,
+            operation="signing",
+            user_info=user_info,
+        )
+        if result.model_id != model_id or result.name != name:
+            logger.error(
+                "upstream model file download identity mismatch: model_id=%s",
+                model_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="invalid upstream response",
+            )
+        return result
 
     async def create_model(
             self,
@@ -365,13 +664,14 @@ class ModelService:
             # multipart/form-data로 전송할 데이터 준비
             data = {
                 "name": model_data.name,
-                "repo_id": model_data.repo_id,
                 "provider_id": str(model_data.provider_id),
                 "type_id": str(model_data.type_id),
                 "format_id": str(model_data.format_id)
             }
 
             # Optional 필드 추가
+            if model_data.repo_id:
+                data["repo_id"] = model_data.repo_id
             if model_data.description:
                 data["description"] = model_data.description
             if model_data.parent_model_id:
@@ -415,7 +715,7 @@ class ModelService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout creating model: {str(e)}")
+            logger.error(f"Timeout creating model: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -462,7 +762,7 @@ class ModelService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout updating model {model_id}: {str(e)}")
+            logger.error(f"Timeout updating model {model_id}: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -502,7 +802,7 @@ class ModelService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout deleting model {model_id}: {str(e)}")
+            logger.error(f"Timeout deleting model {model_id}: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -551,7 +851,7 @@ class ModelService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout testing model {model_id}: {str(e)}")
+            logger.error(f"Timeout testing model {model_id}: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -601,7 +901,7 @@ class ModelService:
         except HTTPException:
             raise
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout getting model types: {str(e)}")
+            logger.error(f"Timeout getting model types: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -649,7 +949,7 @@ class ModelService:
         except HTTPException:
             raise
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout getting model providers: {str(e)}")
+            logger.error(f"Timeout getting model providers: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -689,7 +989,7 @@ class ModelService:
             )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout auto-generating model: {str(e)}")
+            logger.error(f"Timeout auto-generating model: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -743,7 +1043,7 @@ class ModelService:
             )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout updating base deployment status: {str(e)}")
+            logger.error(f"Timeout updating base deployment status: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -793,7 +1093,7 @@ class ModelService:
         except HTTPException:
             raise
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout getting model formats: {str(e)}")
+            logger.error(f"Timeout getting model formats: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"

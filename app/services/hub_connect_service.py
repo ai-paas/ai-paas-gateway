@@ -99,6 +99,20 @@ class HubConnectService:
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="Hub authentication service timeout"
             )
+        except httpx.ConnectError as e:
+            logger.error(f"Connection error during hub authentication: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Hub authentication service unavailable"
+            )
+        except httpx.RequestError as e:
+            logger.error(f"Request error during hub authentication: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Hub authentication request failed"
+            )
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Hub authentication error: {str(e)}")
             raise HTTPException(

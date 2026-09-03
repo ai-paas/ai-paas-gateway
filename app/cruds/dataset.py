@@ -18,7 +18,11 @@ class DatasetCRUD:
     def get_dataset(self, db: Session, dataset_id: int) -> Optional[Dataset]:
         """ID로 데이터셋 매핑 조회"""
         return db.query(Dataset).filter(
-            and_(Dataset.id == dataset_id, Dataset.deleted_at.is_(None))
+            and_(
+                Dataset.id == dataset_id,
+                Dataset.deleted_at.is_(None),
+                Dataset.is_active == True,
+            )
         ).first()
 
     def get_datasets_count_by_member(
@@ -168,7 +172,8 @@ class DatasetCRUD:
             and_(
                 Dataset.surro_dataset_id == surro_dataset_id,
                 Dataset.created_by == member_id,
-                Dataset.deleted_at.is_(None)
+                Dataset.deleted_at.is_(None),
+                Dataset.is_active == True,
             )
         ).first()
 
@@ -226,20 +231,12 @@ class DatasetCRUD:
             dataset_name: str = None,
             dataset_description: str = None
     ) -> Dataset:
-        """삭제 여부와 관계없이 매핑을 생성하거나 재활성화한다."""
-        existing = db.query(Dataset).filter(
-            and_(
-                Dataset.surro_dataset_id == surro_dataset_id,
-                Dataset.created_by == member_id
-            )
-        ).order_by(Dataset.id.desc()).first()
+        """활성 매핑을 갱신하거나 soft-delete 이력을 보존한 새 행을 만든다."""
+        existing = self.get_dataset_by_surro_id(db, surro_dataset_id, member_id)
 
         if existing:
             existing.name = dataset_name
             existing.description = dataset_description
-            existing.is_active = True
-            existing.deleted_at = None
-            existing.deleted_by = None
             existing.updated_by = member_id
             existing.updated_at = datetime.utcnow()
             db.commit()
@@ -329,7 +326,8 @@ class DatasetCRUD:
             and_(
                 Dataset.name == name,
                 Dataset.created_by == member_id,
-                Dataset.deleted_at.is_(None)
+                Dataset.deleted_at.is_(None),
+                Dataset.is_active == True,
             )
         ).first()
 

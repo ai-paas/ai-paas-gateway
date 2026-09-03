@@ -1,13 +1,43 @@
 from datetime import datetime
+from enum import Enum
 from typing import List, Optional, Dict, Any, TYPE_CHECKING
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import AnyHttpUrl, AwareDatetime, BaseModel, Field, ConfigDict, model_validator
 
 # 타입 체킹할 때만 import (순환 참조 방지)
 if TYPE_CHECKING:
     pass
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+
+class PredefinedModelKey(str, Enum):
+    """MLOps가 지원하는 사전 정의 모델 키."""
+
+    YOLOS_TINY = "hustvl/yolos-tiny"
+    YOLOS_SMALL = "hustvl/yolos-small"
+    DETR_RESNET_50 = "facebook/detr-resnet-50"
+    DETR_RESNET_101 = "facebook/detr-resnet-101"
+    RF_DETR_LARGE = "Roboflow/rf-detr-large"
+    RF_DETR_MEDIUM = "Roboflow/rf-detr-medium"
+    MEDLLAMA3 = "ahmgam/medllama3-v20:latest"
+    BGE_M3 = "bge-m3"
+    ESM2_8M = "facebook/esm2_t6_8M_UR50D"
+    RNAFM = "multimolecule/rnafm"
+    MOLFORMER = "ibm-research/MoLFormer-XL-both-10pct"
+    ESMC_300M = "biohub/ESMC-300M"
+    ESMC_6B = "biohub/ESMC-6B"
+    ESMFOLD2 = "biohub/ESMFold2"
+    YOLOX_S = "yolox_s"
+    YOLOX_M = "yolox_m"
+    QWQ_32B = "qwq:32b"
+    GPT_OSS_20B = "gpt-oss:20b"
+    DEEPSEEK_R1_32B = "deepseek-r1:32b"
+    GRANITE_4_1_30B = "granite4.1:30b"
+    LFM2_24B = "lfm2:24b"
+    GEMMA4_27B = "gemma4:27b"
+    QWEN3_6_27B = "qwen3.6:27b"
+    NEMOTRON3_33B = "nemotron3:33b"
 
 
 class ProviderInfo(BaseModel):
@@ -70,12 +100,19 @@ class ModelCreateRequest(BaseModel):
 
     name: str = Field(..., description="모델 이름")
     description: Optional[str] = Field(None, description="모델 설명")
-    repo_id: str = Field(..., description="모델 저장소 ID")
+    repo_id: Optional[str] = Field(None, description="모델 저장소 ID")
     provider_id: int = Field(..., description="프로바이더 ID")
     type_id: int = Field(..., description="모델 타입 ID")
     format_id: int = Field(..., description="모델 포맷 ID")
     parent_model_id: Optional[int] = Field(None, description="부모 모델 ID (내부 시스템 전용)")
-    task: Optional[str] = Field(None, max_length=500, description="모델 태스크")
+    task: Optional[str] = Field(
+        None,
+        max_length=500,
+        description=(
+            "모델 태스크: embedding | text-generation | object-detection | fill-mask | "
+            "protein-classification | protein-structure-prediction | vqa"
+        ),
+    )
     parameter: Optional[str] = Field(None, max_length=100, description="모델 파라미터")
     sample_code: Optional[str] = Field(None, description="샘플 코드")
     model_registry_schema: Optional[str] = Field(None, description="모델 레지스트리 스키마 (내부 시스템 전용)")
@@ -106,7 +143,13 @@ class ModelResponse(BaseModel):
     type_info: Optional[TypeInfo] = None
     format_info: Optional[FormatInfo] = None
     parent_model_id: Optional[int] = None
-    task: Optional[str] = None  # 새 필드 추가
+    task: Optional[str] = Field(
+        None,
+        description=(
+            "모델 태스크: embedding | text-generation | object-detection | fill-mask | "
+            "protein-classification | protein-structure-prediction | vqa"
+        ),
+    )
     parameter: Optional[str] = None  # 새 필드 추가
     sample_code: Optional[str] = None  # 새 필드 추가
     registry: Optional[ModelRegistry] = None
@@ -119,6 +162,7 @@ class ModelResponse(BaseModel):
     learning_enable_yn: Optional[bool] = None
     opt_enable_yn: Optional[bool] = None
     visibility: Optional[str] = None
+    recommended_hparams: Dict[str, str] = Field(default_factory=dict)
     parent_model: Optional[Dict[str, Any]] = None
     child_models: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
 
@@ -130,21 +174,119 @@ class ModelCreateResponse(BaseModel):
     id: int
     name: str
     description: Optional[str] = None
-    repo_id: str  # 새로 생성된 모델은 repo_id 필수
+    repo_id: Optional[str] = None
     provider_info: Optional[ProviderInfo] = None
     type_info: Optional[TypeInfo] = None
     format_info: Optional[FormatInfo] = None
     parent_model_id: Optional[int] = None
-    task: Optional[str] = None
+    task: Optional[str] = Field(
+        None,
+        description=(
+            "모델 태스크: embedding | text-generation | object-detection | fill-mask | "
+            "protein-classification | protein-structure-prediction | vqa"
+        ),
+    )
     parameter: Optional[str] = None
     sample_code: Optional[str] = None
     registry: Optional[ModelRegistry] = None
-    created_at: datetime
-    updated_at: datetime
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
     deleted_at: Optional[datetime] = None
     created_by: Optional[str] = None
     updated_by: Optional[str] = None
     deleted_by: Optional[str] = None
+    learning_enable_yn: Optional[bool] = None
+    opt_enable_yn: Optional[bool] = None
+    visibility: Optional[str] = None
+    recommended_hparams: Dict[str, str] = Field(default_factory=dict)
+
+
+class ModelFileStorageType(str, Enum):
+    """MLOps 모델 파일 저장 유형."""
+
+    MLFLOW = "MLFLOW"
+    OLLAMA = "OLLAMA"
+    NONE = "NONE"
+
+
+class ModelFileEntry(BaseModel):
+    """모델 아티팩트의 파일 항목."""
+
+    name: str = Field(..., description="모델 저장 위치 기준 상대 경로")
+    size_bytes: int = Field(..., ge=0, description="파일 크기(바이트)")
+    last_modified: AwareDatetime = Field(..., description="UTC 기준 마지막 수정 시각")
+    download_url: str = Field(
+        ...,
+        description="실제 다운로드 URL을 발급받는 Gateway API 상대 경로",
+    )
+
+
+class ModelFileListResponse(BaseModel):
+    """MLOps 모델 파일 목록 응답."""
+
+    model_id: int = Field(..., description="MLOps 모델 ID")
+    model_name: str = Field(..., description="모델 표시 이름")
+    storage_type: ModelFileStorageType = Field(..., description="모델 파일 저장 유형")
+    location: Optional[str] = Field(
+        None,
+        description="MLflow 오브젝트 prefix 또는 Ollama 볼륨 이름",
+    )
+    files: List[ModelFileEntry] = Field(
+        default_factory=list,
+        description="파일 목록. 파일이 없으면 빈 배열",
+    )
+    next_cursor: Optional[str] = Field(
+        None,
+        description="다음 목록 요청에 그대로 전달할 불투명 cursor",
+    )
+    message: Optional[str] = Field(
+        None,
+        description="파일 목록이 비어 있을 때 사용자에게 표시할 안내 문구",
+    )
+
+    @model_validator(mode="after")
+    def validate_file_state(self):
+        if self.files:
+            if self.storage_type != ModelFileStorageType.MLFLOW or self.message is not None:
+                raise ValueError("files are only valid for MLFLOW responses without a message")
+        else:
+            if self.next_cursor is not None:
+                raise ValueError("an empty file list cannot have a next_cursor")
+        if self.storage_type == ModelFileStorageType.NONE and self.location is not None:
+            raise ValueError("NONE storage must not expose a location")
+        return self
+
+
+class ModelFileListWrapper(BaseModel):
+    """Gateway 공개 모델 파일 목록 응답."""
+
+    data: List[ModelFileEntry] = Field(..., description="현재 페이지의 파일 목록")
+    total: int = Field(..., ge=0, description="전체 파일 수")
+    page: int = Field(..., ge=1, description="현재 페이지 번호")
+    size: int = Field(..., ge=1, le=100, description="페이지당 항목 수")
+
+
+class ModelFileDownloadUrlResponse(BaseModel):
+    """모델 파일의 단기 서명 다운로드 URL 응답."""
+
+    model_id: int = Field(..., description="MLOps 모델 ID")
+    name: str = Field(..., description="모델 저장 위치 기준 상대 경로")
+    size_bytes: int = Field(..., ge=0, description="파일 크기(바이트)")
+    download_url: AnyHttpUrl = Field(
+        ...,
+        description="5분 동안 유효한 실제 스토리지 서명 URL",
+    )
+    expires_at: AwareDatetime = Field(..., description="서명 URL 만료 시각(UTC)")
+
+
+class ModelBaseDeploymentStatusRequest(BaseModel):
+    """내부 모델 기본 배포 상태 업데이트 요청."""
+
+    service_name: str
+    service_hostname: str
+    status: str
+    internal_url: Optional[str] = None
+    error_message: Optional[str] = None
 
 
 class InnoUserInfo(BaseModel):
@@ -159,7 +301,31 @@ class ModelWithMemberInfo(ModelResponse):
 
 
 class ModelListWrapper(BaseModel):
-    data: List[ModelWithMemberInfo]
+    data: List[ModelResponse]
+    total: int
+    page: int
+    size: int
+
+
+class ModelProviderListWrapper(BaseModel):
+    data: List[ProviderInfo]
+    total: int
+    page: int
+    size: int
+
+
+class ModelTypeListWrapper(BaseModel):
+    data: List[TypeInfo]
+    total: int
+    page: int
+    size: int
+
+
+class ModelFormatListWrapper(BaseModel):
+    data: List[FormatInfo]
+    total: int
+    page: int
+    size: int
 
 
 class ModelDetailResponse(ModelResponse):

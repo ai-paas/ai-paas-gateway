@@ -45,7 +45,7 @@ class KnowledgeBase(Base):  # Base를 상속받아야 함!
         nullable=True,
         comment="수정자 member_id"
     )
-    surro_knowledge_id = Column(Integer, nullable=False, index=True)
+    surro_knowledge_id = Column(Integer, nullable=False)
 
     # 소프트 삭제
     deleted_at = Column(
@@ -70,6 +70,18 @@ class KnowledgeBase(Base):  # Base를 상속받아야 함!
 
     # 인덱스 설정
     __table_args__ = (
-        Index('idx_knowledge_bases_surro_id', 'surro_knowledge_id', unique=True),
+        Index(
+            'idx_knowledge_bases_active',
+            'surro_knowledge_id',
+            'is_active',
+            'deleted_at',
+        ),
+        Index(
+            'idx_knowledge_bases_unique_active',
+            'surro_knowledge_id',
+            unique=True,
+            postgresql_where=Column('deleted_at').is_(None),
+            sqlite_where=Column('deleted_at').is_(None),
+        ),
         {'extend_existing': True}
     )

@@ -9,7 +9,8 @@ from fastapi import HTTPException, status, UploadFile
 from app.config import settings
 from app.schemas.dataset import (
     DatasetCreateRequest, DatasetUpdateRequest, DatasetReadSchema,
-    DatasetListResponse, DatasetValidationResponse
+    DatasetKindEnum, DatasetKindReadSchema, DatasetListResponse,
+    DatasetValidationResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -215,6 +216,46 @@ class DatasetService:
                 detail=f"Internal error: {str(e)}"
             )
 
+    async def get_dataset_kinds(
+            self,
+            user_info: Optional[Dict[str, str]] = None
+    ) -> List[DatasetKindReadSchema]:
+        """데이터셋 분류 카탈로그 조회"""
+        try:
+            url = f"{self.base_url}/datasets/kinds"
+            response = await self._make_authenticated_request(
+                "GET", url, user_info=user_info
+            )
+
+            if response.status_code == 200:
+                return [DatasetKindReadSchema(**item) for item in response.json()]
+
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Failed to get dataset kinds: {response.text}"
+            )
+
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout getting dataset kinds: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="External service timeout"
+            )
+        except httpx.RequestError as e:
+            logger.error(f"Request failed getting dataset kinds: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="External service connection error"
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception(f"Error getting dataset kinds: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}"
+            )
+
     async def get_dataset(
             self,
             dataset_id: int,
@@ -259,6 +300,7 @@ class DatasetService:
     async def validate_dataset(
             self,
             file: UploadFile,
+            dataset_kind: DatasetKindEnum,
             user_info: Optional[Dict[str, str]] = None
     ) -> DatasetValidationResponse:
         """데이터셋 파일 유효성 검증"""
@@ -278,7 +320,11 @@ class DatasetService:
             logger.info(f"Validating dataset file at: {url}")
 
             response = await self._make_authenticated_request(
-                "POST", url, user_info=user_info, files=files
+                "POST",
+                url,
+                user_info=user_info,
+                files=files,
+                data={"dataset_kind": dataset_kind.value},
             )
 
             if response.status_code == 200:
@@ -325,7 +371,8 @@ class DatasetService:
 
             data = {
                 "name": dataset_data.name,
-                "description": dataset_data.description
+                "description": dataset_data.description,
+                "dataset_kind": dataset_data.dataset_kind.value,
             }
 
             logger.info(f"Creating dataset at: {url}, timeout={upload_timeout}s")
@@ -394,7 +441,11 @@ class DatasetService:
             url = f"{self.base_url}/datasets/{dataset_id}"
 
             # None이 아닌 필드만 전송
-            update_payload = {k: v for k, v in dataset_data.model_dump().items() if v is not None}
+            update_payload = {
+                k: v
+                for k, v in dataset_data.model_dump().items()
+                if v is not None and k != "kind"
+            }
 
             logger.info(f"Updating dataset at: {url}")
             logger.info(f"Update payload: {update_payload}")

@@ -1,7 +1,12 @@
 from datetime import datetime
+from enum import Enum
 from typing import List, Optional
 
 from pydantic import BaseModel
+
+
+class PromptVariableType(str, Enum):
+    CONTEXT = "context"
 
 
 # 프롬프트 변수 스키마
@@ -35,7 +40,7 @@ class PromptBaseSchema(BaseModel):
 
 class PromptCreate(BaseModel):
     prompt: PromptBaseSchema
-    prompt_variable: Optional[List[str]] = None
+    prompt_variable: Optional[List[PromptVariableType]] = None
 
 
 # 프롬프트 수정 요청
@@ -43,7 +48,7 @@ class PromptUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     content: Optional[str] = None
-    prompt_variable: Optional[List[str]] = None
+    prompt_variable: Optional[List[PromptVariableType]] = None
 
 
 # 우리 DB 프롬프트 응답 (외부 API 데이터 + DB 메타 정보)

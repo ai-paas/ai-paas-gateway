@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
-from app.common.sort import parse_sort, resolve_sort_columns
+from app.common.sort import parse_sort, sort_in_memory
 from app.cruds.service import service_crud
 from app.database import get_db
 from app.models.service import Service
@@ -20,13 +20,13 @@ from app.services.audit_service import Action, ResourceType, emit_from_request
 from app.services.service_service import service_service
 
 _SERVICE_SORT_FIELDS = {
-    "id": Service.id,
-    "name": Service.name,
-    "created_at": Service.created_at,
-    "updated_at": Service.updated_at,
+    "id": lambda service: service.id,
+    "name": lambda service: service.name,
+    "created_at": lambda service: service.created_at,
+    "updated_at": lambda service: service.updated_at,
 }
-_SERVICE_SORT_DEFAULT = [(Service.created_at, True)]
-_SERVICE_SORT_TIE_BREAKER = Service.id
+_SERVICE_SORT_DEFAULT = [("created_at", True)]
+_SERVICE_SORT_TIE_BREAKER = lambda service: service.id
 
 logger = logging.getLogger(__name__)
 
@@ -169,20 +169,67 @@ async def get_services(
     - 422: 허용되지 않은 sort 필드
     - 500: 서버 내부 오류
     """
-    skip = (page - 1) * size
-    order_by = resolve_sort_columns(
-        parsed=parse_sort(sort),
-        allowed=_SERVICE_SORT_FIELDS,
-        default=_SERVICE_SORT_DEFAULT,
-        tie_breaker=_SERVICE_SORT_TIE_BREAKER,
-    )
-    services, total = service_crud.get_services(
+    mappings, _ = service_crud.get_services(
         db=db,
-        skip=skip,
-        limit=size,
-        search=search,
-        order_by=order_by,
+        skip=0,
+        limit=1000,
+        member_id=None if current_user.role == "admin" else current_user.member_id,
     )
+
+    user_info = {
+        "member_id": current_user.member_id,
+        "role": current_user.role,
+        "name": current_user.name,
+    }
+    external_response = await service_service.get_services(
+        page=1,
+        page_size=1000,
+        user_info=user_info,
+    )
+    if isinstance(external_response, dict):
+        external_items = external_response.get("items", external_response.get("data", []))
+    elif isinstance(external_response, list):
+        external_items = external_response
+    else:
+        external_items = []
+    external_by_id = {item.get("id"): item for item in external_items}
+
+    services = []
+    for mapping in mappings:
+        external = external_by_id.get(mapping.surro_service_id)
+        if external is None:
+            continue
+        services.append(
+            ServiceResponse(
+                id=mapping.id,
+                name=external["name"],
+                description=external.get("description"),
+                tags=external.get("tags") or [],
+                created_at=mapping.created_at,
+                updated_at=mapping.updated_at,
+                created_by=mapping.created_by,
+                surro_service_id=mapping.surro_service_id,
+            )
+        )
+
+    if search:
+        search_lower = search.lower()
+        services = [
+            service for service in services
+            if search_lower in service.name.lower()
+            or (service.description and search_lower in service.description.lower())
+        ]
+
+    services = sort_in_memory(
+        items=services,
+        parsed=parse_sort(sort),
+        getters=_SERVICE_SORT_FIELDS,
+        default=_SERVICE_SORT_DEFAULT,
+        tie_breaker_getter=_SERVICE_SORT_TIE_BREAKER,
+    )
+    total = len(services)
+    skip = (page - 1) * size
+    services = services[skip:skip + size]
 
     return ServiceListResponse(
         data=services,
@@ -280,7 +327,6 @@ async def get_service(
     db_service = service_crud.get_service_by_surro_id(db=db, surro_service_id=surro_service_id)
     if not db_service:
         raise HTTPException(status_code=404, detail="Service not found")
-
     # 1-1. 권한 검증 — 본인 소유 서비스 또는 admin만 접근 가능
     if current_user.role != "admin" and db_service.created_by != current_user.member_id:
         raise HTTPException(status_code=403, detail="Permission denied")
@@ -400,6 +446,8 @@ async def get_service_resource_usages(
     db_service = service_crud.get_service_by_surro_id(db=db, surro_service_id=surro_service_id)
     if not db_service:
         raise HTTPException(status_code=404, detail="Service not found")
+    if current_user.role != "admin" and db_service.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
 
     user_info = {
         'member_id': current_user.member_id,
@@ -481,6 +529,8 @@ async def update_service(
             tags=service_update.tags,
             user_info=user_info
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -529,10 +579,10 @@ async def delete_service(
     ## Side Effects
     - 서비스와 연결된 모든 워크플로우의 service_id가 null로 설정됨
     - 서비스 관련 모니터링 데이터는 보존됨 (향후 분석용)
-    - 서비스 정보는 데이터베이스에서 완전히 삭제됨
+    - Gateway DB 매핑은 감사 추적을 위해 soft-delete됨
 
     ## Notes
-    - 삭제는 되돌릴 수 없는 작업입니다
+    - 원격 서비스 삭제는 되돌릴 수 없지만 Gateway DB 매핑 이력은 보존됩니다
     - 워크플로우를 삭제하려면 별도로 워크플로우 삭제 API를 호출해야 함
 
     ## Errors
@@ -562,6 +612,8 @@ async def delete_service(
             surro_service_id,  # UUID 사용
             user_info
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -569,7 +621,11 @@ async def delete_service(
         )
 
     # 우리 DB 삭제
-    success = service_crud.delete_service_by_surro_id(db=db, surro_service_id=surro_service_id)
+    success = service_crud.delete_service_by_surro_id(
+        db=db,
+        surro_service_id=surro_service_id,
+        deleted_by=current_user.member_id,
+    )
     if not success:
         raise HTTPException(status_code=404, detail="Service not found")
 

@@ -21,33 +21,28 @@ class KnowledgeBaseCRUD:
             collection_name: str
     ):
         """지식베이스 생성 - surro_knowledge_id만 저장 (중복 매핑 처리 포함)"""
-        # 중복 확인 (MLOps 재설치 시 ID 재사용 대응)
-        existing = self.get_knowledge_base_by_surro_id(db, surro_knowledge_id)
+        # 활성 ID가 다른 이름을 가리키면 재설치 후 ID 재사용으로 보고 이력을 분리한다.
+        existing = self.get_active_knowledge_base_by_surro_id(db, surro_knowledge_id)
         if existing:
-            # stale 매핑이면 새 데이터로 업데이트
             if name and existing.name != name:
                 logger.info(
-                    f"Updating stale knowledge base mapping: surro_id={surro_knowledge_id}, "
+                    f"Retiring reused knowledge base mapping: surro_id={surro_knowledge_id}, "
                     f"old_name={existing.name}, new_name={name}"
                 )
-                existing.name = name
+                now = datetime.utcnow()
+                existing.deleted_at = now
+                existing.deleted_by = "system:upstream-id-reused"
+                existing.is_active = False
+                existing.updated_at = now
+                db.flush()
+            else:
                 existing.description = description
                 existing.collection_name = collection_name
                 existing.updated_by = created_by
                 existing.updated_at = datetime.utcnow()
-                # 소프트 삭제된 상태였으면 복원
-                if existing.deleted_at is not None:
-                    existing.deleted_at = None
-                    existing.deleted_by = None
-                    existing.is_active = True
                 db.commit()
                 db.refresh(existing)
-            else:
-                logger.warning(
-                    f"Knowledge base mapping already exists: surro_id={surro_knowledge_id}, "
-                    f"member_id={created_by}"
-                )
-            return existing
+                return existing
 
         db_knowledge_base = KnowledgeBase(
             name=name,
@@ -66,14 +61,15 @@ class KnowledgeBaseCRUD:
         return db.query(KnowledgeBase).filter(
             and_(
                 KnowledgeBase.id == knowledge_base_id,
-                KnowledgeBase.deleted_at.is_(None)
+                KnowledgeBase.deleted_at.is_(None),
+                KnowledgeBase.is_active == True,
             )
         ).first()
 
     def get_knowledge_base_by_surro_id(self, db: Session, surro_knowledge_id: int):
         return db.query(KnowledgeBase).filter(
             KnowledgeBase.surro_knowledge_id == surro_knowledge_id
-        ).first()
+        ).order_by(KnowledgeBase.id.desc()).first()
 
     def get_active_knowledge_base_by_surro_id(self, db: Session, surro_knowledge_id: int):
         """삭제되지 않은 활성 지식베이스 조회"""

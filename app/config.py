@@ -78,6 +78,9 @@ class Settings:
     PROXY_TARGET_PATH_PREFIX: str = os.getenv("PROXY_TARGET_PATH_PREFIX", "/api/v1")
     PROXY_TIMEOUT: float = float(os.getenv("PROXY_TIMEOUT", "30.0"))
     PROXY_CONNECT_TIMEOUT: float = float(os.getenv("PROXY_CONNECT_TIMEOUT", "5.0"))
+    PROXY_STRUCTURE_PREDICTION_TIMEOUT: float = float(
+        os.getenv("PROXY_STRUCTURE_PREDICTION_TIMEOUT", "300.0")
+    )
     PROXY_MAX_CONNECTIONS: int = int(os.getenv("PROXY_MAX_CONNECTIONS", "100"))
     PROXY_MAX_KEEPALIVE_CONNECTIONS: int = int(os.getenv("PROXY_MAX_KEEPALIVE_CONNECTIONS", "20"))
     EXTERNAL_API_USERNAME: str = os.getenv("EXTERNAL_API_USERNAME", "")
@@ -107,6 +110,25 @@ class Settings:
     # API metrics flush 잡은 middleware의 in-process buffer에 의존 →
     # 별도 worker 프로세스에서 띄울 때는 false로 두어야 한다 (API 프로세스에만 켤 것).
     SCHEDULER_INCLUDE_API_METRICS: bool = _get_bool("SCHEDULER_INCLUDE_API_METRICS", True)
+
+    # 개인 대시보드 서비스 카드/모니터링 캐시
+    # TTL(분): 캐시가 이보다 오래되면 다음 요청에서 본인 서비스만 즉시(live) 재집계. 0이면 무한 캐시(스케줄러만 갱신).
+    DASHBOARD_CACHE_TTL_MINUTES: int = int(os.getenv("DASHBOARD_CACHE_TTL_MINUTES", "10"))
+    # 사용 모델 distinct 수 집계 여부 — 워크플로우 detail fan-out이라 비용 큼. 부담되면 false.
+    DASHBOARD_INCLUDE_MODEL_COUNT: bool = _get_bool("DASHBOARD_INCLUDE_MODEL_COUNT", True)
+    # 스케줄러 전체 서비스 pre-warm 잡 — MLOps(PROXY) 비활성 환경에선 의미 없으므로 default도 PROXY_ENABLED 의존 권장.
+    SCHEDULER_INCLUDE_DASHBOARD: bool = _get_bool("SCHEDULER_INCLUDE_DASHBOARD", False)
+    SCHEDULER_DASHBOARD_REFRESH_MINUTES: int = int(os.getenv("SCHEDULER_DASHBOARD_REFRESH_MINUTES", "10"))
+
+    # 모델 visibility reconcile 잡 — MLOps visibility → gateway is_catalog 캐시 정정.
+    # 목록 조회가 read-through로도 동기화하므로 backstop 용도. MLOps(PROXY) 필요.
+    SCHEDULER_INCLUDE_MODEL_VISIBILITY: bool = _get_bool("SCHEDULER_INCLUDE_MODEL_VISIBILITY", False)
+    SCHEDULER_MODEL_VISIBILITY_MINUTES: int = int(os.getenv("SCHEDULER_MODEL_VISIBILITY_MINUTES", "30"))
+
+    # 워크플로우 매핑 reconcile 잡 — MLOps에서 사라진 워크플로우의 stale 매핑 soft-delete.
+    # 목록 조회는 원격 장애/필터로 멀쩡한 매핑을 지울 위험이 있어 이 잡에만 위임. MLOps(PROXY) 필요.
+    SCHEDULER_INCLUDE_WORKFLOW_RECONCILE: bool = _get_bool("SCHEDULER_INCLUDE_WORKFLOW_RECONCILE", False)
+    SCHEDULER_WORKFLOW_RECONCILE_MINUTES: int = int(os.getenv("SCHEDULER_WORKFLOW_RECONCILE_MINUTES", "30"))
 
     ANY_CLOUD_ENABLED: bool = _get_bool("ANY_CLOUD_ENABLED", False)
     ANY_CLOUD_TARGET_BASE_URL: str = os.getenv("ANY_CLOUD_TARGET_BASE_URL", "")
