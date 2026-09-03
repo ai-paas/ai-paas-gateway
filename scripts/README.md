@@ -15,7 +15,10 @@
 ## 현재 파일
 
 ### scripts/ (트래킹)
+- `gen_api_docs.py` — `docs/api-reference.md` 생성기 (아래 참조)
 - `sync_datasets.py` — 데이터셋 동기화 스크립트
+- `sync_models.py` — 모델 매핑 동기화 스크립트
+- `seed_gateway_samples.py` — 샘플 데이터 시드
 
 ### scripts/local/ (로컬 전용)
 - `mlops_openapi.json` — MLOps `/openapi.json` 덤프 (스웨거 설명 동기화용 참조)
@@ -23,6 +26,19 @@
 - `mlops_models_summary.txt` — 위 덤프에서 Models 섹션만 추출한 요약
 - `test_workflow_gets.py` — 게이트웨이(127.0.0.1:8000) vs MLOps(`<MLOPS_BASE_URL>`) GET 비교 스크립트
 - `.tok_local`, `.tok_mlops` — 로그인 토큰 임시 저장 (테스트 후 삭제 권장)
+
+## API 레퍼런스 문서 생성
+
+`docs/api-reference.md`는 **생성물**이다. 라우트를 추가·삭제·이동했거나 권한 의존성을 바꿨으면
+다시 생성한다. 손으로 표를 고치지 말 것 — 반드시 어긋난다.
+
+```bash
+python scripts/gen_api_docs.py           # docs/api-reference.md 갱신
+python scripts/gen_api_docs.py --check   # 최신이 아니면 exit 1 (커밋 전 확인)
+```
+
+DB에 붙지 않고 `app.main:app` import만 하므로 `.env` 없이도 동작한다(더미 값 사용).
+`--check`는 CI나 pre-commit에 걸어 두면 문서 드리프트를 막을 수 있다.
 
 ## MLOps OpenAPI 재다운로드
 
