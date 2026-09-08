@@ -358,6 +358,10 @@ class WorkflowService:
         """워크플로우 삭제 완료 처리
 
         MLOps v2 spec은 query parameter를 받지 않는다.
+
+        upstream 404는 "MLOps에 이미 없음" = 삭제 완료이므로 완료 응답으로
+        정규화한다. 그대로 404를 던지면 완료까지 폴링하는 클라이언트가 마지막
+        호출을 실패로 처리하고, 게이트웨이 매핑도 남는다.
         """
         try:
             url = f"{self.base_url}/workflows/{workflow_id}/finalize-deletion"
@@ -365,6 +369,17 @@ class WorkflowService:
 
             if response.status_code == 200:
                 return response.json()
+            if response.status_code == 404:
+                logger.info(
+                    "finalize-deletion: workflow already absent upstream, id=%s",
+                    workflow_id,
+                )
+                return {
+                    "workflow_id": workflow_id,
+                    "status": "completed",
+                    "deleted_from_db": True,
+                    "message": "Workflow already deleted",
+                }
             _raise_workflow_proxy_error(response, "workflow API")
         except HTTPException:
             raise

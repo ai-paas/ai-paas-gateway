@@ -38,13 +38,26 @@ class WorkflowCRUD:
     def get_workflow_by_surro_id(
             self,
             db: Session,
-            surro_workflow_id: str
+            surro_workflow_id: str,
+            include_deleted: bool = False,
     ) -> Optional[Workflow]:
-        """외부 API ID로 조회"""
-        return db.query(Workflow).filter(
+        """외부 API ID로 조회.
+
+        include_deleted=True는 soft-delete된 매핑도 반환한다(활성 행 우선, 없으면
+        최신 삭제 행). 삭제 완료 확인(finalize-deletion) 재호출이 게이트웨이에서
+        404로 끊기지 않게 하려는 용도.
+        """
+        query = db.query(Workflow).filter(
             Workflow.surro_workflow_id == surro_workflow_id,
-            Workflow.deleted_at.is_(None),
-            Workflow.is_active.is_(True),
+        )
+        if not include_deleted:
+            return query.filter(
+                Workflow.deleted_at.is_(None),
+                Workflow.is_active.is_(True),
+            ).first()
+        return query.order_by(
+            Workflow.deleted_at.is_(None).desc(),
+            Workflow.id.desc(),
         ).first()
 
     def get_workflows(
