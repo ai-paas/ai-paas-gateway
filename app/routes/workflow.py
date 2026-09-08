@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
@@ -50,6 +50,28 @@ _WORKFLOW_SORT_GETTERS = {
 }
 _WORKFLOW_SORT_DEFAULT = [("created_at", True)]
 _WORKFLOW_SORT_TIE_BREAKER = lambda w: w.id
+
+# MLOps finalize-deletion의 삭제 완료 신호.
+# upstream OpenAPI가 이 200 응답 스키마를 비워 둬(`{}`) 키 이름이 계약으로
+# 보장되지 않는다. status 종결값과 deleted_from_db 중 하나만 와도 완료로 본다 —
+# 클라이언트에 "completed"를 주면서 게이트웨이 매핑만 남는 불일치가 더 위험하다.
+_DELETION_DONE_STATUSES = frozenset({"completed", "deleted", "already_deleted"})
+
+
+def _status_of(response_body: Any) -> str:
+    if not isinstance(response_body, dict):
+        return ""
+    return str(response_body.get("status") or "").strip().lower()
+
+
+def _is_deletion_done(finalize_response: Any) -> bool:
+    if not isinstance(finalize_response, dict):
+        return False
+    return (
+        _status_of(finalize_response) in _DELETION_DONE_STATUSES
+        or bool(finalize_response.get("deleted_from_db"))
+    )
+
 
 # ===== Component Types =====
 
@@ -1404,7 +1426,9 @@ async def delete_workflow(
     ## Deletion Process
     1. 현재 API 호출: 정리 파이프라인 시작
     2. Kubeflow Pipeline: KServe InferenceService · Ollama Deployment/Service 등 클러스터 서빙 리소스 삭제
-    3. `finalize-deletion` API 호출: Kubernetes 리소스 직접 확인 및 DB 삭제
+    3. `finalize-deletion` API를 **`status`가 `completed`가 될 때까지 반복 호출**:
+       Kubernetes 리소스 직접 확인 및 DB 삭제. 1회 호출은 1회 상태 확인일 뿐이며,
+       이 API 응답만으로는 삭제가 끝나지 않는다. 폴링 주기는 클라이언트가 정한다(권장 5~10초).
 
     ## Notes
     - 비동기 프로세스로 진행됨 (202 Accepted)
@@ -1462,6 +1486,7 @@ async def delete_workflow(
 @router.post("/{surro_workflow_id}/finalize-deletion")
 async def finalize_workflow_deletion(
         surro_workflow_id: str,
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -1470,6 +1495,10 @@ async def finalize_workflow_deletion(
 
     Kubernetes 클러스터를 직접 조회하여 리소스가 실제로 삭제되었는지 확인하고,
     확인된 경우 DB에서 워크플로우를 삭제합니다.
+
+    **1회 호출 = 1회 상태 확인**입니다. 클러스터 리소스 정리는 분 단위로 걸리므로
+    클라이언트가 `status`가 `completed`(또는 `failed`)가 될 때까지 이 API를 반복
+    호출해야 삭제가 끝납니다. 게이트웨이는 요청을 붙잡고 대기하지 않습니다.
 
     ## Path Parameters
     - **workflow_id** (str): 삭제할 워크플로우 UUID
@@ -1491,8 +1520,17 @@ async def finalize_workflow_deletion(
         - false: 아직 삭제되지 않음
     - **message** (str): 상태 메시지
 
-    게이트웨이는 `status == "completed"` 이면서 `deleted_from_db == true` 일 때
-    게이트웨이 DB의 매핑 레코드(workflows 테이블)도 함께 삭제합니다.
+    ## Polling
+    - 권장 주기: 5~10초. 전체 타임아웃과 최대 시도 횟수는 클라이언트가 설정할 것.
+    - `in_progress`면 대기 후 재호출. 재호출은 **멱등**하며, 삭제가 완료된 뒤 한 번 더
+      호출해도 404가 아니라 완료 응답을 반환합니다.
+    - MLOps에서 이미 사라진 워크플로우는 `status: "completed"`,
+      `deleted_from_db: true`, `message: "Workflow already deleted"`로 정규화되어
+      돌아옵니다(성공으로 처리할 것).
+    - 게이트웨이 DB 매핑에 아예 없는 ID만 404입니다.
+
+    게이트웨이는 `status`가 종결값(`completed` 등)이거나 `deleted_from_db == true`이면
+    게이트웨이 DB의 매핑 레코드(workflows 테이블)도 함께 soft-delete 합니다.
 
     ## Process
     1. 워크플로우 존재 여부 확인
@@ -1511,10 +1549,15 @@ async def finalize_workflow_deletion(
 
     ## Errors
     - **401**: 인증되지 않은 사용자
+    - **403**: 권한 없음 (본인 소유가 아니며 admin도 아님)
+    - **404**: 게이트웨이 DB에 해당 워크플로우 매핑이 존재하지 않음
     - **500**: 삭제 처리 중 오류 발생
     """
+    # soft-delete된 매핑도 포함해 조회한다. 완료까지 폴링하는 클라이언트는 삭제가
+    # 끝난 뒤에도 한 번 더 호출하게 되는데, 활성 행만 보면 그 호출이 upstream에
+    # 닿지도 못하고 404가 되어 정상 완료가 실패로 보인다.
     existing_workflow = workflow_crud.get_workflow_by_surro_id(
-        db=db, surro_workflow_id=surro_workflow_id
+        db=db, surro_workflow_id=surro_workflow_id, include_deleted=True
     )
     if not existing_workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
@@ -1535,15 +1578,24 @@ async def finalize_workflow_deletion(
             user_info=user_info,
         )
 
-        # 삭제 완료된 경우 우리 DB에서도 삭제
-        if finalize_response.get('status') == 'completed' and finalize_response.get('deleted_from_db'):
-            success = workflow_crud.delete_workflow_by_surro_id(
+        # 삭제 완료된 경우 우리 DB에서도 삭제.
+        # 이미 삭제된 매핑이면 delete_workflow_by_surro_id가 False를 돌려주는데,
+        # 폴링 중 정상적으로 발생하는 재호출이므로 조용히 넘긴다.
+        if _is_deletion_done(finalize_response):
+            deleted = workflow_crud.delete_workflow_by_surro_id(
                 db=db,
                 surro_workflow_id=surro_workflow_id,
                 deleted_by=current_user.member_id,
             )
-            if not success:
-                logger.warning(f"Workflow {surro_workflow_id} already deleted from DB")
+            if deleted:
+                emit_from_request(
+                    db, request,
+                    action=Action.DELETE,
+                    resource_type=ResourceType.WORKFLOW,
+                    actor_member_id=current_user.member_id,
+                    resource_id=surro_workflow_id,
+                    metadata={"stage": "completed"},
+                )
 
         return finalize_response
     except HTTPException:
@@ -2334,6 +2386,7 @@ async def get_workflow_models(
 @router.post("/{surro_workflow_id}/cleanup", status_code=202)
 async def cleanup_workflow(
         surro_workflow_id: str,
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -2362,7 +2415,8 @@ async def cleanup_workflow(
     ## Process
     1. 서빙 리소스(KServe / Ollama 등) 삭제 파이프라인 시작
     2. cleanup_run_id 반환
-    3. `finalize-cleanup` API로 완료 확인
+    3. `finalize-cleanup` API를 **`status`가 `completed`가 될 때까지 반복 호출**
+       (1회 호출은 1회 상태 확인, 권장 주기 5~10초)
     4. 워크플로우 상태를 DRAFT로 변경 (재실행 가능)
 
     ## Notes
@@ -2400,6 +2454,14 @@ async def cleanup_workflow(
             surro_workflow_id,
             user_info
         )
+        emit_from_request(
+            db, request,
+            action=Action.STATUS_CHANGE,
+            resource_type=ResourceType.WORKFLOW,
+            actor_member_id=current_user.member_id,
+            resource_id=surro_workflow_id,
+            metadata={"stage": "cleanup_initiated"},
+        )
         return cleanup_response
     except HTTPException:
         raise
@@ -2413,6 +2475,7 @@ async def cleanup_workflow(
 @router.post("/{surro_workflow_id}/finalize-cleanup")
 async def finalize_workflow_cleanup(
         surro_workflow_id: str,
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -2422,6 +2485,10 @@ async def finalize_workflow_cleanup(
     Kubernetes 클러스터를 직접 조회하여 리소스가 실제로 삭제되었는지 확인하고,
     확인된 경우 워크플로우 상태를 업데이트합니다.
     워크플로우는 삭제되지 않고 리소스만 정리되며, 정리 후 재실행이 가능합니다.
+
+    **1회 호출 = 1회 상태 확인**입니다. 클라이언트가 `status`가 `completed`
+    (또는 `failed`)가 될 때까지 반복 호출해야 배포 중지가 끝납니다. 재호출은
+    멱등하며 게이트웨이는 요청을 붙잡고 대기하지 않습니다.
 
     ## Path Parameters
     - **workflow_id** (str): 정리할 워크플로우 UUID
@@ -2463,6 +2530,11 @@ async def finalize_workflow_cleanup(
     4. 리소스가 아직 존재하는 경우: 진행중 상태 반환 (재호출 필요)
     5. 확인 중 오류 발생: 실패 상태 반환
 
+    ## Polling
+    - 권장 주기: 5~10초. 전체 타임아웃과 최대 시도 횟수는 클라이언트가 설정할 것.
+    - `in_progress`면 대기 후 재호출. 재호출은 멱등.
+    - 게이트웨이는 `status == "completed"`일 때 audit 이벤트(`stage: cleanup_completed`)를 남김.
+
     ## Notes
     - 워크플로우는 삭제되지 않고 리소스만 정리됨
     - 정리 완료 후 워크플로우를 재실행할 수 있음
@@ -2474,6 +2546,7 @@ async def finalize_workflow_cleanup(
 
     ## Errors
     - **401**: 인증되지 않은 사용자
+    - **403**: 권한 없음 (본인 소유가 아니며 admin도 아님)
     - **404**: 워크플로우를 찾을 수 없음
         - workflow_id가 존재하지 않거나 삭제된 경우
     - **500**: 정리 처리 중 오류 발생
@@ -2502,6 +2575,15 @@ async def finalize_workflow_cleanup(
             surro_workflow_id,
             user_info
         )
+        if _status_of(finalize_response) == "completed":
+            emit_from_request(
+                db, request,
+                action=Action.STATUS_CHANGE,
+                resource_type=ResourceType.WORKFLOW,
+                actor_member_id=current_user.member_id,
+                resource_id=surro_workflow_id,
+                metadata={"stage": "cleanup_completed"},
+            )
         return finalize_response
     except HTTPException:
         raise
