@@ -214,7 +214,7 @@ def test_dedicated_endpoints_follow_visibility(db, sample_member, admin_member, 
 def test_create_model_mapping_uses_response_visibility(db, admin_member, monkeypatch):
     """admin이 등록해도 MLOps가 CUSTOM이라 하면 커스텀으로 매핑 (파생 모델 케이스)."""
 
-    async def fake_create_model(model_data, file_data=None, file_name=None, user_info=None):
+    async def fake_create_model(model_data, file=None, user_info=None):
         return ModelCreateResponse(
             id=77, name=model_data.name, visibility="CUSTOM",
             created_at=datetime(2026, 7, 31), updated_at=datetime(2026, 7, 31),
@@ -242,7 +242,7 @@ def test_derive_is_catalog_does_not_use_role_fallback():
 
 
 def test_admin_create_without_visibility_is_custom(db, admin_member, monkeypatch):
-    async def fake_create_model(model_data, file_data=None, file_name=None, user_info=None):
+    async def fake_create_model(model_data, file=None, user_info=None):
         return ModelCreateResponse(
             id=78, name=model_data.name, visibility=None,
             created_at=datetime(2026, 7, 31), updated_at=datetime(2026, 7, 31),
