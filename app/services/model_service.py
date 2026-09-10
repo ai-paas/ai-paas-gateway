@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 
 import httpx
-from fastapi import HTTPException, status
+from fastapi import HTTPException, UploadFile, status
 
 from app.config import settings
 from app.schemas.model import (
@@ -653,8 +653,7 @@ class ModelService:
     async def create_model(
             self,
             model_data: ModelCreateRequest,
-            file_data: Optional[bytes] = None,
-            file_name: Optional[str] = None,
+            file: Optional[UploadFile] = None,
             user_info: Optional[Dict[str, str]] = None
     ) -> ModelCreateResponse:
         """모델 생성"""
@@ -685,20 +684,37 @@ class ModelService:
             if model_data.model_registry_schema:
                 data["model_registry_schema"] = model_data.model_registry_schema
 
-            files = []
-            if file_data and file_name:
-                files.append(("file", (file_name, file_data, "application/octet-stream")))
-
             logger.info(f"Creating model at: {url}")
             logger.info(f"Model data: {data}")
 
-            if files:
-                # 파일이 있는 경우 multipart 전송
-                response = await self._make_authenticated_request(
-                    "POST", url, user_info=user_info, data=data, files=files
+            if file:
+                # 대용량 모델 파일 업로드는 기본 PROXY_TIMEOUT(30s)보다 오래 걸릴 수 있어
+                # 업로드 전용 타임아웃을 쓰고, file.file을 직접 스트리밍한다(메모리에 통째로 안 올림).
+                # _make_authenticated_request의 401 재시도는 이미 소비된 스트림을 다시 보내
+                # 빈 파일이 전송될 수 있어, dataset_service와 동일하게 재시도 전 seek(0)으로 되감는다.
+                upload_timeout = httpx.Timeout(
+                    timeout=settings.PROXY_UPLOAD_TIMEOUT,
+                    connect=settings.PROXY_CONNECT_TIMEOUT,
                 )
+                token = await self._get_valid_token()
+                headers = self._get_headers(user_info)
+                headers['Authorization'] = f"Bearer {token}"
+                files = {"file": (file.filename, file.file, file.content_type or "application/octet-stream")}
+
+                response = await self.client.post(
+                    url, data=data, files=files, headers=headers, timeout=upload_timeout
+                )
+
+                if response.status_code == 401:
+                    self.access_token = None
+                    token = await self._get_valid_token()
+                    headers['Authorization'] = f"Bearer {token}"
+                    await file.seek(0)
+                    files = {"file": (file.filename, file.file, file.content_type or "application/octet-stream")}
+                    response = await self.client.post(
+                        url, data=data, files=files, headers=headers, timeout=upload_timeout
+                    )
             else:
-                # 파일이 없는 경우에도 multipart로 전송 (API 스펙에 따라)
                 response = await self._make_authenticated_request(
                     "POST", url, user_info=user_info, data=data
                 )

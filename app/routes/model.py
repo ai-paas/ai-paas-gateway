@@ -256,13 +256,8 @@ async def create_model(
                     detail="Parent model not found or access denied",
                 )
 
-        # 파일 처리
-        file_data = None
-        file_name = None
         if file:
-            file_data = await file.read()
-            file_name = file.filename
-            logger.info(f"File uploaded: {file_name}, size: {len(file_data)} bytes")
+            logger.info(f"File uploaded: {file.filename}")
 
         # 모델 생성 요청 데이터 구성
         model_data = ModelCreateRequest(
@@ -282,8 +277,7 @@ async def create_model(
         # 1. Surro API를 통해 모델 생성
         created_model = await model_service.create_model(
             model_data=model_data,
-            file_data=file_data,
-            file_name=file_name,
+            file=file,
             user_info={
                 'member_id': current_user.member_id,
                 'role': current_user.role,
