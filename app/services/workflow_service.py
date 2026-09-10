@@ -487,12 +487,26 @@ class WorkflowService:
     async def test_rag_workflow(
             self, workflow_id: str, text: str, user_info: Optional[Dict] = None
     ) -> WorkflowTestResponse:
-        """RAG 워크플로우 테스트"""
+        """RAG 워크플로우 테스트
+
+        업스트림 LLM 생성(Ollama)이 기본 PROXY_TIMEOUT(30s)보다 오래 걸릴 수 있어
+        전용 타임아웃을 쓴다. 업스트림이 아예 무응답(hang)이면 이 값을 늘려도
+        재발한다 — 근본 원인은 별도 인프라 확인 대상.
+        """
         try:
             url = f"{self.base_url}/workflows/{workflow_id}/test/rag"
             data = {"text": text}
 
-            response = await self._make_authenticated_request("POST", url, user_info=user_info, data=data)
+            response = await self._make_authenticated_request(
+                "POST",
+                url,
+                user_info=user_info,
+                data=data,
+                timeout=httpx.Timeout(
+                    timeout=settings.PROXY_RAG_TIMEOUT,
+                    connect=settings.PROXY_CONNECT_TIMEOUT,
+                ),
+            )
 
             if response.status_code == 200:
                 return WorkflowTestResponse(**response.json())
