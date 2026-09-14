@@ -1893,6 +1893,11 @@ async def test_rag_workflow(
         - MODEL 컴포넌트가 없고 KNOWLEDGE_BASE만 있으면: 검색 결과 문자열 (search_result)
         - 상세 정보는 results 배열의 각 컴포넌트 결과에서 확인 가능
 
+    - **주의**: HTTP 200 응답이어도 results[] 중 일부 컴포넌트에 error가 채워질 수 있음(부분 실패).
+      final_result가 존재한다고 해서 전체가 성공한 건 아니므로, 반드시 results[].error를 확인할 것.
+    - KNOWLEDGE_BASE 컴포넌트는 성공하고 MODEL(LLM) 컴포넌트만 실패한 경우, 위 우선순위 규칙에 따라
+      final_result에는 KB 검색 결과 원문이 남음 — 이를 LLM이 생성한 답변으로 오인하지 않도록 주의.
+
     ## Notes
     - admin 또는 게이트웨이 DB의 `created_by` 사용자만 실행 가능
     - 워크플로우는 배포되어 있어야 함 (ACTIVE 상태)
