@@ -46,6 +46,10 @@ async def create_service(
     서비스는 워크플로우를 그룹화하고 모니터링하는 최상위 단위입니다.
     하나의 서비스에 여러 워크플로우를 연결하여 통합 관리할 수 있습니다.
 
+    서비스 생성 자체는 아무것도 실행하지 않습니다 — 워크플로우를 실제로 서빙하려면
+    서비스 연결 여부와 무관하게 `POST /workflows/{id}/execute`로 배포하고,
+    내리려면 `POST /workflows/{id}/cleanup`으로 정리해야 합니다.
+
     ## Request Body (application/json) — `ServiceCreateRequest`
 
     | 필드 | 타입 | 필수 | 설명 |
@@ -316,6 +320,12 @@ async def get_service(
     참조될 경우 한 번만 노출되고 `workflow_refs: [{id, name}]`에 사용처가 누적된다.
     gateway DB 매핑이 없거나 현재 로그인 사용자에게 권한이 없는 항목은 best-effort로 누락된다
     (메인 응답은 200 유지). 카탈로그 모델(`is_catalog=True`)은 소유권 없이도 노출 가능.
+
+    ## Notes
+    - 서비스 생성/연결만으로는 아무 지표도 쌓이지 않습니다. 연결된 워크플로우가 실제로
+      `execute`로 배포되고 호출(테스트/추론 요청)되어야 `monitoring_data`가 채워집니다 —
+      비어있는 건 오류가 아니라 정상 상태일 수 있습니다.
+    - RAG/LLM 워크플로우는 다른 유형보다 지표가 늦게 채워지거나 일부만 표시될 수 있음(확인 중).
 
     ## Errors
     - 401: 인증되지 않은 사용자
