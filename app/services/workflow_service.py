@@ -490,8 +490,13 @@ class WorkflowService:
         """RAG 워크플로우 테스트
 
         업스트림 LLM 생성(Ollama)이 기본 PROXY_TIMEOUT(30s)보다 오래 걸릴 수 있어
-        전용 타임아웃을 쓴다. 업스트림이 아예 무응답(hang)이면 이 값을 늘려도
+        응답 대기(read)만 전용 타임아웃을 쓴다. write/pool은 폼데이터 하나 보내는
+        요청이라 기본값으로 충분. 업스트림이 아예 무응답(hang)이면 이 값을 늘려도
         재발한다 — 근본 원인은 별도 인프라 확인 대상.
+
+        PROXY_RAG_TIMEOUT(150s)은 장애 응답이 확정되는 관측 시간(~137s) 기준으로
+        잡은 값이며, 정상 생성 소요시간을 검증한 값은 아니다. 정상 생성시간·동시
+        요청량·포탈/앞단 프록시 타임아웃 실측 데이터가 확보되면 재조정 필요.
         """
         try:
             url = f"{self.base_url}/workflows/{workflow_id}/test/rag"
@@ -503,13 +508,19 @@ class WorkflowService:
                 user_info=user_info,
                 data=data,
                 timeout=httpx.Timeout(
-                    timeout=settings.PROXY_RAG_TIMEOUT,
+                    read=settings.PROXY_RAG_TIMEOUT,
+                    write=settings.PROXY_TIMEOUT,
                     connect=settings.PROXY_CONNECT_TIMEOUT,
+                    pool=settings.PROXY_TIMEOUT,
                 ),
             )
 
             if response.status_code == 200:
-                return WorkflowTestResponse(**response.json())
+                payload = response.json()
+                errors = [r.get("error") for r in payload.get("results", []) if r.get("error")]
+                if errors:
+                    logger.warning(f"rag component error: workflow_id={workflow_id}, errors={errors}")
+                return WorkflowTestResponse(**payload)
             _raise_workflow_upstream_error(response, "rag")
         except HTTPException:
             raise
