@@ -4,6 +4,7 @@ from io import BytesIO
 import httpx
 from fastapi import UploadFile
 
+from app.config import settings
 from app.schemas.model import ModelCreateRequest
 from app.services.model_service import model_service
 
@@ -52,6 +53,10 @@ def test_create_model_with_file_uses_upload_timeout_and_streams(monkeypatch):
     assert isinstance(captured.get("timeout"), httpx.Timeout), (
         "파일 첨부 요청은 PROXY_UPLOAD_TIMEOUT override를 써야 함"
     )
+    timeout = captured["timeout"]
+    assert timeout.read == settings.PROXY_UPLOAD_TIMEOUT, "read timeout은 PROXY_UPLOAD_TIMEOUT이어야 함"
+    assert timeout.write == settings.PROXY_UPLOAD_TIMEOUT, "write timeout은 PROXY_UPLOAD_TIMEOUT이어야 함"
+    assert timeout.connect == settings.PROXY_CONNECT_TIMEOUT, "connect timeout은 PROXY_CONNECT_TIMEOUT이어야 함"
 
 
 def test_create_model_without_file_uses_default_timeout(monkeypatch):
