@@ -34,7 +34,6 @@ def _upstream_error_detail(response: httpx.Response) -> Any:
     return detail if isinstance(detail, (str, list, dict)) else "upstream request rejected"
 
 
-
 class KnowledgeBaseService:
     """지식베이스 관련 외부 API 서비스"""
 
@@ -201,16 +200,27 @@ class KnowledgeBaseService:
 
             logger.info(f"Creating knowledge base: {name}")
 
-            response = await self._make_authenticated_request("POST", url, user_info=user_info, files=files, data=data)
+            response = await self._make_authenticated_request(
+                "POST", url, user_info=user_info, files=files, data=data,
+                timeout=httpx.Timeout(
+                    read=settings.PROXY_KB_CREATE_TIMEOUT,
+                    write=settings.PROXY_KB_CREATE_TIMEOUT,
+                    connect=settings.PROXY_CONNECT_TIMEOUT,
+                    pool=settings.PROXY_TIMEOUT,
+                ),
+            )
 
             if response.status_code in [200, 201]:
                 kb_data = response.json()
                 return ExternalKnowledgeBaseDetailResponse(**kb_data)
             raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
+        except httpx.TimeoutException:
+            logger.error("Timeout creating knowledge base")
+            raise HTTPException(status_code=504, detail="Knowledge base creation timed out")
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Error creating knowledge base: {str(e)}")
+            logger.exception("Error creating knowledge base")
             raise HTTPException(status_code=500, detail=str(e))
 
     async def get_knowledge_bases(

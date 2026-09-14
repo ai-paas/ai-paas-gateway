@@ -108,6 +108,10 @@ Knowledge Base 생성
 문서 파일을 업로드하여 Knowledge Base를 생성합니다.
 파일은 청크로 분할되고 임베딩되어 Milvus에 저장됩니다.
 
+## 처리시간 주의
+파일 청킹+임베딩 처리가 끝나야 응답이 오는 동기 호출입니다. 임베딩 모델이
+콜드 상태(오랜만에 호출)면 응답까지 수 분 걸릴 수 있습니다.
+
 ## Request Body (multipart/form-data)
 - **name** (str, required): Knowledge Base 이름
 - **description** (str, optional): Knowledge Base 설명
@@ -160,6 +164,7 @@ KB가 만들어진 뒤에야 검색 불가·임베딩 과다 청킹으로 드러
 - 400: 유효하지 않은 요청 또는 필수 파라미터 누락
 - 401: 인증되지 않은 사용자
 - 500: Knowledge Base 생성 중 서버 내부 오류
+- 504: 처리시간 초과 (콜드스타트 등, 업스트림 오류 아님 — 잠시 후 재시도)
 """
 
 LIST_KNOWLEDGE_BASES_DESCRIPTION = """
@@ -251,6 +256,10 @@ Knowledge Base에 파일 추가
 기존 Knowledge Base에 문서 파일을 추가합니다.
 파일은 청크로 분할되고 임베딩되어 Milvus의 동일한 Collection에 Partition으로 추가됩니다.
 
+## 처리시간 주의
+Knowledge Base 생성과 동일하게 청킹+임베딩 처리가 끝나야 응답이 오는 동기
+호출입니다. 임베딩 모델이 콜드 상태면 응답까지 수 분 걸릴 수 있습니다.
+
 ## Path Parameters
 - **surro_knowledge_id** (int): Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`)
 
@@ -265,6 +274,7 @@ Knowledge Base에 파일 추가
 - 401: 인증되지 않은 사용자
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 파일 추가 중 서버 내부 오류
+- 504: 처리시간 초과 (콜드스타트 등, 업스트림 오류 아님 — 잠시 후 재시도)
 """
 
 DELETE_FILE_DESCRIPTION = """
@@ -293,6 +303,10 @@ Knowledge Base 검색 테스트
 Knowledge Base에 저장된 문서를 검색합니다.
 Knowledge Base의 설정된 검색 방법(search_method), top_k, threshold를 사용하여 검색을 수행합니다.
 
+## 처리시간 주의
+쿼리 텍스트를 KB에 설정된 임베딩 모델로 임베딩하는 호출입니다. 그 모델이
+콜드 상태면 응답까지 수 분 걸릴 수 있습니다.
+
 ## Path Parameters
 - **surro_knowledge_id** (int): 검색할 Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`)
 
@@ -312,6 +326,7 @@ Knowledge Base의 설정된 검색 방법(search_method), top_k, threshold를 �
 - 401: 인증되지 않은 사용자
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 검색 중 서버 내부 오류
+- 504: 처리시간 초과 (콜드스타트 등, 업스트림 오류 아님 — 잠시 후 재시도)
 """
 
 SEARCH_RECORDS_DESCRIPTION = """
