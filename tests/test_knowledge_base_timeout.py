@@ -45,8 +45,31 @@ def test_create_knowledge_base_uses_dedicated_timeout(monkeypatch):
 
     timeout = captured.get("timeout")
     assert isinstance(timeout, httpx.Timeout), "KB 생성은 전용 타임아웃을 써야 함"
-    assert timeout.read == settings.PROXY_KB_CREATE_TIMEOUT
-    assert timeout.write == settings.PROXY_KB_CREATE_TIMEOUT, "파일 업로드라 write도 늘려야 함"
+    assert timeout.read == settings.PROXY_KB_INGEST_TIMEOUT
+    assert timeout.write == settings.PROXY_KB_INGEST_TIMEOUT, "파일 업로드라 write도 늘려야 함"
+    assert timeout.connect == settings.PROXY_CONNECT_TIMEOUT
+
+
+def test_add_file_uses_dedicated_timeout(monkeypatch):
+    captured = {}
+
+    async def fake_request(method, url, user_info=None, **kwargs):
+        captured.update(kwargs)
+        return _Response({
+            "id": 1, "name": "kb", "description": None, "collection_name": "col",
+            "embedding_model_id": 13, "language_id": 1, "chunk_size": 500,
+            "chunk_overlap": 50, "chunk_type_id": 1, "search_method_id": 1,
+            "top_k": 3, "threshold": 0.4, "files": [],
+        })
+
+    monkeypatch.setattr(knowledge_base_service, "_make_authenticated_request", fake_request)
+
+    asyncio.run(knowledge_base_service.add_file(1, _make_upload()))
+
+    timeout = captured.get("timeout")
+    assert isinstance(timeout, httpx.Timeout), "파일 추가도 생성과 동일한 동기 경로라 전용 타임아웃을 써야 함"
+    assert timeout.read == settings.PROXY_KB_INGEST_TIMEOUT
+    assert timeout.write == settings.PROXY_KB_INGEST_TIMEOUT
     assert timeout.connect == settings.PROXY_CONNECT_TIMEOUT
 
 
