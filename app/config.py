@@ -81,6 +81,10 @@ class Settings:
     PROXY_STRUCTURE_PREDICTION_TIMEOUT: float = float(
         os.getenv("PROXY_STRUCTURE_PREDICTION_TIMEOUT", "300.0")
     )
+    # RAG/LLM 생성은 기본 PROXY_TIMEOUT(30s)보다 오래 걸릴 수 있음.
+    # 150s는 실측된 Ollama 연결 실패 확정 시간(~137s)에 여유를 둔 값 — 정상 상황을 늘려 받쳐주는
+    # 용도이며, 업스트림이 응답 자체를 안 주는 hang 상황의 근본 해결책은 아니다.
+    PROXY_RAG_TIMEOUT: float = float(os.getenv("PROXY_RAG_TIMEOUT", "150.0"))
     PROXY_MAX_CONNECTIONS: int = int(os.getenv("PROXY_MAX_CONNECTIONS", "100"))
     PROXY_MAX_KEEPALIVE_CONNECTIONS: int = int(os.getenv("PROXY_MAX_KEEPALIVE_CONNECTIONS", "20"))
     EXTERNAL_API_USERNAME: str = os.getenv("EXTERNAL_API_USERNAME", "")
