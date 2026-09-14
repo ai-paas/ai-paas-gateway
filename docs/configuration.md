@@ -50,7 +50,7 @@
 | `PROXY_TIMEOUT` / `PROXY_CONNECT_TIMEOUT` | `30.0` / `5.0` | 타임아웃(초) |
 | `PROXY_STRUCTURE_PREDICTION_TIMEOUT` | `300.0` | 단백질 구조 예측 전용 타임아웃 |
 | `PROXY_RAG_TIMEOUT` | `150.0` | RAG/LLM 생성(`test/rag`) 전용 타임아웃 |
-| `PROXY_KB_CREATE_TIMEOUT` | `600.0` | KB 생성 전용 타임아웃 (콜드스타트 대응) |
+| `PROXY_KB_INGEST_TIMEOUT` | `600.0` | KB 생성/파일추가 전용 타임아웃 (콜드스타트 대응) |
 | `PROXY_UPLOAD_TIMEOUT` | `300.0` | 대용량 업로드 타임아웃 |
 | `MAX_DATASET_FILE_SIZE` | `1073741824` | 데이터셋 업로드 최대 크기(1GB) |
 | `PROXY_MAX_CONNECTIONS` / `_MAX_KEEPALIVE_CONNECTIONS` | `100` / `20` | httpx 풀 |
