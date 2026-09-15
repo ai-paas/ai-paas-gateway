@@ -321,7 +321,7 @@ class KnowledgeBaseService:
     async def add_file(
             self, knowledge_base_id: int, file: UploadFile, user_info: Optional[Dict] = None
     ) -> ExternalKnowledgeBaseDetailResponse:
-        """지식베이스에 파일 추가. MLOps 스펙상 create_knowledge_base와 동일한 동기 경로라 같은 타임아웃을 씀."""
+        """지식베이스에 파일 추가."""
         try:
             url = f"{self.base_url}/knowledge-bases/{knowledge_base_id}/files"
             files = {'file': (file.filename, await file.read(), file.content_type)}
