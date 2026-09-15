@@ -34,6 +34,11 @@ def _upstream_error_detail(response: httpx.Response) -> Any:
     return detail if isinstance(detail, (str, list, dict)) else "upstream request rejected"
 
 
+def _raise_kb_timeout(action: str) -> None:
+    """콜드스타트 등으로 처리시간 초과 시 공통 504 변환."""
+    logger.error(f"Timeout: {action}")
+    raise HTTPException(status_code=504, detail=f"{action} timed out")
+
 
 class KnowledgeBaseService:
     """지식베이스 관련 외부 API 서비스"""
@@ -201,16 +206,26 @@ class KnowledgeBaseService:
 
             logger.info(f"Creating knowledge base: {name}")
 
-            response = await self._make_authenticated_request("POST", url, user_info=user_info, files=files, data=data)
+            response = await self._make_authenticated_request(
+                "POST", url, user_info=user_info, files=files, data=data,
+                timeout=httpx.Timeout(
+                    read=settings.PROXY_KB_INGEST_TIMEOUT,
+                    write=settings.PROXY_KB_INGEST_TIMEOUT,
+                    connect=settings.PROXY_CONNECT_TIMEOUT,
+                    pool=settings.PROXY_TIMEOUT,
+                ),
+            )
 
             if response.status_code in [200, 201]:
                 kb_data = response.json()
                 return ExternalKnowledgeBaseDetailResponse(**kb_data)
             raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
+        except httpx.TimeoutException:
+            _raise_kb_timeout("Knowledge base creation")
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Error creating knowledge base: {str(e)}")
+            logger.exception("Error creating knowledge base")
             raise HTTPException(status_code=500, detail=str(e))
 
     async def get_knowledge_bases(
@@ -306,20 +321,30 @@ class KnowledgeBaseService:
     async def add_file(
             self, knowledge_base_id: int, file: UploadFile, user_info: Optional[Dict] = None
     ) -> ExternalKnowledgeBaseDetailResponse:
-        """지식베이스에 파일 추가"""
+        """지식베이스에 파일 추가."""
         try:
             url = f"{self.base_url}/knowledge-bases/{knowledge_base_id}/files"
             files = {'file': (file.filename, await file.read(), file.content_type)}
 
-            response = await self._make_authenticated_request("POST", url, user_info=user_info, files=files)
+            response = await self._make_authenticated_request(
+                "POST", url, user_info=user_info, files=files,
+                timeout=httpx.Timeout(
+                    read=settings.PROXY_KB_INGEST_TIMEOUT,
+                    write=settings.PROXY_KB_INGEST_TIMEOUT,
+                    connect=settings.PROXY_CONNECT_TIMEOUT,
+                    pool=settings.PROXY_TIMEOUT,
+                ),
+            )
 
             if response.status_code in [200, 201]:
                 return ExternalKnowledgeBaseDetailResponse(**response.json())
             raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
+        except httpx.TimeoutException:
+            _raise_kb_timeout("Adding file to knowledge base")
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Error adding file: {str(e)}")
+            logger.exception("Error adding file")
             raise HTTPException(status_code=500, detail=str(e))
 
     async def delete_file(

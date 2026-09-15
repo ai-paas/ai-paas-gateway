@@ -108,6 +108,10 @@ Knowledge Base 생성
 문서 파일을 업로드하여 Knowledge Base를 생성합니다.
 파일은 청크로 분할되고 임베딩되어 Milvus에 저장됩니다.
 
+## 처리시간 주의
+파일 청킹+임베딩 처리가 끝나야 응답이 오는 동기 호출입니다. 임베딩 모델이
+콜드 상태(오랜만에 호출)면 응답까지 수 분 걸릴 수 있습니다.
+
 ## Request Body (multipart/form-data)
 - **name** (str, required): Knowledge Base 이름
 - **description** (str, optional): Knowledge Base 설명
@@ -160,6 +164,8 @@ KB가 만들어진 뒤에야 검색 불가·임베딩 과다 청킹으로 드러
 - 400: 유효하지 않은 요청 또는 필수 파라미터 누락
 - 401: 인증되지 않은 사용자
 - 500: Knowledge Base 생성 중 서버 내부 오류
+- 504: 처리시간 초과 (콜드스타트 등). 타임아웃 이후에도 업스트림에서 생성이 완료될 수
+  있으므로 바로 재시도하지 말고, 목록에 없으면 관리자에게 확인 요청.
 """
 
 LIST_KNOWLEDGE_BASES_DESCRIPTION = """
@@ -265,6 +271,7 @@ Knowledge Base에 파일 추가
 - 401: 인증되지 않은 사용자
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 파일 추가 중 서버 내부 오류
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 DELETE_FILE_DESCRIPTION = """
