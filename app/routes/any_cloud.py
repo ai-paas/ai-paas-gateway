@@ -7,6 +7,8 @@ import websockets as ws_lib
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Path, Query, \
     Request, UploadFile, WebSocket, WebSocketDisconnect, status
 
+from fastapi.responses import StreamingResponse
+
 from app.auth import get_current_admin_user, get_current_user, get_ws_admin_user, \
     ws_bearer_subprotocol
 from app.config import settings
@@ -20,7 +22,6 @@ from app.services.any_cloud_service import any_cloud_service
 
 logger = logging.getLogger(__name__)
 
-
 def require_any_cloud_enabled() -> None:
     """ANY_CLOUD_ENABLED=false 면 503. 플래그를 껐는데 upstream 연결 실패(502)로
     보이던 문제를 없앤다. Swagger 계약은 그대로 유지된다."""
@@ -33,7 +34,6 @@ def require_any_cloud_enabled() -> None:
 
 _enabled = [Depends(require_any_cloud_enabled)]
 
-router = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Test"], dependencies=_enabled)
 router_cluster = APIRouter(prefix="/any-cloud/system", tags=["Any Cloud - Cluster"], dependencies=_enabled)
 router_helm = APIRouter(prefix="/any-cloud", tags=["Any Cloud - HelmRepository"], dependencies=_enabled)
 router_monit = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Monitoring"], dependencies=_enabled)
@@ -50,6 +50,9 @@ router_admin_cluster = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Admin C
 router_admin_agent = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Admin Agent"], dependencies=_enabled)
 router_fleet = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Fleet Upgrade"], dependencies=_enabled)
 router_vm = APIRouter(prefix="/any-cloud/vms", tags=["Any Cloud - VM"], dependencies=_enabled)
+router_node = APIRouter(prefix="/any-cloud/nodes", tags=["Any Cloud - Node"], dependencies=_enabled)
+router_events = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Events"], dependencies=_enabled)
+router_shell = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Admin Shell"], dependencies=_enabled)
 
 
 def _backend_ws_base() -> str:
@@ -82,6 +85,28 @@ async def _ws_forward_backend_to_client(client: WebSocket, backend) -> None:
             await client.send_bytes(msg)
         else:
             await client.send_text(msg)
+
+
+@router_vm.websocket("/{vm_name}/nodes/{host}/ssh")
+async def node_ssh_proxy(websocket: WebSocket, vm_name: str, host: str):
+    """노드 SSH WebSocket proxy. 파드 exec 와 달리 에이전트를 거치지 않는다 — 클러스터가
+    죽어 파드 셸을 못 쓸 때 쓰라고 만든 것이라 에이전트에 기대면 안 된다."""
+    await websocket.accept()
+    backend_url = f"{_backend_ws_base()}/v1/vms/{vm_name}/nodes/{host}/ssh"
+
+    try:
+        async with ws_lib.connect(backend_url) as backend_ws:
+            tasks = [
+                asyncio.create_task(_ws_forward_client_to_backend(websocket, backend_ws)),
+                asyncio.create_task(_ws_forward_backend_to_client(websocket, backend_ws)),
+            ]
+            _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+    except (WebSocketDisconnect, ws_lib.ConnectionClosed):
+        pass
+    except Exception as e:
+        logger.warning(f"node_ssh_proxy: {e}")
 
 
 @router_package.websocket("/kubernetes/clusters/{cluster_name}/pods/{namespace}/{pod_name}/exec")
@@ -3120,6 +3145,78 @@ async def list_vms(
     except Exception as e:
         logger.error(f"Error listing vms: {str(e)}")
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list VMs")
+
+
+@router_shell.post("/clusters/{cluster_name}/nodes/{node_name}/debug-pod")
+async def create_node_debug_pod(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        node_name: str = Path(..., description="노드 이름"),
+        request: Dict[str, Any] = Body(default={}, description="image, namespace, podName, ttlSeconds"),
+        current_user: Member = Depends(get_current_admin_user),
+):
+    """노드 셸용 임시 파드 — 반환된 (namespace, podName) 으로 기존 pod exec WebSocket 에 붙는다"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.create_node_debug_pod(
+            cluster_name=cluster_name, node_name=node_name, request_data=request, user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating debug pod for {cluster_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create debug pod")
+
+
+def _sse_response(path: str, current_user: Member) -> StreamingResponse:
+    user_info = _create_user_info_dict(current_user)
+    return StreamingResponse(
+        any_cloud_service.stream_sse(path, user_info=user_info),
+        media_type="text/event-stream",
+        # 버퍼링되면 이벤트가 모였다가 한꺼번에 도착해 실시간이 아니게 된다.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
+@router_events.get("/events")
+async def stream_resource_events(current_user: Member = Depends(get_current_user)):
+    """자원 변경 신호 단일 스트림. 값이 아니라 무엇이 바뀌었는지만 흐른다."""
+    return _sse_response("/v1/events", current_user)
+
+
+@router_events.get("/operations/{operation_id}/events")
+async def stream_operation_events(
+        operation_id: str = Path(..., description="작업 ID"),
+        current_user: Member = Depends(get_current_user),
+):
+    """작업 진행 이벤트 스트림."""
+    return _sse_response(f"/v1/operations/{operation_id}/events", current_user)
+
+
+@router_node.get("", response_model=AnyCloudPagedResponse)
+async def list_nodes(
+        page: int = Query(1, ge=1),
+        size: int = Query(20, ge=1, le=100),
+        provider: Optional[str] = Query(None, description="CSP filter"),
+        clusterName: Optional[str] = Query(None, description="소속 클러스터 filter"),
+        search: Optional[str] = Query(None, description="검색어"),
+        current_user: Member = Depends(get_current_user),
+):
+    """노드 목록 — 클러스터 경계를 넘어 한 행씩"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.list_nodes(
+            user_info=user_info,
+            provider=provider,
+            cluster_name=clusterName,
+            page=page,
+            size=size,
+            search=search,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing nodes: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list nodes")
 
 
 @router_vm.get("/{vm_name}")
