@@ -143,6 +143,24 @@ class AnyCloudService:
             size=size
         )
 
+    async def stream_sse(self, path: str, user_info: Optional[Dict[str, str]] = None):
+        """
+        백엔드 SSE 를 그대로 흘려보낸다.
+
+        응답을 모아서 반환하면 스트림이 아니라 한 번의 응답이 된다 — 진행 상황이
+        끝나야 보인다. httpx 의 stream 을 그대로 중계한다.
+        """
+        url = f"{self.base_url}{path}"
+        headers = self._get_headers(user_info)
+        headers["Accept"] = "text/event-stream"
+        # SSE 는 오래 열려 있는다. 일반 요청 타임아웃을 쓰면 중간에 끊긴다.
+        async with self.client.stream(
+            "GET", url, headers=headers, timeout=httpx.Timeout(None, connect=settings.ANY_CLOUD_CONNECT_TIMEOUT)
+        ) as response:
+            response.raise_for_status()
+            async for chunk in response.aiter_raw():
+                yield chunk
+
     async def _request_text(
             self,
             method: str,
@@ -496,6 +514,43 @@ class AnyCloudService:
             size=size,
             search=search,
             search_fields=["clusterName", "clusterProvider", "region", "environment", "status"]
+        )
+
+    async def create_node_debug_pod(
+            self, cluster_name: str, node_name: str, request_data: Dict[str, Any], user_info: dict
+    ) -> dict:
+        """노드 셸용 임시 파드. 반환된 (namespace, podName) 으로 기존 pod exec 에 붙는다."""
+        return await self.generic_post(
+            path=f"/v1/clusters/{cluster_name}/nodes/{node_name}/debug-pod",
+            data=request_data,
+            user_info=user_info,
+        )
+
+    async def list_nodes(
+            self,
+            user_info: dict,
+            provider: Optional[str] = None,
+            cluster_name: Optional[str] = None,
+            page: int = 1,
+            size: int = 20,
+            search: Optional[str] = None
+    ) -> AnyCloudPagedResponse:
+        """노드 목록 — 클러스터 경계를 넘어 한 행씩"""
+        params: Dict[str, Any] = {}
+        if provider:
+            params["provider"] = provider
+        if cluster_name:
+            params["clusterName"] = cluster_name
+        response = await self.generic_get(path="/v1/nodes", user_info=user_info, **params)
+        data = response.get("data", [])
+        if isinstance(data, dict):
+            data = data.get("items", [])
+        return self._apply_client_side_pagination(
+            data=data,
+            page=page,
+            size=size,
+            search=search,
+            search_fields=["nodeName", "role", "clusterName", "clusterProvider", "privateIp", "publicIp"]
         )
 
     async def get_vm_detail(self, vm_name: str, user_info: dict) -> dict:
