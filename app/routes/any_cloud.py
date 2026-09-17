@@ -7,6 +7,8 @@ import websockets as ws_lib
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Path, Query, \
     Request, UploadFile, WebSocket, WebSocketDisconnect, status
 
+from fastapi.responses import StreamingResponse
+
 from app.auth import get_current_admin_user, get_current_user, get_ws_admin_user, \
     ws_bearer_subprotocol
 from app.config import settings
@@ -15,11 +17,10 @@ from app.schemas.any_cloud import AnyCloudResponse, ClusterCreateRequest, \
     HelmRepoCreateRequest, ClusterUpdateRequest, AnyCloudPagedResponse, \
     CredentialCreateRequest, ClusterValidationRequest, AddonInstallRequest, \
     HelmReleaseInstallRequest, OperationResponse, PrometheusMultiQueryRequest, \
-    UnifiedClusterResponse
+    UnifiedClusterResponse, CredentialUpdateRequest, NodeDebugPodRequest
 from app.services.any_cloud_service import any_cloud_service
 
 logger = logging.getLogger(__name__)
-
 
 def require_any_cloud_enabled() -> None:
     """ANY_CLOUD_ENABLED=false 면 503. 플래그를 껐는데 upstream 연결 실패(502)로
@@ -33,7 +34,6 @@ def require_any_cloud_enabled() -> None:
 
 _enabled = [Depends(require_any_cloud_enabled)]
 
-router = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Test"], dependencies=_enabled)
 router_cluster = APIRouter(prefix="/any-cloud/system", tags=["Any Cloud - Cluster"], dependencies=_enabled)
 router_helm = APIRouter(prefix="/any-cloud", tags=["Any Cloud - HelmRepository"], dependencies=_enabled)
 router_monit = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Monitoring"], dependencies=_enabled)
@@ -50,6 +50,9 @@ router_admin_cluster = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Admin C
 router_admin_agent = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Admin Agent"], dependencies=_enabled)
 router_fleet = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Fleet Upgrade"], dependencies=_enabled)
 router_vm = APIRouter(prefix="/any-cloud/vms", tags=["Any Cloud - VM"], dependencies=_enabled)
+router_node = APIRouter(prefix="/any-cloud/nodes", tags=["Any Cloud - Node"], dependencies=_enabled)
+router_events = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Events"], dependencies=_enabled)
+router_shell = APIRouter(prefix="/any-cloud", tags=["Any Cloud - Admin Shell"], dependencies=_enabled)
 
 
 def _backend_ws_base() -> str:
@@ -82,6 +85,41 @@ async def _ws_forward_backend_to_client(client: WebSocket, backend) -> None:
             await client.send_bytes(msg)
         else:
             await client.send_text(msg)
+
+
+@router_vm.websocket("/{vm_name}/nodes/{host}/ssh")
+async def node_ssh_proxy(
+        websocket: WebSocket,
+        vm_name: str,
+        host: str,
+        current_user: Member = Depends(get_ws_admin_user),
+):
+    """노드 SSH WebSocket proxy (admin 전용). 파드 exec 와 달리 에이전트를 거치지 않는다 —
+    클러스터가 죽어 파드 셸을 못 쓸 때 쓰라고 만든 것이라 에이전트에 기대면 안 된다.
+
+    노드 셸을 그대로 여는 통로라 pod exec 와 같은 admin 게이트를 둔다. 토큰 전달도 같다:
+    `Authorization: Bearer <token>` 헤더, 또는 브라우저에서는
+    `new WebSocket(url, ["bearer", "<access_token>"])` 서브프로토콜.
+    """
+    await websocket.accept(subprotocol=ws_bearer_subprotocol(websocket))
+    logger.info(f"node_ssh_proxy opened by {current_user.member_id}: {vm_name}/{host}")
+    backend_path = "/".join(quote(seg, safe="") for seg in ("v1", "vms", vm_name, "nodes", host, "ssh"))
+    backend_url = f"{_backend_ws_base()}/{backend_path}"
+
+    try:
+        async with ws_lib.connect(backend_url) as backend_ws:
+            tasks = [
+                asyncio.create_task(_ws_forward_client_to_backend(websocket, backend_ws)),
+                asyncio.create_task(_ws_forward_backend_to_client(websocket, backend_ws)),
+            ]
+            _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+    except (WebSocketDisconnect, ws_lib.ConnectionClosed):
+        pass
+    except Exception as e:
+        logger.warning(f"node_ssh_proxy: {e}")
+    await websocket.close()
 
 
 @router_package.websocket("/kubernetes/clusters/{cluster_name}/pods/{namespace}/{pod_name}/exec")
@@ -1661,6 +1699,25 @@ async def get_provider_config_schema(
         )
 
 
+@router_provider.get("/providers/{provider}/credential-schema")
+async def get_provider_credential_schema(
+        provider: str = Path(..., description="CSP 식별자"),
+        current_user: Member = Depends(get_current_user)
+):
+    """CSP 별 자격증명 입력 필드 스키마 조회"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.get_provider_credential_schema(provider=provider, user_info=user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting credential-schema for {provider}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get credential schema"
+        )
+
+
 @router_provider.get("/providers/{provider}/images")
 async def get_provider_images(
         request: Request,
@@ -1726,6 +1783,83 @@ async def get_credential(
         )
 
 
+@router_credential.get("/credentials/{credential_id}/reveal")
+async def reveal_credential(
+        credential_id: str = Path(..., description="자격증명 ID"),
+        current_user: Member = Depends(get_current_admin_user)
+):
+    """
+    등록된 자격증명 값을 조회합니다 (admin 전용 — 목록·상세와 같은 게이트).
+
+    목록, 상세 응답에는 값이 섞이지 않으며 이 호출만 값을 노출합니다.
+    누가 언제 어느 자격증명을 봤는지 백엔드 감사 로그에 남습니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.reveal_credential(
+            credential_id=credential_id, user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error revealing credential {credential_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reveal credential"
+        )
+
+
+@router_credential.post("/credentials/{credential_id}/health")
+async def check_credential_health(
+        credential_id: str = Path(..., description="자격증명 ID"),
+        current_user: Member = Depends(get_current_admin_user)
+):
+    """
+    자격증명이 실제로 쓸 수 있는 상태인지 확인합니다.
+
+    CSP API 를 실제로 호출해 판정하며 비밀값은 내보내지 않습니다.
+    확인 자체는 성공한 호출이므로 결과가 실패여도 200 으로 돌아옵니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.check_credential_health(
+            credential_id=credential_id, user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error checking credential health {credential_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to check credential health"
+        )
+
+
+@router_credential.post("/credentials/{credential_id}/health/refresh")
+async def refresh_credential_health(
+        credential_id: str = Path(..., description="자격증명 ID"),
+        current_user: Member = Depends(get_current_admin_user)
+):
+    """
+    마지막 확인이 오래됐을 때만 CSP API 를 호출합니다.
+
+    최근에 확인했으면 저장된 결과를 그대로 반환합니다. 화면 진입 시 자동 갱신용입니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.refresh_credential_health(
+            credential_id=credential_id, user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error refreshing credential health {credential_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to refresh credential health"
+        )
+
+
 @router_credential.post("/credentials")
 async def create_credential(
         body: CredentialCreateRequest = Body(
@@ -1786,6 +1920,28 @@ async def create_credential(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create credential"
+        )
+
+
+@router_credential.patch("/credentials/{credential_id}")
+async def update_credential(
+        credential_id: str = Path(..., description="자격증명 ID"),
+        body: CredentialUpdateRequest = Body(..., description="description, credentials"),
+        current_user: Member = Depends(get_current_admin_user)
+):
+    """CSP 자격증명 수정 — 설명과 값. 이름과 프로바이더는 바꿀 수 없다"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.update_credential(
+            credential_id=credential_id, request_data=body.model_dump(exclude_none=True), user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating credential {credential_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update credential"
         )
 
 
@@ -2982,6 +3138,7 @@ async def list_vms(
         provider: Optional[str] = Query(None, description="CSP filter"),
         environment: Optional[str] = Query(None, description="환경 filter"),
         status_filter: Optional[str] = Query(None, alias="status", description="VM 상태 filter"),
+        includeDeleted: bool = Query(False, description="삭제된 항목도 함께 반환"),
         search: Optional[str] = Query(None, description="검색어"),
         current_user: Member = Depends(get_current_user),
 ):
@@ -2993,6 +3150,7 @@ async def list_vms(
             provider=provider,
             environment=environment,
             status_filter=status_filter,
+            include_deleted=includeDeleted,
             page=page,
             size=size,
             search=search,
@@ -3002,6 +3160,85 @@ async def list_vms(
     except Exception as e:
         logger.error(f"Error listing vms: {str(e)}")
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list VMs")
+
+
+@router_shell.post("/clusters/{cluster_name}/nodes/{node_name}/debug-pod")
+async def create_node_debug_pod(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        node_name: str = Path(..., description="노드 이름"),
+        body: Optional[NodeDebugPodRequest] = Body(None, description="image, namespace, podName, ttlSeconds"),
+        current_user: Member = Depends(get_current_admin_user),
+):
+    """노드 셸용 임시 파드 — 반환된 (namespace, podName) 으로 기존 pod exec WebSocket 에 붙는다"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        request_data = body.model_dump(exclude_none=True) if body else {}
+        return await any_cloud_service.create_node_debug_pod(
+            cluster_name=cluster_name, node_name=node_name, request_data=request_data, user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating debug pod for {cluster_name}: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create debug pod")
+
+
+async def _sse_response(path: str, current_user: Member) -> StreamingResponse:
+    """upstream 스트림을 먼저 열어 상태코드를 확인한 뒤 응답을 시작한다.
+
+    StreamingResponse 는 첫 헤더를 보낸 뒤 상태코드를 바꿀 수 없다. 제너레이터 안에서
+    upstream 오류가 나면 클라이언트는 200 + 빈 스트림을 받고 EventSource 는 무한 재접속한다.
+    """
+    user_info = _create_user_info_dict(current_user)
+    body = await any_cloud_service.open_sse(path, user_info=user_info)
+    return StreamingResponse(
+        body,
+        media_type="text/event-stream",
+        # 버퍼링되면 이벤트가 모였다가 한꺼번에 도착해 실시간이 아니게 된다.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
+
+@router_events.get("/events")
+async def stream_resource_events(current_user: Member = Depends(get_current_user)):
+    """자원 변경 신호 단일 스트림. 값이 아니라 무엇이 바뀌었는지만 흐른다."""
+    return await _sse_response("/v1/events", current_user)
+
+
+@router_events.get("/operations/{operation_id}/events")
+async def stream_operation_events(
+        operation_id: str = Path(..., description="작업 ID"),
+        current_user: Member = Depends(get_current_user),
+):
+    """작업 진행 이벤트 스트림."""
+    return await _sse_response(f"/v1/operations/{quote(operation_id, safe='')}/events", current_user)
+
+
+@router_node.get("", response_model=AnyCloudPagedResponse)
+async def list_nodes(
+        page: int = Query(1, ge=1),
+        size: int = Query(20, ge=1, le=100),
+        provider: Optional[str] = Query(None, description="CSP filter"),
+        clusterName: Optional[str] = Query(None, description="소속 클러스터 filter"),
+        search: Optional[str] = Query(None, description="검색어"),
+        current_user: Member = Depends(get_current_user),
+):
+    """노드 목록 — 클러스터 경계를 넘어 한 행씩"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.list_nodes(
+            user_info=user_info,
+            provider=provider,
+            cluster_name=clusterName,
+            page=page,
+            size=size,
+            search=search,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing nodes: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list nodes")
 
 
 @router_vm.get("/{vm_name}")
@@ -3063,12 +3300,17 @@ async def patch_vm(
 @router_vm.delete("/{vm_name}")
 async def delete_vm(
         vm_name: str = Path(...),
+        force: bool = Query(
+            False,
+            description="destroy 없이 기록만 삭제. 자격증명이 사라져 destroy 가 인증하지 못할 때의 "
+                        "마지막 수단이며, 클라우드에 자원이 남아 있을 수 있다.",
+        ),
         current_user: Member = Depends(get_current_admin_user),
 ):
-    """VM 삭제 (Pulumi destroy) — 202 + Operation"""
+    """VM 삭제 (Pulumi destroy) — 202 + Operation. force=true 면 200 + 남을 수 있는 스택 목록."""
     try:
         user_info = _create_user_info_dict(current_user)
-        return await any_cloud_service.delete_vm(vm_name=vm_name, user_info=user_info)
+        return await any_cloud_service.delete_vm(vm_name=vm_name, user_info=user_info, force=force)
     except HTTPException:
         raise
     except Exception as e:

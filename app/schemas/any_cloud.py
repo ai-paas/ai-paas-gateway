@@ -88,6 +88,37 @@ ClusterCreateRequest = Annotated[
 ]
 
 
+class NetworkSpecRequest(BaseModel):
+    """네트워크 대역. 셋이 겹치면 파드나 서비스 트래픽이 엉뚱한 곳으로 간다."""
+    vpcCidr: Optional[str] = Field(None, description="VPC CIDR. Proxmox 는 쓰지 않는다", examples=["10.90.0.0/24"])
+    podCidr: Optional[str] = Field(None, description="파드 CIDR", examples=["10.244.0.0/16"])
+    serviceCidr: Optional[str] = Field(None, description="서비스 CIDR", examples=["10.96.0.0/12"])
+
+
+class ClusterSpecRequest(BaseModel):
+    """CSP 무관 클러스터 사양. 7개 CSP 전부에 대응물이 있는 값만 담는다."""
+    kubernetesVersion: Optional[str] = Field(None, description="Kubernetes 버전", examples=["1.31"])
+    masterCount: Optional[int] = Field(None, ge=1, le=7, description="control-plane 수. 짝수면 홀수로 올림", examples=[1])
+    workerCount: Optional[int] = Field(None, ge=0, le=50, description="worker 수", examples=[2])
+    masterInstanceType: Optional[str] = Field(
+        None,
+        description='master 인스턴스 타입. Proxmox 는 "코어-메모리MiB"',
+        examples=["t3.large"]
+    )
+    workerInstanceType: Optional[str] = Field(None, description="worker 인스턴스 타입", examples=["t3.large"])
+    rootDiskSizeGb: Optional[int] = Field(None, ge=20, le=2000, description="루트 디스크 GB", examples=[50])
+    osImage: Optional[str] = Field(
+        None,
+        description="OS 이미지. 표현이 CSP 마다 다르다 — OCI 는 OCID, Azure 는 publisher:offer:sku:version",
+        examples=["ubuntu-24.04"]
+    )
+    sshUser: Optional[str] = Field(None, description="SSH 사용자", examples=["ubuntu"])
+    network: Optional[NetworkSpecRequest] = Field(None, description="네트워크 대역")
+    enableIngress: Optional[bool] = Field(None, description="ingress controller 설치")
+    enableGpuOperator: Optional[bool] = Field(None, description="GPU operator 설치")
+    useSpot: Optional[bool] = Field(None, description="spot/preemptible 인스턴스 사용")
+
+
 class VmGatewayCreateRequest(BaseModel):
     """POST /any-cloud/vms body — VM 인프라 생성 (백엔드 /v1/vms 직접 매핑, source discriminator 없음)."""
     vmGroupName: str = Field(
@@ -98,17 +129,20 @@ class VmGatewayCreateRequest(BaseModel):
     )
     provider: str = Field(
         ...,
-        description='CSP — "aws" | "gcp" | "azure" | "openstack" | "alibaba" | "oci" | "digitalocean"',
+        description='CSP — "aws" | "gcp" | "azure" | "openstack" | "oci" | "proxmox" | "ibm"',
         examples=["aws"]
     )
     region: str = Field(..., description="CSP 리전", examples=["ap-northeast-2"])
     environment: Optional[str] = Field(None, description="환경 태그", examples=["dev"])
     credentialId: str = Field(..., description="사전 등록된 CSP credential id", examples=["cred-aws-001"])
     description: Optional[str] = Field(None, description="설명 (선택)")
-    config: Optional[Dict[str, str]] = Field(
-        default_factory=dict,
-        description="Pulumi config — workerCount/instanceType 등",
-        examples=[{"workerCount": "3", "instanceType": "t3.medium"}]
+    spec: Optional[ClusterSpecRequest] = Field(None, description="CSP 무관 클러스터 사양")
+    providerSpec: Optional[Dict[str, Any]] = Field(
+        None,
+        description="provider 전용 설정. provider 마다 스키마가 달라 서버가 키를 미리 알 수 없다. "
+                    "필요한 키는 GET /any-cloud/providers/{provider}/config-schema 로 조회한다.",
+        examples=[{"imageName": "ubuntu-24.04", "flavorName": "4-8-50",
+                   "externalNetworkId": "3f8d3f36-...", "floatingIpPool": "external"}]
     )
     hasGpuNodes: Optional[bool] = Field(False, description="GPU 노드 포함 여부")
 
@@ -261,6 +295,26 @@ class CredentialCreateRequest(BaseModel):
         description="CSP 별 키/값 (ProvisioningCredentialRules.requiredCredentialKeys 참조)",
         examples=[{"AWS_ACCESS_KEY_ID": "AKIA...", "AWS_SECRET_ACCESS_KEY": "***"}]
     )
+
+
+class CredentialUpdateRequest(BaseModel):
+    """PATCH /any-cloud/credentials/{credential_id} body — 설명과 값만. 이름·프로바이더는 백엔드가 막는다."""
+    model_config = ConfigDict(extra="allow")
+    description: Optional[str] = Field(None, description="설명", examples=["AWS development account"])
+    credentials: Optional[Dict[str, str]] = Field(
+        None,
+        description="CSP 별 키/값. 보내면 통째로 교체된다",
+        examples=[{"AWS_ACCESS_KEY_ID": "AKIA...", "AWS_SECRET_ACCESS_KEY": "***"}]
+    )
+
+
+class NodeDebugPodRequest(BaseModel):
+    """POST /any-cloud/clusters/{cluster_name}/nodes/{node_name}/debug-pod body — 노드 셸용 임시 파드."""
+    model_config = ConfigDict(extra="allow")
+    image: Optional[str] = Field(None, description="파드 이미지 (비우면 백엔드 기본값)")
+    namespace: Optional[str] = Field(None, description="파드 네임스페이스", examples=["kube-system"])
+    podName: Optional[str] = Field(None, description="파드 이름 (비우면 백엔드가 생성)")
+    ttlSeconds: Optional[int] = Field(None, description="자동 삭제까지의 초")
 
 
 class ClusterValidationRequest(BaseModel):

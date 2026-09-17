@@ -45,16 +45,16 @@ SECTIONS: list[tuple[str, list[str]]] = [
     ("지식베이스", ["Knowledge Bases"]),
     ("Hub Connect", ["Hub Connect"]),
     ("Any Cloud — 클러스터", ["Any Cloud - Cluster"]),
-    ("Any Cloud — VM 인프라", ["Any Cloud - VM"]),
+    ("Any Cloud — VM 인프라", ["Any Cloud - VM", "Any Cloud - Node"]),
     ("Any Cloud — Kubernetes", ["Any Cloud - Kubernetes", "Any Cloud - Packages"]),
     ("Any Cloud — Helm 저장소 · 카탈로그", ["Any Cloud - HelmRepository", "Any Cloud - Catalog"]),
     ("Any Cloud — 모니터링 · 관측", ["Any Cloud - Monitoring", "Any Cloud - Observability"]),
     ("Any Cloud — 프로바이더 · 자격증명 · 애드온",
      ["Any Cloud - Providers", "Any Cloud - Credentials", "Any Cloud - Addons"]),
-    ("Any Cloud — 작업 · 워크플로", ["Any Cloud - Operations", "Any Cloud - Workflow"]),
+    ("Any Cloud — 작업 · 워크플로", ["Any Cloud - Operations", "Any Cloud - Workflow", "Any Cloud - Events"]),
     ("Any Cloud — 관리자 전용",
      ["Any Cloud - Admin", "Any Cloud - Admin Cluster", "Any Cloud - Admin Agent",
-      "Any Cloud - Fleet Upgrade"]),
+      "Any Cloud - Fleet Upgrade", "Any Cloud - Admin Shell"]),
     ("관리자 대시보드", ["Admin - Dashboard"]),
     ("개인 대시보드", ["My - Dashboard"]),
 ]
@@ -85,6 +85,7 @@ SKIP_PATHS = {"/api/v1/openapi.json"}
 
 # WebSocket 라우트는 APIRouter 의 tags 를 물려받지 않는다 — 경로로 보정.
 PATH_TAG_FALLBACK = [
+    ("/api/v1/any-cloud/vms", "Any Cloud - VM"),
     ("/api/v1/any-cloud/kubernetes", "Any Cloud - Kubernetes"),
     ("/api/v1/any-cloud", "Any Cloud - Cluster"),
 ]
