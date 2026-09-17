@@ -297,6 +297,26 @@ class CredentialCreateRequest(BaseModel):
     )
 
 
+class CredentialUpdateRequest(BaseModel):
+    """PATCH /any-cloud/credentials/{credential_id} body — 설명과 값만. 이름·프로바이더는 백엔드가 막는다."""
+    model_config = ConfigDict(extra="allow")
+    description: Optional[str] = Field(None, description="설명", examples=["AWS development account"])
+    credentials: Optional[Dict[str, str]] = Field(
+        None,
+        description="CSP 별 키/값. 보내면 통째로 교체된다",
+        examples=[{"AWS_ACCESS_KEY_ID": "AKIA...", "AWS_SECRET_ACCESS_KEY": "***"}]
+    )
+
+
+class NodeDebugPodRequest(BaseModel):
+    """POST /any-cloud/clusters/{cluster_name}/nodes/{node_name}/debug-pod body — 노드 셸용 임시 파드."""
+    model_config = ConfigDict(extra="allow")
+    image: Optional[str] = Field(None, description="파드 이미지 (비우면 백엔드 기본값)")
+    namespace: Optional[str] = Field(None, description="파드 네임스페이스", examples=["kube-system"])
+    podName: Optional[str] = Field(None, description="파드 이름 (비우면 백엔드가 생성)")
+    ttlSeconds: Optional[int] = Field(None, description="자동 삭제까지의 초")
+
+
 class ClusterValidationRequest(BaseModel):
     """VM 클러스터 생성 사전 검증 요청 (flat 구조, VM source 전용)"""
     model_config = ConfigDict(extra="allow")

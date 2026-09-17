@@ -17,7 +17,7 @@ from app.schemas.any_cloud import AnyCloudResponse, ClusterCreateRequest, \
     HelmRepoCreateRequest, ClusterUpdateRequest, AnyCloudPagedResponse, \
     CredentialCreateRequest, ClusterValidationRequest, AddonInstallRequest, \
     HelmReleaseInstallRequest, OperationResponse, PrometheusMultiQueryRequest, \
-    UnifiedClusterResponse
+    UnifiedClusterResponse, CredentialUpdateRequest, NodeDebugPodRequest
 from app.services.any_cloud_service import any_cloud_service
 
 logger = logging.getLogger(__name__)
@@ -88,11 +88,23 @@ async def _ws_forward_backend_to_client(client: WebSocket, backend) -> None:
 
 
 @router_vm.websocket("/{vm_name}/nodes/{host}/ssh")
-async def node_ssh_proxy(websocket: WebSocket, vm_name: str, host: str):
-    """노드 SSH WebSocket proxy. 파드 exec 와 달리 에이전트를 거치지 않는다 — 클러스터가
-    죽어 파드 셸을 못 쓸 때 쓰라고 만든 것이라 에이전트에 기대면 안 된다."""
-    await websocket.accept()
-    backend_url = f"{_backend_ws_base()}/v1/vms/{vm_name}/nodes/{host}/ssh"
+async def node_ssh_proxy(
+        websocket: WebSocket,
+        vm_name: str,
+        host: str,
+        current_user: Member = Depends(get_ws_admin_user),
+):
+    """노드 SSH WebSocket proxy (admin 전용). 파드 exec 와 달리 에이전트를 거치지 않는다 —
+    클러스터가 죽어 파드 셸을 못 쓸 때 쓰라고 만든 것이라 에이전트에 기대면 안 된다.
+
+    노드 셸을 그대로 여는 통로라 pod exec 와 같은 admin 게이트를 둔다. 토큰 전달도 같다:
+    `Authorization: Bearer <token>` 헤더, 또는 브라우저에서는
+    `new WebSocket(url, ["bearer", "<access_token>"])` 서브프로토콜.
+    """
+    await websocket.accept(subprotocol=ws_bearer_subprotocol(websocket))
+    logger.info(f"node_ssh_proxy opened by {current_user.member_id}: {vm_name}/{host}")
+    backend_path = "/".join(quote(seg, safe="") for seg in ("v1", "vms", vm_name, "nodes", host, "ssh"))
+    backend_url = f"{_backend_ws_base()}/{backend_path}"
 
     try:
         async with ws_lib.connect(backend_url) as backend_ws:
@@ -107,6 +119,7 @@ async def node_ssh_proxy(websocket: WebSocket, vm_name: str, host: str):
         pass
     except Exception as e:
         logger.warning(f"node_ssh_proxy: {e}")
+    await websocket.close()
 
 
 @router_package.websocket("/kubernetes/clusters/{cluster_name}/pods/{namespace}/{pod_name}/exec")
@@ -1773,10 +1786,10 @@ async def get_credential(
 @router_credential.get("/credentials/{credential_id}/reveal")
 async def reveal_credential(
         credential_id: str = Path(..., description="자격증명 ID"),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """
-    등록된 자격증명 값을 조회합니다.
+    등록된 자격증명 값을 조회합니다 (admin 전용 — 목록·상세와 같은 게이트).
 
     목록, 상세 응답에는 값이 섞이지 않으며 이 호출만 값을 노출합니다.
     누가 언제 어느 자격증명을 봤는지 백엔드 감사 로그에 남습니다.
@@ -1913,14 +1926,14 @@ async def create_credential(
 @router_credential.patch("/credentials/{credential_id}")
 async def update_credential(
         credential_id: str = Path(..., description="자격증명 ID"),
-        request: Dict[str, Any] = Body(..., description="description, credentials"),
+        body: CredentialUpdateRequest = Body(..., description="description, credentials"),
         current_user: Member = Depends(get_current_admin_user)
 ):
     """CSP 자격증명 수정 — 설명과 값. 이름과 프로바이더는 바꿀 수 없다"""
     try:
         user_info = _create_user_info_dict(current_user)
         return await any_cloud_service.update_credential(
-            credential_id=credential_id, request_data=request, user_info=user_info
+            credential_id=credential_id, request_data=body.model_dump(exclude_none=True), user_info=user_info
         )
     except HTTPException:
         raise
@@ -3153,14 +3166,15 @@ async def list_vms(
 async def create_node_debug_pod(
         cluster_name: str = Path(..., description="클러스터 이름"),
         node_name: str = Path(..., description="노드 이름"),
-        request: Dict[str, Any] = Body(default={}, description="image, namespace, podName, ttlSeconds"),
+        body: Optional[NodeDebugPodRequest] = Body(None, description="image, namespace, podName, ttlSeconds"),
         current_user: Member = Depends(get_current_admin_user),
 ):
     """노드 셸용 임시 파드 — 반환된 (namespace, podName) 으로 기존 pod exec WebSocket 에 붙는다"""
     try:
         user_info = _create_user_info_dict(current_user)
+        request_data = body.model_dump(exclude_none=True) if body else {}
         return await any_cloud_service.create_node_debug_pod(
-            cluster_name=cluster_name, node_name=node_name, request_data=request, user_info=user_info
+            cluster_name=cluster_name, node_name=node_name, request_data=request_data, user_info=user_info
         )
     except HTTPException:
         raise
@@ -3169,10 +3183,16 @@ async def create_node_debug_pod(
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create debug pod")
 
 
-def _sse_response(path: str, current_user: Member) -> StreamingResponse:
+async def _sse_response(path: str, current_user: Member) -> StreamingResponse:
+    """upstream 스트림을 먼저 열어 상태코드를 확인한 뒤 응답을 시작한다.
+
+    StreamingResponse 는 첫 헤더를 보낸 뒤 상태코드를 바꿀 수 없다. 제너레이터 안에서
+    upstream 오류가 나면 클라이언트는 200 + 빈 스트림을 받고 EventSource 는 무한 재접속한다.
+    """
     user_info = _create_user_info_dict(current_user)
+    body = await any_cloud_service.open_sse(path, user_info=user_info)
     return StreamingResponse(
-        any_cloud_service.stream_sse(path, user_info=user_info),
+        body,
         media_type="text/event-stream",
         # 버퍼링되면 이벤트가 모였다가 한꺼번에 도착해 실시간이 아니게 된다.
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
@@ -3182,7 +3202,7 @@ def _sse_response(path: str, current_user: Member) -> StreamingResponse:
 @router_events.get("/events")
 async def stream_resource_events(current_user: Member = Depends(get_current_user)):
     """자원 변경 신호 단일 스트림. 값이 아니라 무엇이 바뀌었는지만 흐른다."""
-    return _sse_response("/v1/events", current_user)
+    return await _sse_response("/v1/events", current_user)
 
 
 @router_events.get("/operations/{operation_id}/events")
@@ -3191,7 +3211,7 @@ async def stream_operation_events(
         current_user: Member = Depends(get_current_user),
 ):
     """작업 진행 이벤트 스트림."""
-    return _sse_response(f"/v1/operations/{operation_id}/events", current_user)
+    return await _sse_response(f"/v1/operations/{quote(operation_id, safe='')}/events", current_user)
 
 
 @router_node.get("", response_model=AnyCloudPagedResponse)
