@@ -220,7 +220,12 @@ class AnyCloudService:
             response_data = response.json()
             # success/data 형태로 감싸 내려오는 응답은 data 만 추출
             if isinstance(response_data, dict) and "data" in response_data and "success" in response_data:
+                # meta 는 버리지 않는다 — 총 건수가 여기 있어서, 없으면 화면이 마지막
+                # 페이지를 계산하지 못하고 받은 건수만큼만 페이지를 만든다.
+                meta = response_data.get("meta")
                 response_data = response_data["data"]
+                if meta is not None:
+                    return {"data": response_data, "meta": meta}
             return {"data": response_data}
 
         except httpx.TimeoutException as e:
