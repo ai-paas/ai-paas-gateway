@@ -492,6 +492,7 @@ class AnyCloudService:
             provider: Optional[str] = None,
             environment: Optional[str] = None,
             status_filter: Optional[str] = None,
+            include_deleted: bool = False,
             page: int = 1,
             size: int = 20,
             search: Optional[str] = None
@@ -504,6 +505,9 @@ class AnyCloudService:
             params["environment"] = environment
         if status_filter:
             params["status"] = status_filter
+        if include_deleted:
+            # 삭제된 것"도" 함께 본다. status 를 명시하면 백엔드가 그 필터를 우선한다.
+            params["includeDeleted"] = "true"
         response = await self.generic_get(path="/v1/vms", user_info=user_info, **params)
         data = response.get("data", [])
         if isinstance(data, dict):
@@ -570,9 +574,10 @@ class AnyCloudService:
             return response["data"]
         return response
 
-    async def delete_vm(self, vm_name: str, user_info: dict) -> dict:
-        """VM 삭제 (Pulumi destroy — 202 + Operation)"""
-        return await self.generic_delete(path=f"/v1/vms/{_seg(vm_name)}", user_info=user_info)
+    async def delete_vm(self, vm_name: str, user_info: dict, force: bool = False) -> dict:
+        """VM 삭제 (Pulumi destroy — 202 + Operation). force 는 기록만 지운다."""
+        params = {"force": "true"} if force else {}
+        return await self.generic_delete(path=f"/v1/vms/{_seg(vm_name)}", user_info=user_info, **params)
 
     async def list_vm_operations(self, vm_name: str, user_info: dict, page_size: int = 50) -> dict:
         """VM 의 operation 이력"""

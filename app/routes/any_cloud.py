@@ -3125,6 +3125,7 @@ async def list_vms(
         provider: Optional[str] = Query(None, description="CSP filter"),
         environment: Optional[str] = Query(None, description="환경 filter"),
         status_filter: Optional[str] = Query(None, alias="status", description="VM 상태 filter"),
+        includeDeleted: bool = Query(False, description="삭제된 항목도 함께 반환"),
         search: Optional[str] = Query(None, description="검색어"),
         current_user: Member = Depends(get_current_user),
 ):
@@ -3136,6 +3137,7 @@ async def list_vms(
             provider=provider,
             environment=environment,
             status_filter=status_filter,
+            include_deleted=includeDeleted,
             page=page,
             size=size,
             search=search,
@@ -3278,12 +3280,17 @@ async def patch_vm(
 @router_vm.delete("/{vm_name}")
 async def delete_vm(
         vm_name: str = Path(...),
+        force: bool = Query(
+            False,
+            description="destroy 없이 기록만 삭제. 자격증명이 사라져 destroy 가 인증하지 못할 때의 "
+                        "마지막 수단이며, 클라우드에 자원이 남아 있을 수 있다.",
+        ),
         current_user: Member = Depends(get_current_admin_user),
 ):
-    """VM 삭제 (Pulumi destroy) — 202 + Operation"""
+    """VM 삭제 (Pulumi destroy) — 202 + Operation. force=true 면 200 + 남을 수 있는 스택 목록."""
     try:
         user_info = _create_user_info_dict(current_user)
-        return await any_cloud_service.delete_vm(vm_name=vm_name, user_info=user_info)
+        return await any_cloud_service.delete_vm(vm_name=vm_name, user_info=user_info, force=force)
     except HTTPException:
         raise
     except Exception as e:
