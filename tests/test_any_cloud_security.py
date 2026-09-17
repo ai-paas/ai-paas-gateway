@@ -56,6 +56,7 @@ def test_every_mutating_any_cloud_route_requires_admin():
     "path",
     [
         f"{API}/any-cloud/credentials",
+        f"{API}/any-cloud/credentials/{{credential_id}}/reveal",
         f"{API}/any-cloud/audit-logs",
         f"{API}/any-cloud/system/cluster/{{cluster_name}}/kubeconfig",
         f"{API}/any-cloud/system/cluster/{{cluster_name}}/agent-bootstrap",
@@ -71,9 +72,21 @@ def test_secret_bearing_reads_require_admin(path):
     pytest.fail(f"라우트를 찾지 못함: {path}")
 
 
-def test_pod_exec_websocket_rejects_anonymous():
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"{API}/any-cloud/kubernetes/clusters/c1/pods/kube-system/p1/exec",
+        f"{API}/any-cloud/vms/vm1/nodes/node-1/ssh",
+    ],
+)
+def test_shell_websockets_reject_anonymous(monkeypatch, url):
+    """파드 exec·노드 SSH 모두 무인증 연결을 거부한다. 백엔드로 다이얼하기 전에 끊겨야 한다."""
+    from app.routes import any_cloud as mod
+
+    monkeypatch.setattr(mod.settings, "ANY_CLOUD_ENABLED", True)
+    dialed = []
+    monkeypatch.setattr(mod.ws_lib, "connect", lambda *args, **kwargs: dialed.append(args))
     client = TestClient(app)
-    url = f"{API}/any-cloud/kubernetes/clusters/c1/pods/kube-system/p1/exec"
 
     with pytest.raises(Exception):
         with client.websocket_connect(url):
@@ -82,14 +95,18 @@ def test_pod_exec_websocket_rejects_anonymous():
     with pytest.raises(Exception):
         with client.websocket_connect(url, subprotocols=["bearer", "not-a-real-token"]):
             pass
+    assert dialed == []
 
 
-def test_pod_exec_websocket_is_admin_only():
-    for route, path, _ in _any_cloud_routes():
-        if path.endswith("/exec"):
-            assert "get_ws_admin_user" in _dependency_names(route)
-            return
-    pytest.fail("pod exec WebSocket 라우트를 찾지 못함")
+def test_every_any_cloud_websocket_is_admin_only():
+    """셸을 여는 WebSocket(파드 exec, 노드 SSH)은 전부 admin 전용. 경로 패턴이 아니라 전수 검사 —
+    /exec 만 보던 검사는 /ssh 의 인증 누락을 통과시켰다."""
+    from starlette.routing import WebSocketRoute
+
+    ws_routes = [r for r in app.routes if isinstance(r, WebSocketRoute) and "/any-cloud" in r.path]
+    assert ws_routes, "any-cloud WebSocket 라우트를 찾지 못함"
+    offenders = [r.path for r in ws_routes if "get_ws_admin_user" not in _dependency_names(r)]
+    assert offenders == [], f"WebSocket admin 게이트 누락: {offenders}"
 
 
 def test_path_segment_encoding_blocks_traversal():
@@ -335,13 +352,78 @@ def test_disabled_provider_returns_503(monkeypatch):
     assert "disabled" in response.json()["detail"]
 
 
-def test_no_unencoded_path_interpolation_in_routes():
-    """라우트 파일에서 upstream 경로를 조립할 때도 세그먼트를 인코딩해야 한다."""
+@pytest.mark.parametrize("source_path", ["app/routes/any_cloud.py", "app/services/any_cloud_service.py"])
+def test_no_unencoded_path_interpolation(source_path):
+    """upstream 경로를 조립하는 곳은 라우트든 서비스든 세그먼트를 인코딩해야 한다.
+    routes 만 보던 검사는 service 의 credential/debug-pod 경로 6곳을 놓쳤다."""
     import pathlib
 
-    source = pathlib.Path("app/routes/any_cloud.py").read_text(encoding="utf-8")
+    source = pathlib.Path(source_path).read_text(encoding="utf-8")
     offenders = [
         line.strip() for line in source.splitlines()
         if 'path=f"' in line and "_seg(" not in line and "quote(" not in line
     ]
     assert offenders == [], f"미인코딩 경로 보간: {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# SSE 중계 — 상태코드는 스트림 시작 전에 확정돼야 한다
+# ---------------------------------------------------------------------------
+
+class _SseChunks(httpx.AsyncByteStream):
+    async def __aiter__(self):
+        yield b"data: hello\n\n"
+        yield b"data: world\n\n"
+
+
+def _sse_client(monkeypatch, handler, member):
+    from app.routes import any_cloud as mod
+
+    monkeypatch.setattr(mod.settings, "ANY_CLOUD_ENABLED", True)
+    _mock_service(monkeypatch, handler)
+    app.dependency_overrides[get_current_user] = lambda: member
+    return TestClient(app)
+
+
+def test_sse_forwards_upstream_chunks(monkeypatch, sample_member):
+    seen = {}
+
+    def handler(request):
+        seen.update({k: v for k, v in request.headers.items() if k.startswith("x-user") or k == "accept"})
+        return httpx.Response(200, stream=_SseChunks(), headers={"content-type": "text/event-stream"})
+
+    client = _sse_client(monkeypatch, handler, sample_member)
+    try:
+        response = client.get(f"{API}/any-cloud/events")
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.text == "data: hello\n\ndata: world\n\n"
+    assert seen["accept"] == "text/event-stream"
+    assert seen["x-user-id"] == sample_member.member_id
+
+
+@pytest.mark.parametrize("upstream_status, expected", [(404, 404), (503, 502)])
+def test_sse_upstream_error_is_not_masked_as_200(monkeypatch, sample_member, upstream_status, expected):
+    """제너레이터 안에서 실패하면 200 헤더가 이미 나간 뒤라 클라이언트는 빈 스트림을 받고
+    EventSource 는 무한 재접속한다. 실패는 응답 시작 전에 _make_request 와 같은 규칙으로 매핑한다."""
+    handler = lambda request: httpx.Response(upstream_status, json={"detail": "nope"})  # noqa: E731
+    client = _sse_client(monkeypatch, handler, sample_member)
+    try:
+        response = client.get(f"{API}/any-cloud/operations/op-1/events")
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == expected
+
+
+def test_sse_connect_error_is_503(monkeypatch, sample_member):
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+
+    client = _sse_client(monkeypatch, handler, sample_member)
+    try:
+        response = client.get(f"{API}/any-cloud/events")
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 503
