@@ -1661,6 +1661,25 @@ async def get_provider_config_schema(
         )
 
 
+@router_provider.get("/providers/{provider}/credential-schema")
+async def get_provider_credential_schema(
+        provider: str = Path(..., description="CSP 식별자"),
+        current_user: Member = Depends(get_current_user)
+):
+    """CSP 별 자격증명 입력 필드 스키마 조회"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.get_provider_credential_schema(provider=provider, user_info=user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting credential-schema for {provider}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get credential schema"
+        )
+
+
 @router_provider.get("/providers/{provider}/images")
 async def get_provider_images(
         request: Request,
@@ -1726,6 +1745,83 @@ async def get_credential(
         )
 
 
+@router_credential.get("/credentials/{credential_id}/reveal")
+async def reveal_credential(
+        credential_id: str = Path(..., description="자격증명 ID"),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    등록된 자격증명 값을 조회합니다.
+
+    목록, 상세 응답에는 값이 섞이지 않으며 이 호출만 값을 노출합니다.
+    누가 언제 어느 자격증명을 봤는지 백엔드 감사 로그에 남습니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.reveal_credential(
+            credential_id=credential_id, user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error revealing credential {credential_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reveal credential"
+        )
+
+
+@router_credential.post("/credentials/{credential_id}/health")
+async def check_credential_health(
+        credential_id: str = Path(..., description="자격증명 ID"),
+        current_user: Member = Depends(get_current_admin_user)
+):
+    """
+    자격증명이 실제로 쓸 수 있는 상태인지 확인합니다.
+
+    CSP API 를 실제로 호출해 판정하며 비밀값은 내보내지 않습니다.
+    확인 자체는 성공한 호출이므로 결과가 실패여도 200 으로 돌아옵니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.check_credential_health(
+            credential_id=credential_id, user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error checking credential health {credential_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to check credential health"
+        )
+
+
+@router_credential.post("/credentials/{credential_id}/health/refresh")
+async def refresh_credential_health(
+        credential_id: str = Path(..., description="자격증명 ID"),
+        current_user: Member = Depends(get_current_admin_user)
+):
+    """
+    마지막 확인이 오래됐을 때만 CSP API 를 호출합니다.
+
+    최근에 확인했으면 저장된 결과를 그대로 반환합니다. 화면 진입 시 자동 갱신용입니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.refresh_credential_health(
+            credential_id=credential_id, user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error refreshing credential health {credential_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to refresh credential health"
+        )
+
+
 @router_credential.post("/credentials")
 async def create_credential(
         body: CredentialCreateRequest = Body(
@@ -1786,6 +1882,28 @@ async def create_credential(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create credential"
+        )
+
+
+@router_credential.patch("/credentials/{credential_id}")
+async def update_credential(
+        credential_id: str = Path(..., description="자격증명 ID"),
+        request: Dict[str, Any] = Body(..., description="description, credentials"),
+        current_user: Member = Depends(get_current_admin_user)
+):
+    """CSP 자격증명 수정 — 설명과 값. 이름과 프로바이더는 바꿀 수 없다"""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.update_credential(
+            credential_id=credential_id, request_data=request, user_info=user_info
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating credential {credential_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update credential"
         )
 
 
