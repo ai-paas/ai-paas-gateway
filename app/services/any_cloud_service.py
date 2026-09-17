@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Any, Optional, List
+from typing import AsyncIterator, Dict, Any, Optional, List
 from urllib.parse import quote
 
 import httpx
@@ -143,23 +143,50 @@ class AnyCloudService:
             size=size
         )
 
-    async def stream_sse(self, path: str, user_info: Optional[Dict[str, str]] = None):
+    async def open_sse(self, path: str, user_info: Optional[Dict[str, str]] = None) -> AsyncIterator[bytes]:
         """
         백엔드 SSE 를 그대로 흘려보낸다.
 
         응답을 모아서 반환하면 스트림이 아니라 한 번의 응답이 된다 — 진행 상황이
         끝나야 보인다. httpx 의 stream 을 그대로 중계한다.
+
+        연결과 상태코드 확인은 여기서 끝낸다. 라우트가 StreamingResponse 를 시작한 뒤에는
+        상태코드를 바꿀 수 없어서, 제너레이터 안에서 실패하면 클라이언트는 200 + 빈 스트림을
+        받는다. 오류 매핑은 _make_request 와 같다.
         """
         url = f"{self.base_url}{path}"
         headers = self._get_headers(user_info)
         headers["Accept"] = "text/event-stream"
         # SSE 는 오래 열려 있는다. 일반 요청 타임아웃을 쓰면 중간에 끊긴다.
-        async with self.client.stream(
-            "GET", url, headers=headers, timeout=httpx.Timeout(None, connect=settings.ANY_CLOUD_CONNECT_TIMEOUT)
-        ) as response:
-            response.raise_for_status()
-            async for chunk in response.aiter_raw():
-                yield chunk
+        request = self.client.build_request(
+            "GET", url, headers=headers,
+            timeout=httpx.Timeout(None, connect=settings.ANY_CLOUD_CONNECT_TIMEOUT),
+        )
+        try:
+            response = await self.client.send(request, stream=True)
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout opening Any Cloud SSE {path}: {str(e)}")
+            raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="Any Cloud service timeout")
+        except httpx.ConnectError as e:
+            logger.error(f"Connection error opening Any Cloud SSE {path}: {str(e)}")
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Any Cloud service unavailable")
+        except httpx.RequestError as e:
+            logger.error(f"Request failed opening Any Cloud SSE {path}: {str(e)}")
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Any Cloud connection error")
+
+        if response.status_code >= 400:
+            await response.aread()
+            await response.aclose()
+            raise_for_upstream(response, path)
+
+        async def body() -> AsyncIterator[bytes]:
+            try:
+                async for chunk in response.aiter_raw():
+                    yield chunk
+            finally:
+                await response.aclose()
+
+        return body()
 
     async def _request_text(
             self,
@@ -530,7 +557,7 @@ class AnyCloudService:
     ) -> dict:
         """노드 셸용 임시 파드. 반환된 (namespace, podName) 으로 기존 pod exec 에 붙는다."""
         return await self.generic_post(
-            path=f"/v1/clusters/{cluster_name}/nodes/{node_name}/debug-pod",
+            path=f"/v1/clusters/{_seg(cluster_name)}/nodes/{_seg(node_name)}/debug-pod",
             data=request_data,
             user_info=user_info,
         )
@@ -1094,7 +1121,7 @@ class AnyCloudService:
     async def get_provider_credential_schema(self, provider: str, user_info: dict) -> dict:
         """CSP 별 자격증명 입력 필드 스키마 조회"""
         return await self.generic_get_unwrapped(
-            path=f"/v1/providers/{provider}/credential-schema",
+            path=f"/v1/providers/{_seg(provider)}/credential-schema",
             user_info=user_info
         )
 
@@ -1124,14 +1151,14 @@ class AnyCloudService:
     async def reveal_credential(self, credential_id: str, user_info: dict) -> dict:
         """등록된 자격증명 값 조회 — 백엔드가 감사 로그에 남긴다."""
         return await self.generic_get_unwrapped(
-            path=f"/v1/credentials/{credential_id}/reveal",
+            path=f"/v1/credentials/{_seg(credential_id)}/reveal",
             user_info=user_info
         )
 
     async def check_credential_health(self, credential_id: str, user_info: dict) -> dict:
         """자격증명 가용성 확인 — CSP API 를 실제로 호출한다."""
         return await self.generic_post(
-            path=f"/v1/credentials/{credential_id}/health",
+            path=f"/v1/credentials/{_seg(credential_id)}/health",
             data={},
             user_info=user_info
         )
@@ -1139,7 +1166,7 @@ class AnyCloudService:
     async def refresh_credential_health(self, credential_id: str, user_info: dict) -> dict:
         """자격증명 가용성 갱신 — 마지막 확인이 오래됐을 때만 CSP API 를 부른다."""
         return await self.generic_post(
-            path=f"/v1/credentials/{credential_id}/health/refresh",
+            path=f"/v1/credentials/{_seg(credential_id)}/health/refresh",
             data={},
             user_info=user_info
         )
@@ -1155,7 +1182,7 @@ class AnyCloudService:
     async def update_credential(self, credential_id: str, request_data: Dict[str, Any], user_info: dict) -> dict:
         """자격증명 수정 — 설명과 값만. 이름과 프로바이더는 백엔드가 막는다."""
         return await self.generic_patch(
-            path=f"/v1/credentials/{credential_id}", data=request_data, user_info=user_info
+            path=f"/v1/credentials/{_seg(credential_id)}", data=request_data, user_info=user_info
         )
 
     async def delete_credential(self, credential_id: str, user_info: dict) -> dict:
