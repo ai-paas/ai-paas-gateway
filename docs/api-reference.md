@@ -3,7 +3,7 @@
 > **이 파일은 `scripts/gen_api_docs.py`가 생성합니다. 직접 고치지 마세요.**
 > 라우트를 바꿨으면 `python scripts/gen_api_docs.py`를 다시 돌리세요.
 
-전체 231개 — 공개 4 · 인증 150 · 관리자 77.
+전체 241개 — 공개 4 · 인증 154 · 관리자 83.
 
 권한 열의 의미는 [api-conventions.md](api-conventions.md#인증--인가)를 참조하세요.
 요청/응답 스키마는 실행 중인 서버의 Swagger UI(`/docs`)가 단일 소스입니다.
@@ -193,21 +193,23 @@
 | POST | `/any-cloud/system/cluster/{cluster_name}/ssh-key` | VM 클러스터 SSH 키 발급/조회 | 관리자 |
 | GET | `/any-cloud/system/cluster/{cluster_name}/resource-kinds` | 클러스터가 지원하는 K8s kind 목록 (CRD 포함) | 인증 |
 
-## Any Cloud — VM 인프라 (11)
+## Any Cloud — VM 인프라 (13)
 
 | Method | Path | 설명 | 권한 |
 |---|---|---|---|
+| WEBSOCKET | `/any-cloud/vms/{vm_name}/nodes/{host}/ssh` | 노드 SSH WebSocket proxy (admin 전용). 파드 exec 와 달리 에이전트를 거치지 않는다 — | 관리자 |
 | GET | `/any-cloud/vms` | VM 인프라 목록 | 인증 |
 | GET | `/any-cloud/vms/{vm_name}` | VM 상세 (workflow / stack outputs / 진행 상태) | 인증 |
 | POST | `/any-cloud/vms` | VM 생성 (Pulumi provision) — 202 + Operation | 관리자 |
 | PATCH | `/any-cloud/vms/{vm_name}` | VM scale (workerCount 변경) — 202 + Operation | 관리자 |
-| DELETE | `/any-cloud/vms/{vm_name}` | VM 삭제 (Pulumi destroy) — 202 + Operation | 관리자 |
+| DELETE | `/any-cloud/vms/{vm_name}` | VM 삭제 (Pulumi destroy) | 관리자 |
 | GET | `/any-cloud/vms/{vm_name}/operations` | 이 VM 의 operation 이력 | 인증 |
 | POST | `/any-cloud/vms/{vm_name}/operations` | VM 액션 (retryWorkflow / retryRegistration / refreshStatus) | 관리자 |
 | GET | `/any-cloud/vms/{vm_name}/state-history` | VM workflow state transition 이력 | 인증 |
 | GET | `/any-cloud/vms/{vm_name}/nodes` | VM 노드 목록 (role / publicIp / privateIp + SSH 사용자) | 인증 |
 | POST | `/any-cloud/vms/{vm_name}/ssh-key` | VM SSH private key 발급. format=pem 이면 raw PEM 파일로 내려간다 | 관리자 |
 | GET | `/any-cloud/vms/{vm_name}/kubeconfig` | VM 의 kubeconfig YAML 다운로드 (단기 SA token) | 관리자 |
+| GET | `/any-cloud/nodes` | 노드 목록 — 클러스터 경계를 넘어 한 행씩 | 인증 |
 
 ## Any Cloud — Kubernetes (10)
 
@@ -265,7 +267,7 @@
 | GET | `/any-cloud/observability/standard-queries` | 표준 query 카탈로그 (전역) | 인증 |
 | GET | `/any-cloud/observability/aggregate` | 다 클러스터 통합 지표 | 인증 |
 
-## Any Cloud — 프로바이더 · 자격증명 · 애드온 (15)
+## Any Cloud — 프로바이더 · 자격증명 · 애드온 (20)
 
 | Method | Path | 설명 | 권한 |
 |---|---|---|---|
@@ -273,10 +275,15 @@
 | GET | `/any-cloud/providers/{provider}/regions` | CSP 별 region 목록 조회 | 인증 |
 | GET | `/any-cloud/providers/{provider}/specs` | CSP 별 VM spec 목록 | 인증 |
 | GET | `/any-cloud/providers/{provider}/config-schema` | CSP 별 클러스터 설정 스키마 조회 | 인증 |
+| GET | `/any-cloud/providers/{provider}/credential-schema` | CSP 별 자격증명 입력 필드 스키마 조회 | 인증 |
 | GET | `/any-cloud/providers/{provider}/images` | CSP 별 OS 이미지 목록 조회 | 인증 |
 | GET | `/any-cloud/credentials` | CSP 자격증명 목록 조회 | 관리자 |
 | GET | `/any-cloud/credentials/{credential_id}` | CSP 자격증명 단건 조회 (secret 은 마스킹 처리됨) | 관리자 |
+| GET | `/any-cloud/credentials/{credential_id}/reveal` | 등록된 자격증명 값을 조회합니다 (admin 전용 — 목록·상세와 같은 게이트) | 관리자 |
+| POST | `/any-cloud/credentials/{credential_id}/health` | 자격증명이 실제로 쓸 수 있는 상태인지 확인합니다 | 관리자 |
+| POST | `/any-cloud/credentials/{credential_id}/health/refresh` | 마지막 확인이 오래됐을 때만 CSP API 를 호출합니다 | 관리자 |
 | POST | `/any-cloud/credentials` | CSP 자격증명 등록 | 관리자 |
+| PATCH | `/any-cloud/credentials/{credential_id}` | CSP 자격증명 수정 — 설명과 값. 이름과 프로바이더는 바꿀 수 없다 | 관리자 |
 | DELETE | `/any-cloud/credentials/{credential_id}` | CSP 자격증명 삭제 | 관리자 |
 | GET | `/any-cloud/addons` | 설치 가능한 애드온 카탈로그 목록 | 인증 |
 | GET | `/any-cloud/clusters/{cluster_name}/addons` | 클러스터에 설치된 애드온 목록 조회 | 인증 |
@@ -285,7 +292,7 @@
 | DELETE | `/any-cloud/clusters/{cluster_name}/addons/{addon_id}` | 애드온 제거 요청 | 관리자 |
 | POST | `/any-cloud/clusters/{cluster_name}/addons/{addon_id}/retry` | 실패한 애드온 재시도 | 관리자 |
 
-## Any Cloud — 작업 · 워크플로 (6)
+## Any Cloud — 작업 · 워크플로 (8)
 
 | Method | Path | 설명 | 권한 |
 |---|---|---|---|
@@ -295,8 +302,10 @@
 | GET | `/any-cloud/workflow/queues` | 워크플로우 큐 상태 | 관리자 |
 | GET | `/any-cloud/workflow/dead-letter-messages` | DLQ 메시지 목록 | 관리자 |
 | POST | `/any-cloud/workflow/dead-letter-messages/{message_id}/operations` | DLQ 메시지 처리 (재시도 / 폐기) | 관리자 |
+| GET | `/any-cloud/events` | 자원 변경 신호 단일 스트림. 값이 아니라 무엇이 바뀌었는지만 흐른다 | 인증 |
+| GET | `/any-cloud/operations/{operation_id}/events` | 작업 진행 이벤트 스트림 | 인증 |
 
-## Any Cloud — 관리자 전용 (17)
+## Any Cloud — 관리자 전용 (18)
 
 | Method | Path | 설명 | 권한 |
 |---|---|---|---|
@@ -317,6 +326,7 @@
 | GET | `/any-cloud/fleet/upgrade/runs` | fleet upgrade 실행 이력 | 관리자 |
 | PUT | `/any-cloud/clusters/{cluster_name}/upgrade-wave` | 클러스터 upgrade wave 변경 | 관리자 |
 | POST | `/any-cloud/clusters/{cluster_name}/upgrade` | 클러스터 upgrade 실행 | 관리자 |
+| POST | `/any-cloud/clusters/{cluster_name}/nodes/{node_name}/debug-pod` | 노드 셸용 임시 파드 | 관리자 |
 
 ## 관리자 대시보드 (12)
 
