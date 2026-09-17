@@ -272,6 +272,21 @@ class AnyCloudService:
             return response["data"]
         return response
 
+    async def generic_patch(
+            self,
+            path: str,
+            data: Dict[str, Any],
+            user_info: Optional[Dict[str, str]] = None,
+            **query_params
+    ) -> Dict[str, Any]:
+        """PATCH 요청 — 보낸 필드만 바꾼다"""
+        response = await self._make_request(
+            "PATCH", path, user_info=user_info, json=data, params=query_params
+        )
+        if isinstance(response, dict) and "data" in response:
+            return response["data"]
+        return response
+
     async def generic_delete(
             self,
             path: str,
@@ -1011,6 +1026,13 @@ class AnyCloudService:
             user_info=user_info
         )
 
+    async def get_provider_credential_schema(self, provider: str, user_info: dict) -> dict:
+        """CSP 별 자격증명 입력 필드 스키마 조회"""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/providers/{provider}/credential-schema",
+            user_info=user_info
+        )
+
     async def get_provider_images(self, provider: str, user_info: dict, **query_params) -> dict:
         """CSP 별 OS 이미지 목록 조회"""
         return await self.generic_get_unwrapped(
@@ -1034,12 +1056,41 @@ class AnyCloudService:
             user_info=user_info
         )
 
+    async def reveal_credential(self, credential_id: str, user_info: dict) -> dict:
+        """등록된 자격증명 값 조회 — 백엔드가 감사 로그에 남긴다."""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/credentials/{credential_id}/reveal",
+            user_info=user_info
+        )
+
+    async def check_credential_health(self, credential_id: str, user_info: dict) -> dict:
+        """자격증명 가용성 확인 — CSP API 를 실제로 호출한다."""
+        return await self.generic_post(
+            path=f"/v1/credentials/{credential_id}/health",
+            data={},
+            user_info=user_info
+        )
+
+    async def refresh_credential_health(self, credential_id: str, user_info: dict) -> dict:
+        """자격증명 가용성 갱신 — 마지막 확인이 오래됐을 때만 CSP API 를 부른다."""
+        return await self.generic_post(
+            path=f"/v1/credentials/{credential_id}/health/refresh",
+            data={},
+            user_info=user_info
+        )
+
     async def create_credential(self, data: dict, user_info: dict) -> dict:
         """CSP 자격증명 등록"""
         return await self.generic_post(
             path="/v1/credentials",
             data=data,
             user_info=user_info
+        )
+
+    async def update_credential(self, credential_id: str, request_data: Dict[str, Any], user_info: dict) -> dict:
+        """자격증명 수정 — 설명과 값만. 이름과 프로바이더는 백엔드가 막는다."""
+        return await self.generic_patch(
+            path=f"/v1/credentials/{credential_id}", data=request_data, user_info=user_info
         )
 
     async def delete_credential(self, credential_id: str, user_info: dict) -> dict:
