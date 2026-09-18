@@ -92,6 +92,14 @@ class Settings:
 
     # 대용량 업로드 설정 (Dataset 등)
     PROXY_UPLOAD_TIMEOUT: float = float(os.getenv("PROXY_UPLOAD_TIMEOUT", "300.0"))
+
+    # KB 생성/파일추가는 MLOps 스펙상 동일한 동기 경로(청킹+임베딩 후 응답)라
+    # embedding 모델이 콜드 상태(오랜만에 호출)면 업스트림 응답까지 수 분 걸릴 수
+    # 있음 (실측: 콜드 30초 초과 확인, 신고자 케이스 ~5분 / 웜 상태는 5~10초로
+    # 빠름). 600s는 그 실측 최댓값(~5분)에 여유를 둔 값 — 콜드스타트 상한이
+    # 정확히 얼마인지는 미확인(MLOps 확인 필요), 단발성 관측치 기반이라 재조정
+    # 필요할 수 있음.
+    PROXY_KB_INGEST_TIMEOUT: float = float(os.getenv("PROXY_KB_INGEST_TIMEOUT", "600.0"))
     MAX_DATASET_FILE_SIZE: int = int(os.getenv("MAX_DATASET_FILE_SIZE", "1073741824"))  # 1GB
 
     HUB_CONNECT_ENABLED: bool = _get_bool("HUB_CONNECT_ENABLED", False)
