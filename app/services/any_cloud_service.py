@@ -1111,11 +1111,13 @@ class AnyCloudService:
             **query_params
         )
 
-    async def get_provider_config_schema(self, provider: str, user_info: dict) -> dict:
+    async def get_provider_config_schema(self, provider: str, user_info: dict, **params) -> dict:
         """CSP 별 클러스터 설정 스키마 조회"""
+        # None 을 그대로 넘기면 빈 쿼리 파라미터가 붙어 백엔드가 빈 문자열로 읽는다.
         return await self.generic_get_unwrapped(
             path=f"/v1/providers/{_seg(provider)}/config-schema",
-            user_info=user_info
+            user_info=user_info,
+            **{k: v for k, v in params.items() if v}
         )
 
     async def get_provider_credential_schema(self, provider: str, user_info: dict) -> dict:

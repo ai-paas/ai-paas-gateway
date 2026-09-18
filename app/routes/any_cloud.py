@@ -1683,12 +1683,15 @@ async def get_provider_specs(
 @router_provider.get("/providers/{provider}/config-schema")
 async def get_provider_config_schema(
         provider: str = Path(..., description="CSP 식별자"),
+        credentialId: Optional[str] = Query(None, description="주면 계정에서 고를 수 있는 값이 allowedValues 에 채워진다"),
+        region: Optional[str] = Query(None, description="리전마다 고를 수 있는 값이 다른 키에 필요"),
         current_user: Member = Depends(get_current_user)
 ):
     """CSP 별 클러스터 설정 스키마 조회"""
     try:
         user_info = _create_user_info_dict(current_user)
-        return await any_cloud_service.get_provider_config_schema(provider=provider, user_info=user_info)
+        return await any_cloud_service.get_provider_config_schema(
+            provider=provider, user_info=user_info, credentialId=credentialId, region=region)
     except HTTPException:
         raise
     except Exception as e:
