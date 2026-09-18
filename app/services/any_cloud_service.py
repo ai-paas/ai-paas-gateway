@@ -1096,11 +1096,12 @@ class AnyCloudService:
             user_info=user_info
         )
 
-    async def get_provider_regions(self, provider: str, user_info: dict) -> dict:
+    async def get_provider_regions(self, provider: str, user_info: dict, **query_params) -> dict:
         """CSP 별 region 목록 조회"""
         return await self.generic_get_unwrapped(
             path=f"/v1/providers/{_seg(provider)}/regions",
-            user_info=user_info
+            user_info=user_info,
+            **query_params
         )
 
     async def get_provider_specs(self, provider: str, user_info: dict, **query_params) -> dict:

@@ -1638,13 +1638,18 @@ async def list_providers(current_user: Member = Depends(get_current_user)):
 
 @router_provider.get("/providers/{provider}/regions")
 async def get_provider_regions(
+        request: Request,
         provider: str = Path(..., description="CSP 식별자 (aws/gcp/azure/...)"),
         current_user: Member = Depends(get_current_user)
 ):
-    """CSP 별 region 목록 조회"""
+    """CSP 별 region 목록 조회 — credentialId 등 query 필터 그대로 forward."""
     try:
         user_info = _create_user_info_dict(current_user)
-        return await any_cloud_service.get_provider_regions(provider=provider, user_info=user_info)
+        # credentialId 를 넘기지 않으면 백엔드가 환경변수 fallback 으로 떨어져, 등록한
+        # 자격증명이 있어도 리전 목록이 비어 나온다.
+        query_params = dict(request.query_params)
+        return await any_cloud_service.get_provider_regions(
+            provider=provider, user_info=user_info, **query_params)
     except HTTPException:
         raise
     except Exception as e:
