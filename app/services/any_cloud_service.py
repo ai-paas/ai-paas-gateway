@@ -1121,6 +1121,13 @@ class AnyCloudService:
             **{k: v for k, v in params.items() if v}
         )
 
+    async def get_provisioning_defaults(self, user_info: dict) -> dict:
+        """CSP 별로 지금 통과하는 생성 기본값 조회"""
+        return await self.generic_get_unwrapped(
+            path="/v1/providers/provisioning-defaults",
+            user_info=user_info,
+        )
+
     async def get_provider_credential_schema(self, provider: str, user_info: dict) -> dict:
         """CSP 별 자격증명 입력 필드 스키마 조회"""
         return await self.generic_get_unwrapped(

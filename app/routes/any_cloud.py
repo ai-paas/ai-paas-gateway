@@ -1636,6 +1636,26 @@ async def list_providers(current_user: Member = Depends(get_current_user)):
         )
 
 
+@router_provider.get("/providers/provisioning-defaults")
+async def get_provisioning_defaults(current_user: Member = Depends(get_current_user)):
+    """CSP 별 생성 기본값 조회
+
+    경로에 변수가 없다. /providers/{provider}/... 보다 먼저 선언해야 provider="provisioning-defaults"
+    로 잡히지 않는다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.get_provisioning_defaults(user_info=user_info)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting provisioning defaults: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get provisioning defaults"
+        )
+
+
 @router_provider.get("/providers/{provider}/regions")
 async def get_provider_regions(
         request: Request,
