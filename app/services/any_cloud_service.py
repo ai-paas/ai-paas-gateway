@@ -1121,11 +1121,13 @@ class AnyCloudService:
             **{k: v for k, v in params.items() if v}
         )
 
-    async def get_provisioning_defaults(self, user_info: dict) -> dict:
+    async def get_provisioning_defaults(self, user_info: dict, **params) -> dict:
         """CSP 별로 지금 통과하는 생성 기본값 조회"""
+        # None 을 그대로 넘기면 빈 쿼리 파라미터가 붙어 백엔드가 빈 문자열로 읽는다.
         return await self.generic_get_unwrapped(
             path="/v1/providers/provisioning-defaults",
             user_info=user_info,
+            **{k: v for k, v in params.items() if v}
         )
 
     async def get_provider_credential_schema(self, provider: str, user_info: dict) -> dict:

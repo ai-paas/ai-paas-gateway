@@ -1637,7 +1637,10 @@ async def list_providers(current_user: Member = Depends(get_current_user)):
 
 
 @router_provider.get("/providers/provisioning-defaults")
-async def get_provisioning_defaults(current_user: Member = Depends(get_current_user)):
+async def get_provisioning_defaults(
+        provider: Optional[str] = Query(None, description="한 CSP 만 조회. 비우면 전부"),
+        current_user: Member = Depends(get_current_user)
+):
     """CSP 별 생성 기본값 조회
 
     경로에 변수가 없다. /providers/{provider}/... 보다 먼저 선언해야 provider="provisioning-defaults"
@@ -1645,7 +1648,7 @@ async def get_provisioning_defaults(current_user: Member = Depends(get_current_u
     """
     try:
         user_info = _create_user_info_dict(current_user)
-        return await any_cloud_service.get_provisioning_defaults(user_info=user_info)
+        return await any_cloud_service.get_provisioning_defaults(user_info=user_info, provider=provider)
     except HTTPException:
         raise
     except Exception as e:
