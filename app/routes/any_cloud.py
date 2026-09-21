@@ -1639,6 +1639,9 @@ async def list_providers(current_user: Member = Depends(get_current_user)):
 @router_provider.get("/providers/provisioning-defaults")
 async def get_provisioning_defaults(
         provider: Optional[str] = Query(None, description="한 CSP 만 조회. 비우면 전부"),
+        minVcpu: Optional[int] = Query(None, ge=1, description="최소 vCPU. 비우면 2"),
+        minMemoryGb: Optional[float] = Query(None, gt=0, description="최소 메모리 GB. 비우면 4"),
+        gpu: Optional[bool] = Query(None, description="GPU 인스턴스로 고를지. 비우면 제외"),
         current_user: Member = Depends(get_current_user)
 ):
     """CSP 별 생성 기본값 조회
