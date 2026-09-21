@@ -3,7 +3,7 @@
 > **이 파일은 `scripts/gen_api_docs.py`가 생성합니다. 직접 고치지 마세요.**
 > 라우트를 바꿨으면 `python scripts/gen_api_docs.py`를 다시 돌리세요.
 
-전체 241개 — 공개 4 · 인증 154 · 관리자 83.
+전체 243개 — 공개 4 · 인증 154 · 관리자 85.
 
 권한 열의 의미는 [api-conventions.md](api-conventions.md#인증--인가)를 참조하세요.
 요청/응답 스키마는 실행 중인 서버의 Swagger UI(`/docs`)가 단일 소스입니다.
@@ -135,7 +135,7 @@
 | PUT | `/prompts/{surro_prompt_id}` | 프롬프트 수정 | 인증 |
 | DELETE | `/prompts/{surro_prompt_id}` | 프롬프트 삭제 | 인증 |
 
-## 지식베이스 (12)
+## 지식베이스 (14)
 
 | Method | Path | 설명 | 권한 |
 |---|---|---|---|
@@ -144,6 +144,8 @@
 | GET | `/knowledge-bases/search-methods` | Get Search Methods | 인증 |
 | POST | `/knowledge-bases` | Create Knowledge Base | 인증 |
 | GET | `/knowledge-bases` | Get Knowledge Bases | 인증 |
+| GET | `/knowledge-bases/admin/orphans` | List Orphan Knowledge Bases | 관리자 |
+| DELETE | `/knowledge-bases/admin/orphans/{surro_knowledge_id}` | Delete Orphan Knowledge Base | 관리자 |
 | GET | `/knowledge-bases/{surro_knowledge_id}` | Get Knowledge Base | 인증 |
 | PUT | `/knowledge-bases/{surro_knowledge_id}` | Update Knowledge Base | 인증 |
 | DELETE | `/knowledge-bases/{surro_knowledge_id}` | Delete Knowledge Base | 인증 |

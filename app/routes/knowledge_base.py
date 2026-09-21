@@ -1,10 +1,11 @@
 import logging
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Query, Request, UploadFile, status
 from sqlalchemy.orm import Session
 
-from app.auth import get_current_user
+from app.auth import get_current_admin_user, get_current_user
 from app.common.sort import parse_sort, resolve_sort_columns
 from app.cruds.knowledge_base import knowledge_base_crud
 from app.database import get_db
@@ -19,6 +20,9 @@ from app.schemas.knowledge_base import (
     KnowledgeBaseSearchResponse,
     KnowledgeBaseUpdate,
     LanguageListResponse,
+    OrphanKnowledgeBaseDeleteResponse,
+    OrphanKnowledgeBaseItem,
+    OrphanKnowledgeBaseListResponse,
     SearchMethodListResponse,
 )
 from app.services.audit_service import Action, ResourceType, emit_from_request
@@ -343,6 +347,58 @@ Knowledge Base 검색 기록 조회
 """
 
 
+LIST_ORPHAN_KNOWLEDGE_BASES_DESCRIPTION = """
+고아 Knowledge Base 목록 조회 (관리자 전용)
+
+게이트웨이 매핑이 없어 일반 경로로는 조회도 삭제도 불가능한 업스트림 Knowledge Base 를
+나열한다. 타임아웃 등으로 매핑 저장이 누락되면 이 상태가 된다.
+
+`업스트림 목록 − 게이트웨이 active 매핑` 을 **요청 시점에 실시간 대조**한다. 별도 스케줄러나
+캐시를 쓰지 않는다.
+
+## Response (OrphanKnowledgeBaseListResponse)
+- **is_protected** (bool): `true` 면 **복구 대기** — 살아 있는 생성 시도가 이 KB 를 후보로
+  삼고 있어 곧 주인이 정해질 수 있다. 고아로 오인해 삭제하면 안 된다.
+- **protected_by** (str, optional): 지켜보는 시도의 요청자와 시각
+
+## Errors
+- 401: 인증되지 않은 사용자
+- 403: 관리자 권한 없음
+- 503: 업스트림이 빈 목록을 반환 — 전부 고아로 해석하지 않고 거부한다
+"""
+
+DELETE_ORPHAN_KNOWLEDGE_BASE_DESCRIPTION = """
+고아 Knowledge Base 삭제 (관리자 전용)
+
+업스트림에서 삭제해 Milvus 컬렉션·오브젝트 스토리지를 회수한다. 게이트웨이에는 애초에 매핑이
+없으므로 로컬에서 지울 것이 없다.
+
+## Query Parameters
+- **force** (bool, optional): `is_protected` 인 대상도 삭제한다. 기본값 `false`
+
+## 안전장치
+- active 매핑이 있으면 고아가 아니므로 409 — 일반 삭제 경로를 쓸 것
+- 업스트림이 빈 목록을 반환하면 503
+- **복구 대기 상태면 409.** 안 지워서 생기는 손해는 자원 점유 며칠이고, 지워서 생기는 손해는
+  사용자가 10분 넘게 기다려 만든 KB 의 소실이라 기본값을 거부로 둔다
+- `force=true` 삭제는 감사로그에 강제 삭제로 남고, 지켜보던 시도는 즉시 `abandoned` 가 된다
+
+## Errors
+- 401: 인증되지 않은 사용자
+- 403: 관리자 권한 없음
+- 404: 업스트림에 해당 Knowledge Base 가 없음
+- 409: 고아가 아니거나(active 매핑 존재), 복구 대기 상태인데 `force` 가 없음
+- 503: 업스트림이 빈 목록을 반환
+"""
+
+
+def _describe_protectors(attempts) -> Optional[str]:
+    """관리자 화면용 — 어떤 시도가 이 KB 를 지켜보고 있는지."""
+    if not attempts:
+        return None
+    return ", ".join(f"{t.member_id} ({t.started_at.isoformat()})" for t in attempts)
+
+
 def _user_info(current_user) -> dict:
     return {
         "member_id": current_user.member_id,
@@ -582,6 +638,127 @@ async def get_knowledge_bases(
         )
 
     return KnowledgeBaseListResponse(data=response_data, total=total, page=page, size=size)
+
+
+# 아래 두 라우트는 "/{surro_knowledge_id}" 보다 **먼저** 등록되어야 한다.
+# FastAPI 는 등록 순서대로 매칭하므로, 뒤에 두면 "admin" 이 경로 파라미터로 파싱되려다 422 가 난다.
+@router.get(
+    "/admin/orphans",
+    response_model=OrphanKnowledgeBaseListResponse,
+    summary="List Orphan Knowledge Bases",
+    description=LIST_ORPHAN_KNOWLEDGE_BASES_DESCRIPTION,
+)
+async def list_orphan_knowledge_bases(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_admin_user),
+):
+    """고아 Knowledge Base 목록 — 업스트림 목록 − 게이트웨이 active 매핑"""
+    external_kbs = await knowledge_base_service.get_knowledge_bases(user_info=_user_info(current_user))
+    if not external_kbs:
+        # 빈 응답을 "전부 고아"로 해석하면 안 된다 (scheduler.py 의 reconcile 선례).
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Upstream returned no knowledge bases; refusing to compute orphans",
+        )
+
+    active_ids = knowledge_base_crud.get_active_surro_ids(db)
+    live_attempts = knowledge_base_crud.get_live_attempts(db, datetime.now(timezone.utc))
+
+    items = []
+    for external_kb in external_kbs:
+        if external_kb.id in active_ids:
+            continue
+        protectors = knowledge_base_crud.find_protecting_attempts(external_kb, live_attempts)
+        items.append(
+            OrphanKnowledgeBaseItem(
+                surro_knowledge_id=external_kb.id,
+                name=external_kb.name,
+                collection_name=external_kb.collection_name,
+                created_at=external_kb.created_at,
+                is_protected=bool(protectors),
+                protected_by=_describe_protectors(protectors),
+            )
+        )
+
+    return OrphanKnowledgeBaseListResponse(data=items, total=len(items))
+
+
+@router.delete(
+    "/admin/orphans/{surro_knowledge_id}",
+    response_model=OrphanKnowledgeBaseDeleteResponse,
+    summary="Delete Orphan Knowledge Base",
+    description=DELETE_ORPHAN_KNOWLEDGE_BASE_DESCRIPTION,
+)
+async def delete_orphan_knowledge_base(
+    request: Request,
+    surro_knowledge_id: int = Path(..., description="삭제할 업스트림 Knowledge Base ID"),
+    force: bool = Query(False, description="복구 대기(is_protected) 상태도 삭제한다"),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_admin_user),
+):
+    """고아 Knowledge Base 를 업스트림에서 삭제해 자원을 회수한다."""
+    # active 매핑이 있으면 고아가 아니다 — 일반 삭제 경로를 써야 한다.
+    if knowledge_base_crud.get_active_knowledge_base_by_surro_id(db, surro_knowledge_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Not an orphan: active gateway mapping exists",
+        )
+
+    external_kbs = await knowledge_base_service.get_knowledge_bases(user_info=_user_info(current_user))
+    if not external_kbs:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Upstream returned no knowledge bases; refusing to delete",
+        )
+
+    target = next((kb for kb in external_kbs if kb.id == surro_knowledge_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Knowledge base not found in external service")
+
+    live_attempts = knowledge_base_crud.get_live_attempts(db, datetime.now(timezone.utc))
+    protectors = knowledge_base_crud.find_protecting_attempts(target, live_attempts)
+    if protectors and not force:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Recovery pending: a live create attempt may still claim this knowledge base. "
+                "Use ?force=true to delete anyway."
+            ),
+        )
+
+    deleted = await knowledge_base_service.delete_knowledge_base(
+        surro_knowledge_id, _user_info(current_user)
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Knowledge base not found in external service")
+
+    # 붙을 대상이 사라진 시도를 남겨두면 ATTEMPT_TTL 동안 무관한 고아를 계속 보호한다.
+    abandoned = knowledge_base_crud.abandon_attempts(db, protectors)
+
+    emit_from_request(
+        db, request,
+        action=Action.DELETE,
+        resource_type=ResourceType.KNOWLEDGE_BASE,
+        actor_member_id=current_user.member_id,
+        resource_id=str(surro_knowledge_id),
+        metadata={
+            "orphan": True,
+            "forced": bool(protectors),
+            "abandoned_attempts": abandoned,
+            "name": target.name,
+        },
+    )
+    logger.info(
+        f"Deleted orphan knowledge base: surro_id={surro_knowledge_id}, "
+        f"forced={bool(protectors)}, abandoned_attempts={abandoned}, "
+        f"member_id={current_user.member_id}"
+    )
+
+    return OrphanKnowledgeBaseDeleteResponse(
+        surro_knowledge_id=surro_knowledge_id,
+        forced=bool(protectors),
+        abandoned_attempts=abandoned,
+    )
 
 
 @router.get(
