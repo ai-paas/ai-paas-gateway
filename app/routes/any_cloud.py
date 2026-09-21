@@ -198,6 +198,10 @@ _ALLOWED_KUBERNETES_RESOURCE_TYPES = {
     "daemonsets",
     "replicasets",
     "configmaps",
+    # 클러스터 상세가 보여 주는 것들 — 목록에 없어 403 으로 막혀 있었다.
+    "secrets",
+    "serviceaccounts",
+    "ingresses",
     "persistentvolumeclaims",
     "jobs",
     "cronjobs",
@@ -206,6 +210,7 @@ _ALLOWED_KUBERNETES_RESOURCE_TYPES = {
     "namespaces",
     "persistentvolumes",
     "storageclasses",
+    "ingressclasses",
 }
 
 
