@@ -4,6 +4,7 @@
 보지 못했다. 자르는 곳은 한 곳이어야 한다.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -20,10 +21,9 @@ def _backend_page(items, total):
     return {"data": {"items": items}, "meta": {"pagination": {"totalEstimate": total}}}
 
 
-@pytest.mark.asyncio
-async def test_backend_page_is_passed_through_untouched(service):
+def test_backend_page_is_passed_through_untouched(service):
     with patch.object(service, "_make_request", new=AsyncMock(return_value=_backend_page(["a", "b"], 57))) as call:
-        result = await service.list_nodes(user_info={}, page=3, size=2)
+        result = asyncio.run(service.list_nodes(user_info={}, page=3, size=2))
 
     assert result.data == ["a", "b"]
     assert result.total == 57
@@ -33,20 +33,18 @@ async def test_backend_page_is_passed_through_untouched(service):
     assert call.await_args.kwargs["params"]["size"] == 2
 
 
-@pytest.mark.asyncio
-async def test_total_falls_back_to_this_page_when_meta_is_missing(service):
+def test_total_falls_back_to_this_page_when_meta_is_missing(service):
     # 메타가 없으면 이 페이지 길이밖에 모른다. 없는 수를 지어내지 않는다.
     with patch.object(service, "_make_request", new=AsyncMock(return_value={"data": {"items": ["a"]}})):
-        result = await service.list_nodes(user_info={}, page=1, size=20)
+        result = asyncio.run(service.list_nodes(user_info={}, page=1, size=20))
 
     assert result.total == 1
 
 
-@pytest.mark.asyncio
-async def test_search_still_filters_across_the_whole_list(service):
+def test_search_still_filters_across_the_whole_list(service):
     """검색은 백엔드가 모르는 기능이라 그때는 전량을 받아 거른다."""
     rows = [{"clusterName": f"c-{i}"} for i in range(30)] + [{"clusterName": "needle"}]
     with patch.object(service, "generic_get", new=AsyncMock(return_value={"data": {"items": rows}})):
-        result = await service.list_vms(user_info={}, page=1, size=20, search="needle")
+        result = asyncio.run(service.list_vms(user_info={}, page=1, size=20, search="needle"))
 
     assert [row["clusterName"] for row in result.data] == ["needle"]

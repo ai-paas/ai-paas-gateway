@@ -218,7 +218,7 @@ def test_public_pagination_params_use_gateway_vocabulary():
 # upstream ClusterKubernetesController 가 문서화한 지원 kind (release/v0.3.0)
 UPSTREAM_KINDS = {
     "pods", "services", "deployments", "statefulsets", "daemonsets", "replicasets",
-    "configmaps", "secrets", "persistentvolumeclaims", "jobs", "cronjobs",
+    "configmaps", "secrets", "serviceaccounts", "persistentvolumeclaims", "jobs", "cronjobs",
     "nodes", "namespaces", "persistentvolumes", "storageclasses",
     "customresourcedefinitions",
 }

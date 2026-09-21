@@ -199,9 +199,8 @@ _ALLOWED_KUBERNETES_RESOURCE_TYPES = {
     "replicasets",
     "configmaps",
     # 클러스터 상세가 보여 주는 것들 — 목록에 없어 403 으로 막혀 있었다.
-    "secrets",
+    # secrets 는 일부러 뺀다. 자격증명이 그대로 담겨 있어 P0 정책이 막는 자원이다.
     "serviceaccounts",
-    "ingresses",
     "persistentvolumeclaims",
     "jobs",
     "cronjobs",
@@ -210,7 +209,6 @@ _ALLOWED_KUBERNETES_RESOURCE_TYPES = {
     "namespaces",
     "persistentvolumes",
     "storageclasses",
-    "ingressclasses",
 }
 
 
@@ -1368,7 +1366,7 @@ async def upgrade_helm_release(
         cluster_name: str = Path(..., description="대상 클러스터 이름"),
         release_name: str = Path(..., description="릴리즈 이름"),
         body: Dict[str, Any] = Body(..., description="chart, version, namespace, values/valuesYaml"),
-        current_user: Member = Depends(get_current_user),
+        current_user: Member = Depends(get_current_admin_user),
 ):
     """헬름 릴리즈를 업그레이드합니다."""
     try:
@@ -1413,7 +1411,7 @@ async def rollback_helm_release(
         release_name: str = Path(..., description="릴리즈 이름"),
         namespace: str = Query(..., description="네임스페이스"),
         body: Dict[str, Any] = Body(..., description='{"type": "rollback", "revision": 3}'),
-        current_user: Member = Depends(get_current_user),
+        current_user: Member = Depends(get_current_admin_user),
 ):
     """릴리즈를 지정 revision 으로 되돌립니다."""
     try:
