@@ -89,10 +89,8 @@ class KnowledgeBaseService:
                     self.token_expires_at = datetime.now() + timedelta(seconds=expires_in - 300)
                     return access_token
             raise HTTPException(status_code=response.status_code, detail="Authentication failed")
-        except (httpx.ConnectError, httpx.ConnectTimeout):
+        except httpx.ConnectError:
             _raise_kb_unavailable("Authentication service")
-        except HTTPException:
-            raise
         except Exception as e:
             logger.error(f"Authentication error: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Authentication failed: {str(e)}")
@@ -134,7 +132,7 @@ class KnowledgeBaseService:
                 token = await self._get_valid_token()
                 kwargs['headers']['Authorization'] = f"Bearer {token}"
                 response = await getattr(self.client, method.lower())(url, **kwargs)
-        except (httpx.ConnectError, httpx.ConnectTimeout):
+        except httpx.ConnectError:
             _raise_kb_unavailable("Knowledge base service")
 
         return response

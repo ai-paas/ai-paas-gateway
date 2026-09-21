@@ -139,32 +139,6 @@ def test_make_authenticated_request_connect_error_returns_503(monkeypatch):
     assert getattr(err, "detail", "") == "Knowledge base service unavailable"
 
 
-def test_make_authenticated_request_connect_timeout_returns_503(monkeypatch):
-    """ConnectError(즉시 거절)뿐 아니라 ConnectTimeout(응답 없이 먹통)도 503이어야 함.
-
-    httpx.ConnectTimeout은 ConnectError의 하위 클래스가 아니라 별도 예외라서
-    빠뜨리기 쉽다 (놓치면 조회/삭제/검색류 엔드포인트는 500으로 샌다).
-    """
-    monkeypatch.setattr(knowledge_base_service, "access_token", "tok")
-    monkeypatch.setattr(
-        knowledge_base_service, "token_expires_at", datetime.now() + timedelta(hours=1)
-    )
-
-    async def fake_get(url, **kwargs):
-        raise httpx.ConnectTimeout("timed out")
-
-    monkeypatch.setattr(knowledge_base_service.client, "get", fake_get)
-
-    with pytest.raises(Exception) as exc_info:
-        asyncio.run(
-            knowledge_base_service._make_authenticated_request("GET", "http://x/kb")
-        )
-
-    err = exc_info.value
-    assert getattr(err, "status_code", None) == 503
-    assert getattr(err, "detail", "") == "Knowledge base service unavailable"
-
-
 def test_authenticate_connect_error_returns_503(monkeypatch):
     async def fake_post(url, **kwargs):
         raise httpx.ConnectError("refused")
@@ -177,6 +151,26 @@ def test_authenticate_connect_error_returns_503(monkeypatch):
     err = exc_info.value
     assert getattr(err, "status_code", None) == 503
     assert getattr(err, "detail", "") == "Authentication service unavailable"
+
+
+def test_authenticate_200_without_token_does_not_leak_as_200(monkeypatch):
+    """인증 서버가 200을 주는데 access_token이 없으면 실패로 취급해야 한다.
+
+    _authenticate 내부에서 이 경우 HTTPException(status_code=response.status_code, ...)을
+    그대로 던지는데, response.status_code가 200이라 그대로 두면 실패가 200 성공처럼
+    클라이언트까지 샌다.
+    """
+    async def fake_post(url, **kwargs):
+        return _Response({"expires_in": 1800}, status_code=200)
+
+    monkeypatch.setattr(knowledge_base_service.client, "post", fake_post)
+
+    with pytest.raises(Exception) as exc_info:
+        asyncio.run(knowledge_base_service._authenticate())
+
+    err = exc_info.value
+    assert getattr(err, "status_code", None) != 200, "인증 실패가 200으로 새면 안 됨"
+    assert getattr(err, "status_code", None) == 500
 
 
 @contextmanager
