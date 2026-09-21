@@ -66,6 +66,7 @@ CHUNK_TYPES_DESCRIPTION = """
 ## Errors
 - 401: 인증되지 않은 사용자
 - 500: 서버 내부 오류
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
 """
 
 LANGUAGES_DESCRIPTION = """
@@ -85,6 +86,7 @@ LANGUAGES_DESCRIPTION = """
 ## Errors
 - 401: 인증되지 않은 사용자
 - 500: 서버 내부 오류
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
 """
 
 SEARCH_METHODS_DESCRIPTION = """
@@ -104,6 +106,7 @@ SEARCH_METHODS_DESCRIPTION = """
 ## Errors
 - 401: 인증되지 않은 사용자
 - 500: 서버 내부 오류
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
 """
 
 CREATE_KNOWLEDGE_BASE_DESCRIPTION = """
@@ -168,6 +171,7 @@ KB가 만들어진 뒤에야 검색 불가·임베딩 과다 청킹으로 드러
 - 400: 유효하지 않은 요청 또는 필수 파라미터 누락
 - 401: 인증되지 않은 사용자
 - 500: Knowledge Base 생성 중 서버 내부 오류
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
 - 504: 처리시간 초과 (콜드스타트 등). 타임아웃 이후에도 업스트림에서 생성이 완료될 수
   있으므로 바로 재시도하지 말고, 목록에 없으면 관리자에게 확인 요청.
 """
@@ -199,6 +203,7 @@ Knowledge Base 목록 조회
 ## Errors
 - 401: 인증되지 않은 사용자
 - 500: 서버 내부 오류
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
 """
 
 GET_KNOWLEDGE_BASE_DESCRIPTION = """
@@ -216,6 +221,7 @@ Knowledge Base 상세 조회
 - 401: 인증되지 않은 사용자
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 서버 내부 오류
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
 """
 
 UPDATE_KNOWLEDGE_BASE_DESCRIPTION = """
@@ -238,6 +244,7 @@ Knowledge Base의 이름과 설명만 수정할 수 있습니다.
 - 401: 인증되지 않은 사용자
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 수정 중 서버 내부 오류
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
 """
 
 DELETE_KNOWLEDGE_BASE_DESCRIPTION = """
@@ -253,6 +260,7 @@ DB에서 Knowledge Base 정보를 삭제하고, Milvus에서 Collection을 삭�
 - 401: 인증되지 않은 사용자
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 삭제 중 서버 내부 오류
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
 """
 
 ADD_FILE_DESCRIPTION = """
@@ -275,6 +283,7 @@ Knowledge Base에 파일 추가
 - 401: 인증되지 않은 사용자
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 파일 추가 중 서버 내부 오류
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
 - 504: 처리시간 초과 (콜드스타트 등)
 """
 
@@ -296,6 +305,7 @@ DB에서 파일 정보를 삭제하고, Milvus에서 해당 Partition을 삭제�
 - 401: 인증되지 않은 사용자
 - 404: Knowledge Base 또는 파일을 찾을 수 없음
 - 500: 파일 삭제 중 서버 내부 오류
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
 """
 
 SEARCH_KNOWLEDGE_BASE_DESCRIPTION = """
@@ -323,6 +333,7 @@ Knowledge Base의 설정된 검색 방법(search_method), top_k, threshold를 �
 - 401: 인증되지 않은 사용자
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 검색 중 서버 내부 오류
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
 """
 
 SEARCH_RECORDS_DESCRIPTION = """
@@ -344,6 +355,7 @@ Knowledge Base 검색 기록 조회
 - 401: 인증되지 않은 사용자
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 서버 내부 오류
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
 """
 
 
@@ -908,6 +920,8 @@ async def delete_knowledge_base(
 
     try:
         await knowledge_base_service.delete_knowledge_base(surro_knowledge_id, _user_info(current_user))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete external knowledge base: {str(e)}")
 
