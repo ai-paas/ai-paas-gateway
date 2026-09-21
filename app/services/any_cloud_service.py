@@ -1072,6 +1072,26 @@ class AnyCloudService:
             user_info=user_info,
         )
 
+    async def get_helm_release_revisions(
+            self, clusterName: str, namespace: str, releaseName: str, user_info: dict
+    ) -> Dict[str, Any]:
+        """릴리즈 revision 이력"""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/clusters/{_seg(clusterName)}/helm-releases/{_seg(releaseName)}/revisions",
+            namespace=namespace,
+            user_info=user_info,
+        )
+
+    async def rollback_helm_release(
+            self, clusterName: str, releaseName: str, body: Dict[str, Any], user_info: dict
+    ) -> Dict[str, Any]:
+        """지정 revision 으로 되돌린다 (type=rollback)"""
+        return await self.generic_post(
+            path=f"/v1/clusters/{_seg(clusterName)}/helm-releases/{_seg(releaseName)}/operations",
+            data=body,
+            user_info=user_info,
+        )
+
     async def get_catalog_release_values(self, clusterId: str, namespace: str, releaseName: str, user_info: dict) -> dict:
         """릴리즈에 적용된 values 조회 (helm get values)"""
         return await self.generic_get_unwrapped(

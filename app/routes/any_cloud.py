@@ -1386,6 +1386,48 @@ async def upgrade_helm_release(
         raise HTTPException(status_code=500, detail="Failed to upgrade helm release")
 
 
+@router_catalog.get("/clusters/{cluster_name}/helm-releases/{release_name}/revisions")
+async def get_helm_release_revisions(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        release_name: str = Path(..., description="릴리즈 이름"),
+        namespace: str = Query(..., description="네임스페이스"),
+        current_user: Member = Depends(get_current_user),
+):
+    """릴리즈 revision 이력을 조회합니다."""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.get_helm_release_revisions(
+            clusterName=cluster_name, namespace=namespace,
+            releaseName=release_name, user_info=user_info,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting revisions for {release_name}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get helm release revisions")
+
+
+@router_catalog.post("/clusters/{cluster_name}/helm-releases/{release_name}/operations")
+async def rollback_helm_release(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        release_name: str = Path(..., description="릴리즈 이름"),
+        body: Dict[str, Any] = Body(..., description='{"type": "rollback", "revision": 3}'),
+        current_user: Member = Depends(get_current_user),
+):
+    """릴리즈를 지정 revision 으로 되돌립니다."""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.rollback_helm_release(
+            clusterName=cluster_name, releaseName=release_name,
+            body=body, user_info=user_info,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rolling back {release_name}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to roll back helm release")
+
+
 @router_catalog.get("/catalog/releases/{releaseName}/values")
 async def get_catalog_release_values(
         clusterId: str = Query(..., description="클러스터 ID", examples=["cluster-001"]),
