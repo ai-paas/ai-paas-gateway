@@ -3288,6 +3288,29 @@ async def get_vm(
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get VM")
 
 
+@router_vm.post("/preflight")
+async def preflight_vm(
+        request: VmGatewayCreateRequest = Body(...),
+        current_user: Member = Depends(get_current_admin_user),
+):
+    """VM 생성 사전 검증 — 자원은 만들지 않는다
+
+    생성과 같은 본문을 그대로 보낸다. 화면이 평탄화를 따로 구현하면 규칙이 갈린다.
+    고정 경로라 /vms/{vm_name} 보다 먼저 선언해야 vm_name="preflight" 로 잡히지 않는다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.preflight_vm(
+            request_data=request.model_dump(exclude_none=True),
+            user_info=user_info,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error preflighting vm: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to preflight VM")
+
+
 @router_vm.post("")
 async def create_vm(
         request: VmGatewayCreateRequest = Body(...),

@@ -597,6 +597,10 @@ class AnyCloudService:
         """VM 생성 (Pulumi provision 트리거 — 202 + Operation)"""
         return await self.generic_post(path="/v1/vms", data=request_data, user_info=user_info)
 
+    async def preflight_vm(self, request_data: Dict[str, Any], user_info: dict) -> dict:
+        """VM 생성 사전 검증 — 생성과 같은 본문을 그대로 보낸다"""
+        return await self.generic_post(path="/v1/vms/preflight", data=request_data, user_info=user_info)
+
     async def patch_vm(self, vm_name: str, request_data: Dict[str, Any], user_info: dict) -> dict:
         """VM scale — workerCount 변경"""
         response = await self._make_request(
