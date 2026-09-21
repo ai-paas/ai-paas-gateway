@@ -40,6 +40,12 @@ def _raise_kb_timeout(action: str) -> None:
     raise HTTPException(status_code=504, detail=f"{action} timed out")
 
 
+def _raise_kb_unavailable(action: str) -> None:
+    """업스트림 연결 자체 실패 시 공통 503 변환."""
+    logger.error(f"Connection failed: {action}")
+    raise HTTPException(status_code=503, detail=f"{action} unavailable")
+
+
 class KnowledgeBaseService:
     """지식베이스 관련 외부 API 서비스"""
 
@@ -83,6 +89,10 @@ class KnowledgeBaseService:
                     self.token_expires_at = datetime.now() + timedelta(seconds=expires_in - 300)
                     return access_token
             raise HTTPException(status_code=response.status_code, detail="Authentication failed")
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            _raise_kb_unavailable("Authentication service")
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Authentication error: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Authentication failed: {str(e)}")
@@ -116,13 +126,16 @@ class KnowledgeBaseService:
         else:
             kwargs['headers'] = headers
 
-        response = await getattr(self.client, method.lower())(url, **kwargs)
-
-        if response.status_code == 401:
-            self.access_token = None
-            token = await self._get_valid_token()
-            kwargs['headers']['Authorization'] = f"Bearer {token}"
+        try:
             response = await getattr(self.client, method.lower())(url, **kwargs)
+
+            if response.status_code == 401:
+                self.access_token = None
+                token = await self._get_valid_token()
+                kwargs['headers']['Authorization'] = f"Bearer {token}"
+                response = await getattr(self.client, method.lower())(url, **kwargs)
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            _raise_kb_unavailable("Knowledge base service")
 
         return response
 
