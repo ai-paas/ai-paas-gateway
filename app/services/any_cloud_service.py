@@ -1083,13 +1083,15 @@ class AnyCloudService:
         )
 
     async def rollback_helm_release(
-            self, clusterName: str, releaseName: str, body: Dict[str, Any], user_info: dict
+            self, clusterName: str, releaseName: str, namespace: str,
+            body: Dict[str, Any], user_info: dict
     ) -> Dict[str, Any]:
         """지정 revision 으로 되돌린다 (type=rollback)"""
         return await self.generic_post(
             path=f"/v1/clusters/{_seg(clusterName)}/helm-releases/{_seg(releaseName)}/operations",
             data=body,
             user_info=user_info,
+            namespace=namespace,
         )
 
     async def get_catalog_release_values(self, clusterId: str, namespace: str, releaseName: str, user_info: dict) -> dict:

@@ -1411,6 +1411,7 @@ async def get_helm_release_revisions(
 async def rollback_helm_release(
         cluster_name: str = Path(..., description="클러스터 이름"),
         release_name: str = Path(..., description="릴리즈 이름"),
+        namespace: str = Query(..., description="네임스페이스"),
         body: Dict[str, Any] = Body(..., description='{"type": "rollback", "revision": 3}'),
         current_user: Member = Depends(get_current_user),
 ):
@@ -1419,7 +1420,7 @@ async def rollback_helm_release(
         user_info = _create_user_info_dict(current_user)
         return await any_cloud_service.rollback_helm_release(
             clusterName=cluster_name, releaseName=release_name,
-            body=body, user_info=user_info,
+            namespace=namespace, body=body, user_info=user_info,
         )
     except HTTPException:
         raise
