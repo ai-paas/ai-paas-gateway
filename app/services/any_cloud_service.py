@@ -1058,6 +1058,20 @@ class AnyCloudService:
             namespace=namespace,
             user_info=user_info
         )
+    async def upgrade_helm_release(
+            self,
+            clusterName: str,
+            releaseName: str,
+            body: Dict[str, Any],
+            user_info: dict,
+    ) -> Dict[str, Any]:
+        """릴리즈 업그레이드 — 새 chart version / values 로 갱신"""
+        return await self.generic_put(
+            path=f"/v1/clusters/{_seg(clusterName)}/helm-releases/{_seg(releaseName)}",
+            data=body,
+            user_info=user_info,
+        )
+
     async def get_catalog_release_values(self, clusterId: str, namespace: str, releaseName: str, user_info: dict) -> dict:
         """릴리즈에 적용된 values 조회 (helm get values)"""
         return await self.generic_get_unwrapped(

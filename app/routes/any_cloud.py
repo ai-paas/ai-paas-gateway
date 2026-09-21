@@ -1358,6 +1358,29 @@ async def get_catalog_resources(
 
 
 
+@router_catalog.put("/clusters/{cluster_name}/helm-releases/{release_name}")
+async def upgrade_helm_release(
+        cluster_name: str = Path(..., description="대상 클러스터 이름"),
+        release_name: str = Path(..., description="릴리즈 이름"),
+        body: Dict[str, Any] = Body(..., description="chart, version, namespace, values/valuesYaml"),
+        current_user: Member = Depends(get_current_user),
+):
+    """헬름 릴리즈를 업그레이드합니다."""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.upgrade_helm_release(
+            clusterName=cluster_name,
+            releaseName=release_name,
+            body=body,
+            user_info=user_info,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error upgrading helm release {release_name}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to upgrade helm release")
+
+
 @router_catalog.get("/catalog/releases/{releaseName}/values")
 async def get_catalog_release_values(
         clusterId: str = Query(..., description="클러스터 ID", examples=["cluster-001"]),
