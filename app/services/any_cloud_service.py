@@ -1058,6 +1058,13 @@ class AnyCloudService:
             namespace=namespace,
             user_info=user_info
         )
+    async def get_catalog_release_values(self, clusterId: str, namespace: str, releaseName: str, user_info: dict) -> dict:
+        """릴리즈에 적용된 values 조회 (helm get values)"""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/clusters/{_seg(clusterId)}/helm-releases/{_seg(releaseName)}/values",
+            namespace=namespace,
+            user_info=user_info
+        )
 
     async def create_catalog_deploy(
             self,

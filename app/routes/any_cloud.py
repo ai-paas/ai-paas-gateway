@@ -1357,6 +1357,39 @@ async def get_catalog_resources(
         )
 
 
+
+@router_catalog.get("/catalog/releases/{releaseName}/values")
+async def get_catalog_release_values(
+        clusterId: str = Query(..., description="클러스터 ID", examples=["cluster-001"]),
+        namespace: str = Query(..., description="네임스페이스", examples=["default"]),
+        releaseName: str = Path(..., description="릴리즈 이름", examples=["nginx-test-release"]),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    Helm CLI를 사용하여 특정 릴리즈의 리소스 목록을 조회합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.get_catalog_release_values(
+            clusterId=clusterId,
+            namespace=namespace,
+            releaseName=releaseName,
+            user_info=user_info
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting resources for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve resource"
+        )
+
+
 @router_catalog.post("/catalog/{repoName}/{chartName}/deploy")
 async def post_catalog_deploy(
         repoName: str = Path(
