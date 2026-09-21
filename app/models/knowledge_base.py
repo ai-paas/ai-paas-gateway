@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Index, Sequence
+from sqlalchemy import JSON, Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Index, Sequence
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -84,4 +84,42 @@ class KnowledgeBase(Base):  # Base를 상속받아야 함!
             sqlite_where=Column('deleted_at').is_(None),
         ),
         {'extend_existing': True}
+    )
+
+
+class AttemptState:
+    """``knowledge_base_create_attempts.state`` 허용값 """
+
+    PENDING = "pending"
+    SUCCEEDED = "succeeded"
+    ORPHAN_SUSPECT = "orphan_suspect"
+    ABANDONED = "abandoned"
+    RECOVERED = "recovered"
+
+
+class KnowledgeBaseCreateAttempt(Base):
+    __tablename__ = "knowledge_base_create_attempts"
+
+    id = Column(Integer, Sequence("kb_create_attempts_id_seq"), primary_key=True, index=True, autoincrement=True)
+
+    member_id = Column(String(100), ForeignKey("members.member_id"), nullable=False)
+    name = Column(String(255), nullable=False)
+    filename = Column(String(255), nullable=True)
+    request_id = Column(String(255), nullable=False)
+
+    upstream_snapshot = Column(JSON, nullable=True, comment="POST 직전 업스트림 KB id 집합")
+    state = Column(String(32), nullable=False, index=True)
+    failure_kind      = Column(String(64), nullable=True)
+
+    started_at  = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+    resolved_surro_id = Column(Integer, nullable=True)
+    recovered_at      = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        # 살아있는 시도만 빠르게 조회하기 위한 인덱스
+        Index("idx_kb_attempts_live", "state", "started_at"),
+        # 같은 이름, 같은 파일로 성공한 재시도 검출을 위한 인덱스
+        Index("idx_kb_attempts_dedup", "member_id", "name", "filename", "state")
     )
