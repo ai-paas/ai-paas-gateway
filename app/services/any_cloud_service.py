@@ -96,6 +96,34 @@ class AnyCloudService:
 
         return headers
 
+    async def _server_paged(
+            self,
+            path: str,
+            user_info: dict,
+            page: int,
+            size: int,
+            params: Dict[str, Any],
+    ) -> AnyCloudPagedResponse:
+        """백엔드가 자른 페이지를 그대로 쓴다.
+
+        여기서 다시 자르면 층마다 다른 페이지를 가정하게 된다 — 백엔드가 2페이지를 줬는데
+        게이트웨이가 그 안에서 또 1페이지를 떼는 식이다.
+
+        백엔드 page 는 0-based, 바깥은 1-based 다.
+        """
+        response = await self._make_request(
+            "GET", path, user_info=user_info,
+            params={**params, "page": max(page - 1, 0), "size": size},
+        )
+        data = response.get("data", [])
+        if isinstance(data, dict):
+            data = data.get("items", [])
+        pagination = ((response.get("meta") or {}).get("pagination") or {})
+        total = pagination.get("totalEstimate")
+        # 메타가 없으면 이 페이지 길이밖에 모른다. 없는 수를 지어내지 않는다.
+        total = len(data) if total is None else int(total)
+        return AnyCloudPagedResponse.create(data=data, total=total, page=page, size=size)
+
     def _apply_client_side_pagination(
             self,
             data: List[Any],
@@ -540,6 +568,9 @@ class AnyCloudService:
         if include_deleted:
             # 삭제된 것"도" 함께 본다. status 를 명시하면 백엔드가 그 필터를 우선한다.
             params["includeDeleted"] = "true"
+        # 검색은 백엔드가 모르는 기능이라 그때만 전량을 받아 여기서 거른다.
+        if not search:
+            return await self._server_paged("/v1/vms", user_info, page, size, params)
         response = await self.generic_get(path="/v1/vms", user_info=user_info, **params)
         data = response.get("data", [])
         if isinstance(data, dict):
@@ -577,6 +608,8 @@ class AnyCloudService:
             params["provider"] = provider
         if cluster_name:
             params["clusterName"] = cluster_name
+        if not search:
+            return await self._server_paged("/v1/nodes", user_info, page, size, params)
         response = await self.generic_get(path="/v1/nodes", user_info=user_info, **params)
         data = response.get("data", [])
         if isinstance(data, dict):
@@ -596,6 +629,10 @@ class AnyCloudService:
     async def create_vm(self, request_data: Dict[str, Any], user_info: dict) -> dict:
         """VM 생성 (Pulumi provision 트리거 — 202 + Operation)"""
         return await self.generic_post(path="/v1/vms", data=request_data, user_info=user_info)
+
+    async def preflight_vm(self, request_data: Dict[str, Any], user_info: dict) -> dict:
+        """VM 생성 사전 검증 — 생성과 같은 본문을 그대로 보낸다"""
+        return await self.generic_post(path="/v1/vms/preflight", data=request_data, user_info=user_info)
 
     async def patch_vm(self, vm_name: str, request_data: Dict[str, Any], user_info: dict) -> dict:
         """VM scale — workerCount 변경"""
@@ -1021,6 +1058,49 @@ class AnyCloudService:
             namespace=namespace,
             user_info=user_info
         )
+    async def upgrade_helm_release(
+            self,
+            clusterName: str,
+            releaseName: str,
+            body: Dict[str, Any],
+            user_info: dict,
+    ) -> Dict[str, Any]:
+        """릴리즈 업그레이드 — 새 chart version / values 로 갱신"""
+        return await self.generic_put(
+            path=f"/v1/clusters/{_seg(clusterName)}/helm-releases/{_seg(releaseName)}",
+            data=body,
+            user_info=user_info,
+        )
+
+    async def get_helm_release_revisions(
+            self, clusterName: str, namespace: str, releaseName: str, user_info: dict
+    ) -> Dict[str, Any]:
+        """릴리즈 revision 이력"""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/clusters/{_seg(clusterName)}/helm-releases/{_seg(releaseName)}/revisions",
+            namespace=namespace,
+            user_info=user_info,
+        )
+
+    async def rollback_helm_release(
+            self, clusterName: str, releaseName: str, namespace: str,
+            body: Dict[str, Any], user_info: dict
+    ) -> Dict[str, Any]:
+        """지정 revision 으로 되돌린다 (type=rollback)"""
+        return await self.generic_post(
+            path=f"/v1/clusters/{_seg(clusterName)}/helm-releases/{_seg(releaseName)}/operations",
+            data=body,
+            user_info=user_info,
+            namespace=namespace,
+        )
+
+    async def get_catalog_release_values(self, clusterId: str, namespace: str, releaseName: str, user_info: dict) -> dict:
+        """릴리즈에 적용된 values 조회 (helm get values)"""
+        return await self.generic_get_unwrapped(
+            path=f"/v1/clusters/{_seg(clusterId)}/helm-releases/{_seg(releaseName)}/values",
+            namespace=namespace,
+            user_info=user_info
+        )
 
     async def create_catalog_deploy(
             self,
@@ -1096,11 +1176,12 @@ class AnyCloudService:
             user_info=user_info
         )
 
-    async def get_provider_regions(self, provider: str, user_info: dict) -> dict:
+    async def get_provider_regions(self, provider: str, user_info: dict, **query_params) -> dict:
         """CSP 별 region 목록 조회"""
         return await self.generic_get_unwrapped(
             path=f"/v1/providers/{_seg(provider)}/regions",
-            user_info=user_info
+            user_info=user_info,
+            **query_params
         )
 
     async def get_provider_specs(self, provider: str, user_info: dict, **query_params) -> dict:
@@ -1111,11 +1192,24 @@ class AnyCloudService:
             **query_params
         )
 
-    async def get_provider_config_schema(self, provider: str, user_info: dict) -> dict:
+    async def get_provider_config_schema(self, provider: str, user_info: dict, **params) -> dict:
         """CSP 별 클러스터 설정 스키마 조회"""
+        # None 을 그대로 넘기면 빈 쿼리 파라미터가 붙어 백엔드가 빈 문자열로 읽는다.
         return await self.generic_get_unwrapped(
             path=f"/v1/providers/{_seg(provider)}/config-schema",
-            user_info=user_info
+            user_info=user_info,
+            **{k: v for k, v in params.items() if v}
+        )
+
+    async def get_provisioning_defaults(self, user_info: dict, **params) -> dict:
+        """CSP 별로 지금 통과하는 생성 기본값 조회"""
+        # None 을 그대로 넘기면 빈 쿼리 파라미터가 붙어 백엔드가 빈 문자열로 읽는다.
+        # falsy 가 아니라 None 으로 거른다 — gpu=false 는 "GPU 제외" 라는 뜻이라
+        # 값이 있는 것이고, 떨어뜨리면 "지정 안 함" 과 구분되지 않는다.
+        return await self.generic_get_unwrapped(
+            path="/v1/providers/provisioning-defaults",
+            user_info=user_info,
+            **{k: v for k, v in params.items() if v is not None}
         )
 
     async def get_provider_credential_schema(self, provider: str, user_info: dict) -> dict:

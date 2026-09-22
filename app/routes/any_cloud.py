@@ -198,6 +198,9 @@ _ALLOWED_KUBERNETES_RESOURCE_TYPES = {
     "daemonsets",
     "replicasets",
     "configmaps",
+    # 클러스터 상세가 보여 주는 것들 — 목록에 없어 403 으로 막혀 있었다.
+    # secrets 는 일부러 뺀다. 자격증명이 그대로 담겨 있어 P0 정책이 막는 자원이다.
+    "serviceaccounts",
     "persistentvolumeclaims",
     "jobs",
     "cronjobs",
@@ -1159,6 +1162,77 @@ async def get_helm_releases(
         )
 
 # 카탈로그 목록 조회 API
+# 고정 경로가 먼저다. /catalog/{repoName}/{chartName}/values 가 먼저 선언되면
+# releases 가 저장소 이름으로 잡혀 이 핸들러는 영영 실행되지 않는다.
+@router_catalog.get("/catalog/releases/{releaseName}/values")
+async def get_catalog_release_values(
+        clusterId: str = Query(..., description="클러스터 ID", examples=["cluster-001"]),
+        namespace: str = Query(..., description="네임스페이스", examples=["default"]),
+        releaseName: str = Path(..., description="릴리즈 이름", examples=["nginx-test-release"]),
+        current_user: Member = Depends(get_current_admin_user)
+):
+    """
+    설치할 때 전달한 values 원문을 조회합니다. 차트 기본값이 아닙니다.
+
+    admin 전용이다. 백엔드가 sh.helm.release.v1.* secret 을 풀어 설치 당시 values 를
+    마스킹 없이 돌려준다 — 비밀번호, 토큰이 그대로 들어 있을 수 있다. 같은 secret 을
+    /kubernetes 경로에서는 POLICY_BLOCKED 로 막고 있어, 여기만 열어 두면 우회로가 된다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.get_catalog_release_values(
+            clusterId=clusterId,
+            namespace=namespace,
+            releaseName=releaseName,
+            user_info=user_info
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting release values for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve release values"
+        )
+
+
+# 차트 resources.yaml 조회 API
+@router_catalog.get("/catalog/releases/{releaseName}/resources")
+async def get_catalog_resources(
+        clusterId: str = Query(..., description="클러스터 ID", examples=["cluster-001"]),
+        namespace: str = Query(..., description="네임스페이스", examples=["default"]),
+        releaseName: str = Path(..., description="릴리즈 이름", examples=["nginx-test-release"]),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    Helm CLI를 사용하여 특정 릴리즈의 리소스 목록을 조회합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.get_catalog_resources(
+            clusterId=clusterId,
+            namespace=namespace,
+            releaseName=releaseName,
+            user_info=user_info
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting resources for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve resource"
+        )
+
+
 @router_catalog.get("/catalog/{repoName}", response_model=AnyCloudPagedResponse)
 async def get_catalog_list(
         repoName: str = Path(..., description="Helm repository 이름", examples=["chart-museum-external"]),
@@ -1324,37 +1398,70 @@ async def get_catalog_values(
             detail="Failed to retrieve values"
         )
 
-# 차트 resources.yaml 조회 API
-@router_catalog.get("/catalog/releases/{releaseName}/resources")
-async def get_catalog_resources(
-        clusterId: str = Query(..., description="클러스터 ID", examples=["cluster-001"]),
-        namespace: str = Query(..., description="네임스페이스", examples=["default"]),
-        releaseName: str = Path(..., description="릴리즈 이름", examples=["nginx-test-release"]),
-        current_user: Member = Depends(get_current_user)
+@router_catalog.put("/clusters/{cluster_name}/helm-releases/{release_name}")
+async def upgrade_helm_release(
+        cluster_name: str = Path(..., description="대상 클러스터 이름"),
+        release_name: str = Path(..., description="릴리즈 이름"),
+        body: Dict[str, Any] = Body(..., description="chart, version, namespace, values/valuesYaml"),
+        current_user: Member = Depends(get_current_admin_user),
 ):
-    """
-    Helm CLI를 사용하여 특정 릴리즈의 리소스 목록을 조회합니다.
-    """
+    """헬름 릴리즈를 업그레이드합니다."""
     try:
         user_info = _create_user_info_dict(current_user)
-
-        response = await any_cloud_service.get_catalog_resources(
-            clusterId=clusterId,
-            namespace=namespace,
-            releaseName=releaseName,
-            user_info=user_info
+        return await any_cloud_service.upgrade_helm_release(
+            clusterName=cluster_name,
+            releaseName=release_name,
+            body=body,
+            user_info=user_info,
         )
-
-        return response
-
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting resources for {current_user.member_id}: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve resource"
+        logger.error(f"Error upgrading helm release {release_name}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to upgrade helm release")
+
+
+@router_catalog.get("/clusters/{cluster_name}/helm-releases/{release_name}/revisions")
+async def get_helm_release_revisions(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        release_name: str = Path(..., description="릴리즈 이름"),
+        namespace: str = Query(..., description="네임스페이스"),
+        current_user: Member = Depends(get_current_user),
+):
+    """릴리즈 revision 이력을 조회합니다."""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.get_helm_release_revisions(
+            clusterName=cluster_name, namespace=namespace,
+            releaseName=release_name, user_info=user_info,
         )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting revisions for {release_name}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get helm release revisions")
+
+
+@router_catalog.post("/clusters/{cluster_name}/helm-releases/{release_name}/operations")
+async def rollback_helm_release(
+        cluster_name: str = Path(..., description="클러스터 이름"),
+        release_name: str = Path(..., description="릴리즈 이름"),
+        namespace: str = Query(..., description="네임스페이스"),
+        body: Dict[str, Any] = Body(..., description='{"type": "rollback", "revision": 3}'),
+        current_user: Member = Depends(get_current_admin_user),
+):
+    """릴리즈를 지정 revision 으로 되돌립니다."""
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.rollback_helm_release(
+            clusterName=cluster_name, releaseName=release_name,
+            namespace=namespace, body=body, user_info=user_info,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rolling back {release_name}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to roll back helm release")
 
 
 @router_catalog.post("/catalog/{repoName}/{chartName}/deploy")
@@ -1636,15 +1743,52 @@ async def list_providers(current_user: Member = Depends(get_current_user)):
         )
 
 
+@router_provider.get("/providers/provisioning-defaults")
+async def get_provisioning_defaults(
+        provider: Optional[str] = Query(None, description="한 CSP 만 조회. 비우면 전부"),
+        minVcpu: Optional[int] = Query(None, ge=1, description="최소 vCPU. 비우면 2"),
+        minMemoryGb: Optional[float] = Query(None, gt=0, description="최소 메모리 GB. 비우면 4"),
+        gpu: Optional[bool] = Query(None, description="GPU 인스턴스로 고를지. 비우면 제외"),
+        current_user: Member = Depends(get_current_user)
+):
+    """CSP 별 생성 기본값 조회
+
+    경로에 변수가 없다. /providers/{provider}/... 보다 먼저 선언해야 provider="provisioning-defaults"
+    로 잡히지 않는다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.get_provisioning_defaults(
+            user_info=user_info,
+            provider=provider,
+            minVcpu=minVcpu,
+            minMemoryGb=minMemoryGb,
+            gpu=gpu,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting provisioning defaults: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get provisioning defaults"
+        )
+
+
 @router_provider.get("/providers/{provider}/regions")
 async def get_provider_regions(
+        request: Request,
         provider: str = Path(..., description="CSP 식별자 (aws/gcp/azure/...)"),
         current_user: Member = Depends(get_current_user)
 ):
-    """CSP 별 region 목록 조회"""
+    """CSP 별 region 목록 조회 — credentialId 등 query 필터 그대로 forward."""
     try:
         user_info = _create_user_info_dict(current_user)
-        return await any_cloud_service.get_provider_regions(provider=provider, user_info=user_info)
+        # credentialId 를 넘기지 않으면 백엔드가 환경변수 fallback 으로 떨어져, 등록한
+        # 자격증명이 있어도 리전 목록이 비어 나온다.
+        query_params = dict(request.query_params)
+        return await any_cloud_service.get_provider_regions(
+            provider=provider, user_info=user_info, **query_params)
     except HTTPException:
         raise
     except Exception as e:
@@ -1683,12 +1827,15 @@ async def get_provider_specs(
 @router_provider.get("/providers/{provider}/config-schema")
 async def get_provider_config_schema(
         provider: str = Path(..., description="CSP 식별자"),
+        credentialId: Optional[str] = Query(None, description="주면 계정에서 고를 수 있는 값이 allowedValues 에 채워진다"),
+        region: Optional[str] = Query(None, description="리전마다 고를 수 있는 값이 다른 키에 필요"),
         current_user: Member = Depends(get_current_user)
 ):
     """CSP 별 클러스터 설정 스키마 조회"""
     try:
         user_info = _create_user_info_dict(current_user)
-        return await any_cloud_service.get_provider_config_schema(provider=provider, user_info=user_info)
+        return await any_cloud_service.get_provider_config_schema(
+            provider=provider, user_info=user_info, credentialId=credentialId, region=region)
     except HTTPException:
         raise
     except Exception as e:
@@ -3255,6 +3402,29 @@ async def get_vm(
     except Exception as e:
         logger.error(f"Error getting vm {vm_name}: {str(e)}")
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get VM")
+
+
+@router_vm.post("/preflight")
+async def preflight_vm(
+        request: VmGatewayCreateRequest = Body(...),
+        current_user: Member = Depends(get_current_admin_user),
+):
+    """VM 생성 사전 검증 — 자원은 만들지 않는다
+
+    생성과 같은 본문을 그대로 보낸다. 화면이 평탄화를 따로 구현하면 규칙이 갈린다.
+    고정 경로라 /vms/{vm_name} 보다 먼저 선언해야 vm_name="preflight" 로 잡히지 않는다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+        return await any_cloud_service.preflight_vm(
+            request_data=request.model_dump(exclude_none=True),
+            user_info=user_info,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error preflighting vm: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to preflight VM")
 
 
 @router_vm.post("")
