@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from sqlalchemy import and_
+from sqlalchemy import and_, text
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -10,6 +10,11 @@ logger = logging.getLogger(__name__)
 from app.config import settings
 from app.database import SessionLocal
 from app.models.knowledge_base import AttemptState, KnowledgeBase, KnowledgeBaseCreateAttempt
+
+
+# pg_advisory_xact_lock 의 첫 인자. 다른 기능이 같은 정수로 락을 잡아 무관한 두 작업이
+# 서로를 기다리는 일이 없도록, KB 전용 네임스페이스를 고정한다.
+_KB_ADVISORY_LOCK_NAMESPACE = 0x4B42  # 'KB'
 
 
 def _as_aware(value: Optional[datetime]) -> Optional[datetime]:
@@ -238,19 +243,64 @@ class KnowledgeBaseCRUD:
         finally:
             db.close()
 
+    def _live_attempts_query(self, db: Session, now: datetime):
+        """아직 결말이 나지 않은 시도 — pending·orphan_suspect 이고 ATTEMPT_TTL 이내인 행."""
+        cutoff = _as_aware(now) - timedelta(minutes=settings.KB_ATTEMPT_TTL_MINUTES)
+        return db.query(KnowledgeBaseCreateAttempt).filter(
+            and_(
+                KnowledgeBaseCreateAttempt.state.in_(
+                    (AttemptState.PENDING, AttemptState.ORPHAN_SUSPECT)
+                ),
+                KnowledgeBaseCreateAttempt.started_at >= cutoff,
+            )
+        )
+
     def get_live_attempts(
             self,
             db: Session,
             now: datetime,
     ) -> List[KnowledgeBaseCreateAttempt]:
-        """보호 효력을 갖는 시도 — orphan_suspect 이고 ATTEMPT_TTL 이내인 행."""
-        cutoff = _as_aware(now) - timedelta(minutes=settings.KB_ATTEMPT_TTL_MINUTES)
-        return db.query(KnowledgeBaseCreateAttempt).filter(
-            and_(
-                KnowledgeBaseCreateAttempt.state == AttemptState.ORPHAN_SUSPECT,
-                KnowledgeBaseCreateAttempt.started_at >= cutoff,
-            )
+        """삭제 보호 집합 — 아직 주인이 정해질 수 있는 모든 시도.
+
+        pending 을 반드시 포함한다. 생성이 진행 중인 KB 는 업스트림에 이미 보이는데 매핑은
+        아직 없어, 빼면 관리자 삭제와 정리 잡이 남이 만드는 중인 KB 를 고아로 보고 지운다.
+        """
+        return self._live_attempts_query(db, now).all()
+
+    def get_conflicting_attempts(
+            self,
+            db: Session,
+            now: datetime,
+            member_id: str,
+    ) -> List[KnowledgeBaseCreateAttempt]:
+        """복구 충돌 집합 — **다른 사용자**의 살아 있는 시도.
+
+        같은 사용자의 시도는 넣지 않는다. 어느 시도의 결과로 복구하든 소유자가 같아 오배정이
+        생길 수 없는 반면, 넣으면 타임아웃 후 재시도한 사용자가 자기 재시도 때문에 영영
+        복구되지 않는다 — 타임아웃을 겪은 사용자가 가장 흔히 밟는 경로다.
+        """
+        return self._live_attempts_query(db, now).filter(
+            KnowledgeBaseCreateAttempt.member_id != member_id
         ).all()
+
+    def lock_surro_knowledge_id(self, db: Session, surro_knowledge_id: int) -> None:
+        """이 업스트림 KB 에 대한 트랜잭션 범위 락 — commit/rollback 시 자동 해제된다.
+
+        자동 복구와 관리자 삭제는 둘 다 업스트림 호출을 await 하는 동안 판정 근거가 무효가
+        될 수 있다. 판정과 쓰기를 이 락 안에서 다시 묶어야 하며, 워커가 여러 개면 프로세스
+        내 잠금은 소용이 없으므로 DB 락을 쓴다.
+
+        락 안의 재확인이 다른 세션의 최신 커밋을 보려면 READ COMMITTED 여야 한다(현재
+        운영 DB 의 기본값). REPEATABLE READ 이상으로 올리면 재확인이 트랜잭션 시작 시점의
+        스냅샷을 읽어, 예외 없이 조용히 무력화된다.
+        """
+        # SQLite 테스트 환경에는 advisory lock 이 없다. 단일 커넥션이라 직렬화도 불필요하다.
+        if db.bind is None or db.bind.dialect.name != "postgresql":
+            return
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(:ns, :id)"),
+            {"ns": _KB_ADVISORY_LOCK_NAMESPACE, "id": surro_knowledge_id},
+        )
 
     def mark_recovered(self, attempt_id: int, surro_id: int) -> None:
         """자동 복구로 매핑이 붙은 시도를 recovered 로 올린다 (별도 세션)."""
@@ -277,7 +327,7 @@ class KnowledgeBaseCRUD:
     ) -> List[KnowledgeBaseCreateAttempt]:
         """이 사용자의 복구 후보 시도 — orphan_suspect · TTL 이내 · 스냅샷 보유.
 
-        스냅샷이 없는 시도는 Step 4 조건 2를 계산할 수 없어 애초에 대상이 아니다(조건 0).
+        스냅샷이 없으면 "이 시도 이후에 생긴 KB" 를 가려낼 수 없어 후보를 특정할 방법이 없다.
         """
         cutoff = _as_aware(now) - timedelta(minutes=settings.KB_ATTEMPT_TTL_MINUTES)
         return db.query(KnowledgeBaseCreateAttempt).filter(
@@ -287,12 +337,15 @@ class KnowledgeBaseCRUD:
                 KnowledgeBaseCreateAttempt.started_at >= cutoff,
                 KnowledgeBaseCreateAttempt.upstream_snapshot.isnot(None),
             )
-        ).all()
+            # 호출자가 이 순서대로 후보 KB 락을 잡는다. 정렬이 없으면 동시 요청 둘이 락을
+            # 엇갈린 순서로 잡아 데드락이 날 수 있다.
+
+        ).order_by(KnowledgeBaseCreateAttempt.id).all()
 
     def get_known_surro_ids(self, db: Session) -> set:
         """게이트웨이가 **한 번이라도** 알았던 업스트림 KB id — soft-delete 포함.
 
-        active 만 보면 사용자가 지운 KB 가 다시 "미지" 로 올라와 조건 2의 개수를 부풀리고
+        active 만 보면 사용자가 지운 KB 가 다시 "미지" 로 올라와 후보 개수를 부풀리고
         멀쩡한 복구를 거부시킨다.
         """
         rows = db.query(KnowledgeBase.surro_knowledge_id).all()
@@ -338,19 +391,11 @@ class KnowledgeBaseCRUD:
         return found
 
     def is_protected(self, external_kb, live_attempts) -> bool:
-        """공통 규칙 — 아직 주인이 정해질 수 있는 KB 인가.
-
-        Step 1(관리자 삭제)과 Step 5(자동 정리)가 **함께** 거치는 판정이다. 각자 구현하면
-        한쪽만 고쳐지는 사고가 나므로 여기 하나만 둔다.
-        """
+        """관리자 삭제와 정리 잡이 보호해야 하는 KB 인지 판정 — 두 삭제 경로 공통."""
         return bool(self.find_protecting_attempts(external_kb, live_attempts))
 
     def find_cleanup_targets(self, db: Session, external_kbs, now: datetime) -> list:
-        """Step 5 정리 대상 — active 매핑 없음 · ORPHAN_TTL 경과 · `is_protected` 거짓.
-
-        소유자를 판정하지 않으므로 오배정 위험이 없다. 보호 판정은 Step 1(관리자 삭제)과
-        동일한 `is_protected` 를 쓴다 — 두 삭제 경로가 같은 규칙을 거쳐야 한다.
-        """
+        """정리 잡 — active 매핑 없음 · ORPHAN_TTL 경과 · `is_protected` 거짓. """
         cutoff = _as_aware(now) - timedelta(minutes=settings.PROXY_KB_ORPHAN_TTL_MINUTES)
         active_ids = self.get_active_surro_ids(db)
         live_attempts = self.get_live_attempts(db, now)

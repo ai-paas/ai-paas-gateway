@@ -39,12 +39,21 @@ def _external(kb_id, name="kb", created_at=None):
 
 
 @contextmanager
-def _client(db, user, upstream, deleted=True, admin=True):
-    """업스트림 응답을 고정한 TestClient."""
+def _client(db, user, upstream, deleted=True, admin=True, on_list=None, delete_calls=None):
+    """업스트림 응답을 고정한 TestClient.
+
+    `on_list` 는 업스트림 목록을 await 하는 동안 다른 요청이 끼어드는 상황을 재현한다 —
+    라우트가 그 await 전후로 판정을 다시 하는지 검증하는 용도다.
+    `delete_calls` 를 주면 업스트림 DELETE 가 실제로 불렸는지 확인할 수 있다.
+    """
     async def fake_list(*args, **kwargs):
+        if on_list is not None:
+            on_list()
         return upstream
 
     async def fake_delete(knowledge_base_id, user_info=None):
+        if delete_calls is not None:
+            delete_calls.append(knowledge_base_id)
         return deleted
 
     original_list = knowledge_base_service.get_knowledge_bases
@@ -118,6 +127,17 @@ def test_list_orphans_marks_protected(db, admin_member):
 
     assert item["is_protected"] is True, "창 안에 생긴 미지 KB 는 복구 대기로 표시돼야 한다"
     assert admin_member.member_id in item["protected_by"]
+
+
+def test_list_orphans_marks_pending_create_as_protected(db, admin_member, sample_member):
+    """생성이 진행 중인 KB 는 업스트림에 이미 보이지만 매핑은 아직 없다 — 고아가 아니다."""
+    _attempt(db, sample_member.member_id, snapshot=[1, 2, 3], state=AttemptState.PENDING)
+
+    with _client(db, admin_member, upstream=[_external(407)]) as client:
+        item = client.get(ORPHANS).json()["data"][0]
+
+    assert item["is_protected"] is True
+    assert sample_member.member_id in item["protected_by"]
 
 
 def test_list_orphans_outside_recovery_window_is_not_protected(db, admin_member):
@@ -203,6 +223,70 @@ def test_delete_protected_with_force_abandons_attempt(db, admin_member):
     assert log.metadata_json["orphan"] is True
 
 
+def test_delete_rejects_when_recovery_completed_during_upstream_call(db, admin_member, sample_member):
+    """업스트림 목록을 await 하는 사이 자동 복구가 끝나면 삭제하지 않는다.
+
+    복구가 끝나면 시도는 recovered 가 되어 보호 판정에서 빠진다. 매핑을 다시 확인하지
+    않으면 방금 정상 소유자가 생긴 KB 를 force 없이 지우게 된다.
+    """
+    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2, 3])
+    delete_calls = []
+
+    def recovery_finishes_first():
+        _mapping(db, sample_member.member_id, surro_id=407)
+        attempt.state = AttemptState.RECOVERED
+        db.flush()
+
+    with _client(db, admin_member, upstream=[_external(407)],
+                 on_list=recovery_finishes_first, delete_calls=delete_calls) as client:
+        res = client.delete(f"{ORPHANS}/407")
+
+    assert res.status_code == 409
+    assert delete_calls == [], "업스트림 DELETE 가 불리면 안 된다"
+
+
+def test_delete_rejects_while_create_is_pending(db, admin_member, sample_member):
+    """생성이 진행 중인 KB 는 force 없이 지울 수 없다."""
+    _attempt(db, sample_member.member_id, snapshot=[1, 2, 3], state=AttemptState.PENDING)
+    delete_calls = []
+
+    with _client(db, admin_member, upstream=[_external(407)],
+                 delete_calls=delete_calls) as client:
+        res = client.delete(f"{ORPHANS}/407")
+
+    assert res.status_code == 409
+    assert delete_calls == []
+
+
+def test_delete_abandons_protectors_before_calling_upstream(db, admin_member):
+    """force 삭제는 업스트림 DELETE 보다 먼저 시도를 끊어야 한다.
+
+    이 순서라야 락을 놓은 뒤에도 진행 중인 복구가 사라진 KB 에 매핑을 붙이지 못한다.
+    """
+    attempt = _attempt(db, admin_member.member_id, snapshot=[1, 2, 3])
+    states_at_delete = []
+
+    def fake_delete_recording_state(knowledge_base_id, user_info=None):
+        db.refresh(attempt)
+        states_at_delete.append(attempt.state)
+
+    with _client(db, admin_member, upstream=[_external(407)]) as client:
+        original = knowledge_base_service.delete_knowledge_base
+
+        async def spy(knowledge_base_id, user_info=None):
+            fake_delete_recording_state(knowledge_base_id, user_info)
+            return True
+
+        knowledge_base_service.delete_knowledge_base = spy
+        try:
+            res = client.delete(f"{ORPHANS}/407?force=true")
+        finally:
+            knowledge_base_service.delete_knowledge_base = original
+
+    assert res.status_code == 200
+    assert states_at_delete == [AttemptState.ABANDONED]
+
+
 def test_delete_unprotected_orphan_succeeds(db, admin_member):
     upstream = [_external(407)]
 
@@ -213,6 +297,29 @@ def test_delete_unprotected_orphan_succeeds(db, admin_member):
     body = res.json()
     assert body["forced"] is False
     assert body["abandoned_attempts"] == 0
+
+
+def test_delete_failure_leaves_kb_reclaimable(db, admin_member):
+    """force 삭제가 업스트림에서 실패해도 자원이 갇히지는 않는다.
+
+    끊긴 시도는 되살리지 않는다 — 삭제가 실제로 닿았는지 알 수 없어, 되살렸다가 사라진
+    KB 에 매핑이 붙는 쪽이 더 나쁘다. 대신 KB 는 고아 목록에 그대로 남아 재삭제나 정리
+    잡이 회수한다.
+    """
+    attempt = _attempt(db, admin_member.member_id, snapshot=[1, 2, 3])
+
+    with _client(db, admin_member, upstream=[_external(407)], deleted=False) as client:
+        assert client.delete(f"{ORPHANS}/407?force=true").status_code == 404
+
+    db.refresh(attempt)
+    assert attempt.state == AttemptState.ABANDONED, "끊긴 시도는 되살리지 않는다"
+
+    # 자원은 갇히지 않는다 — 여전히 고아로 보이고, 이제 force 없이 회수할 수 있다.
+    with _client(db, admin_member, upstream=[_external(407)]) as client:
+        item = client.get(ORPHANS).json()["data"][0]
+        assert item["surro_knowledge_id"] == 407
+        assert item["is_protected"] is False
+        assert client.delete(f"{ORPHANS}/407").status_code == 200
 
 
 def test_delete_refuses_empty_upstream(db, admin_member):

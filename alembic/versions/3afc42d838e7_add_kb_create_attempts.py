@@ -59,7 +59,7 @@ def upgrade() -> None:
         ["state", "started_at"],
         unique=False,
     )
-    # 조건 6 — 같은 이름·파일로 성공한 재시도 검출
+    # 같은 이름·파일로 성공한 재시도 검출용 — 중복 복구를 막는 조회가 이 인덱스를 탄다
     op.create_index(
         "idx_kb_attempts_dedup",
         "knowledge_base_create_attempts",

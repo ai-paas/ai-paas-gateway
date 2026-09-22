@@ -25,7 +25,7 @@ from app.schemas.knowledge_base import (
     OrphanKnowledgeBaseListResponse,
     SearchMethodListResponse,
 )
-from app.services.audit_service import Action, ResourceType, emit_from_request
+from app.services.audit_service import Action, ResourceType, emit, emit_from_request
 from app.services.knowledge_base_service import knowledge_base_service
 
 logger = logging.getLogger(__name__)
@@ -424,39 +424,51 @@ async def _snapshot_upstream_ids(user_info: dict) -> Optional[list]:
 
 
 async def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
-    """호출자의 고아 KB 복구 시도. 성공한 건수 반환. 조건을 모두 불만족하면 복구하지 않는다. """
+    """호출자의 고아 KB 복구 시도. 복구한 건수 반환. 아래 판정을 하나라도 통과 못 하면 복구하지 않는다. """
     now = datetime.now(timezone.utc)
     attempts = knowledge_base_crud.get_recoverable_attempts(db, current_user.member_id, now)
     if not attempts:
         return 0
 
     known_ids = knowledge_base_crud.get_known_surro_ids(db)
-    live_attempts = knowledge_base_crud.get_live_attempts(db, now)
+    conflicting = knowledge_base_crud.get_conflicting_attempts(db, now, current_user.member_id)
     recovered = 0
 
     for attempt in attempts:
-        # 조건 2 — 창 안에 나타난 미지의 KB 가 정확히 1개.
+        # 후보 추리기 — 이 시도 이후 업스트림에 나타난, 게이트웨이가 모르는 같은 이름의 KB.
+        # 이름은 목록 응답에 이미 있어 추가 호출이 들지 않는다. 여기서 거르지 않으면 같은
+        # 시간대에 타임아웃한 무관한 KB 까지 후보로 세어져 멀쩡한 복구가 막힌다.
         # find_protecting_attempts 가 "스냅샷 밖 + 복구 창 안" 을 함께 판정한다.
         # known_ids 는 soft-delete 된 매핑까지 포함한다 — 한 번이라도 알았던 KB 는 미지가 아니다.
         candidates = [
             kb for kb in external_kbs
             if kb.id not in known_ids
+            and kb.name == attempt.name
             and knowledge_base_crud.find_protecting_attempts(kb, [attempt])
         ]
         if len(candidates) != 1:
-            continue
+            continue     # 0개면 아직 안 나타났고, 2개 이상이면 어느 쪽인지 구별할 수 없다
         candidate = candidates[0]
 
-        if candidate.name != attempt.name:                                  # 조건 3
-            continue
-        if len(knowledge_base_crud.find_protecting_attempts(candidate, live_attempts)) != 1:
-            continue                                                        # 조건 5
+        # 복수 시도 판정 — 다른 사용자의 시도도 이 KB 를 후보로 삼고 있으면 오배정 위험이 있다.
+        rivals = [t for t in conflicting if t.name == attempt.name]
+        if knowledge_base_crud.find_protecting_attempts(candidate, rivals):
+            continue     # 다른 사용자의 시도도 이 KB 를 노린다 — 오배정 위험
         if knowledge_base_crud.find_duplicate_success(db, attempt) is not None:
-            continue                                                        # 조건 6
+            continue     # 같은 이름·파일로 이미 성공한 재시도가 있다 — 중복을 만들지 않는다
 
-        # 조건 4 — 파일명 대조. 후보가 하나로 좁혀진 뒤에만 상세를 부른다(N+1 회피).
+        # 업로드 파일명 대조. 후보가 하나로 좁혀진 뒤에만 상세를 부른다(N+1 회피).
         detail = await knowledge_base_service.get_knowledge_base(candidate.id, _user_info(current_user))
         if detail is None or not any(f.name == attempt.filename for f in detail.files):
+            continue
+
+        # 위 판정은 업스트림 호출을 await 하는 사이에 무효가 될 수 있다 — 관리자가 이 KB 를
+        # 이미 회수했거나 다른 요청이 먼저 복구했을 수 있다. 락 안에서 둘 다 다시 확인한다.
+        knowledge_base_crud.lock_surro_knowledge_id(db, candidate.id)
+        db.refresh(attempt)
+        if attempt.state != AttemptState.ORPHAN_SUSPECT:
+            continue
+        if knowledge_base_crud.get_active_knowledge_base_by_surro_id(db, candidate.id):
             continue
 
         knowledge_base_crud.create_knowledge_base(
@@ -468,7 +480,22 @@ async def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
             collection_name=detail.collection_name,
         )
         knowledge_base_crud.mark_recovered(attempt.id, candidate.id)
+        # 같은 요청의 다음 시도가 이 KB 를 다시 후보로 삼아 헛되이 상세를 부르지 않게 한다.
+        known_ids.add(candidate.id)
         recovered += 1
+
+        # 복구는 소유권을 부여하는 유일한 자동 경로다. created_by 가 게이트웨이의 권한
+        # 근거인 이상, 누가 왜 그 주인이 됐는지 남기지 않으면 나중에 되짚을 수 없다.
+        emit(
+            db,
+            action=Action.CREATE,
+            resource_type=ResourceType.KNOWLEDGE_BASE,
+            actor_member_id="system:kb-orphan-recovery",
+            resource_id=str(candidate.id),
+            target_member_id=attempt.member_id,
+            request_id=attempt.request_id,
+            metadata={"recovered": True, "attempt_id": attempt.id, "name": detail.name},
+        )
         logger.info(
             "Recovered orphan knowledge base: surro_id=%s, member_id=%s, attempt_id=%s",
             candidate.id, attempt.member_id, attempt.id,
@@ -621,6 +648,12 @@ async def create_knowledge_base(
             attempt_id, state=AttemptState.ORPHAN_SUSPECT, failure_kind="unknown"
         )
         raise
+    except BaseException:
+        # 클라이언트가 연결을 끊어도 이미 업스트림이 KB를 생성하고 있을 수 있어 orphan_suspect 상태로 남긴다. 
+        knowledge_base_crud.finish_attempt(
+            attempt_id, state=AttemptState.ORPHAN_SUSPECT, failure_kind="cancelled"
+        )
+        raise
 
     try:
         db_kb = knowledge_base_crud.create_knowledge_base(
@@ -743,6 +776,10 @@ async def get_knowledge_bases(
         if await _try_recover_orphans(db, current_user, external_kbs):
             knowledge_bases, total = _load_page()
     except Exception:
+        # 일부만 복구하고 실패했을 수 있다. 그 커밋이 위에서 읽어둔 객체를 만료시켰으므로,
+        # 롤백하고 다시 읽지 않으면 아래 응답 조립이 깨진 트랜잭션에서 지연 로드를 시도한다.
+        db.rollback()
+        knowledge_bases, total = _load_page()
         logger.exception("Orphan recovery failed; knowledge base list is unaffected")
 
     response_data = []
@@ -843,6 +880,15 @@ async def delete_orphan_knowledge_base(
     if target is None:
         raise HTTPException(status_code=404, detail="Knowledge base not found in external service")
 
+    # 업스트림 목록을 await 하는 사이에 자동 복구가 끝나 주인이 생겼을 수 있다. 락을 잡고
+    # 매핑과 보호 여부를 모두 다시 확인한다 — 락 밖의 재조회는 그 직후의 경합을 막지 못한다.
+    knowledge_base_crud.lock_surro_knowledge_id(db, surro_knowledge_id)
+    if knowledge_base_crud.get_active_knowledge_base_by_surro_id(db, surro_knowledge_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Not an orphan: active gateway mapping exists",
+        )
+
     live_attempts = knowledge_base_crud.get_live_attempts(db, datetime.now(timezone.utc))
     protectors = knowledge_base_crud.find_protecting_attempts(target, live_attempts)
     if protectors and not force:
@@ -854,14 +900,26 @@ async def delete_orphan_knowledge_base(
             ),
         )
 
-    deleted = await knowledge_base_service.delete_knowledge_base(
-        surro_knowledge_id, _user_info(current_user)
-    )
+    # 업스트림 삭제 전에 보호 시도를 모두 abandoned 상태로 바꾼다. 업스트림 삭제가 실패하면
+    # orphan_suspect 상태로 남아있어 복구 시도가 계속된다.
+    abandoned = knowledge_base_crud.abandon_attempts(db, protectors)
+    db.commit()
+
+    deleted = False
+    try:
+        deleted = await knowledge_base_service.delete_knowledge_base(
+            surro_knowledge_id, _user_info(current_user)
+        )
+    finally:
+        if not deleted and abandoned:
+            # 업스트림 삭제 실패 — 보호 시도를 abandoned 상태로 바꾼 커밋이 이미 나갔으므로, orphan_suspect 상태로 남아
+            # 복구 시도가 계속된다. 로그를 남겨서 관리자가 확인할 수 있게 한다.
+            logger.error(
+                f"Orphan delete failed after abandoning attempts: surro_id={surro_knowledge_id}, "
+                f"abandoned_attempts={abandoned}, member_id={current_user.member_id}"
+            )
     if not deleted:
         raise HTTPException(status_code=404, detail="Knowledge base not found in external service")
-
-    # 붙을 대상이 사라진 시도를 남겨두면 ATTEMPT_TTL 동안 무관한 고아를 계속 보호한다.
-    abandoned = knowledge_base_crud.abandon_attempts(db, protectors)
 
     emit_from_request(
         db, request,
