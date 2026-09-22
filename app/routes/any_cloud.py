@@ -1169,10 +1169,14 @@ async def get_catalog_release_values(
         clusterId: str = Query(..., description="클러스터 ID", examples=["cluster-001"]),
         namespace: str = Query(..., description="네임스페이스", examples=["default"]),
         releaseName: str = Path(..., description="릴리즈 이름", examples=["nginx-test-release"]),
-        current_user: Member = Depends(get_current_user)
+        current_user: Member = Depends(get_current_admin_user)
 ):
     """
     설치할 때 전달한 values 원문을 조회합니다. 차트 기본값이 아닙니다.
+
+    admin 전용이다. 백엔드가 sh.helm.release.v1.* secret 을 풀어 설치 당시 values 를
+    마스킹 없이 돌려준다 — 비밀번호, 토큰이 그대로 들어 있을 수 있다. 같은 secret 을
+    /kubernetes 경로에서는 POLICY_BLOCKED 로 막고 있어, 여기만 열어 두면 우회로가 된다.
     """
     try:
         user_info = _create_user_info_dict(current_user)

@@ -61,6 +61,9 @@ def test_every_mutating_any_cloud_route_requires_admin():
         f"{API}/any-cloud/system/cluster/{{cluster_name}}/kubeconfig",
         f"{API}/any-cloud/system/cluster/{{cluster_name}}/agent-bootstrap",
         f"{API}/any-cloud/vms/{{vm_name}}/kubeconfig",
+        # 설치 당시 values 원문. helm 이 secret 에 넣어 둔 것을 풀어 주므로
+        # 비밀번호, 토큰이 그대로 나올 수 있다. 같은 secret 은 POLICY_BLOCKED 가 막는다.
+        f"{API}/any-cloud/catalog/releases/{{releaseName}}/values",
     ],
 )
 def test_secret_bearing_reads_require_admin(path):

@@ -5,12 +5,11 @@ FastAPI 가 다른 핸들러로 보내거나 인자가 upstream 까지 가지 �
 진짜 URL 을 태워야 잡힌다.
 """
 
-import asyncio
 from contextlib import contextmanager
 
 from fastapi.testclient import TestClient
 
-from app.auth import get_current_user
+from app.auth import get_current_admin_user, get_current_user
 from app.main import app
 from app.models.member import Member
 from app.services.any_cloud_service import any_cloud_service
@@ -26,7 +25,9 @@ def _member() -> Member:
 
 @contextmanager
 def _client():
+    # values 는 admin 전용이다. 두 의존성을 다 덮어야 라우팅만 검증할 수 있다.
     app.dependency_overrides[get_current_user] = _member
+    app.dependency_overrides[get_current_admin_user] = _member
     try:
         with TestClient(app) as client:
             yield client
