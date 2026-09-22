@@ -88,7 +88,7 @@ class KnowledgeBase(Base):  # Base를 상속받아야 함!
 
 
 class AttemptState:
-    """``knowledge_base_create_attempts.state`` 허용값 """
+    """knowledge_base_create_attempts.state 허용값."""
 
     PENDING = "pending"
     SUCCEEDED = "succeeded"
@@ -100,7 +100,7 @@ class AttemptState:
 class KnowledgeBaseCreateAttempt(Base):
     __tablename__ = "knowledge_base_create_attempts"
 
-    id = Column(Integer, Sequence("kb_create_attempts_id_seq"), primary_key=True, index=True, autoincrement=True)
+    id = Column(Integer, Sequence("knowledge_base_create_attempts_id_seq"), primary_key=True, index=True, autoincrement=True)
 
     member_id = Column(String(100), ForeignKey("members.member_id"), nullable=False)
     name = Column(String(255), nullable=False)
