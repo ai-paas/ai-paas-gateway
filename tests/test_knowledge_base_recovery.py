@@ -279,12 +279,39 @@ def test_cleanup_targets_exclude_active_and_protected(db, sample_member):
     assert [kb.id for kb in targets] == [408]
 
 
-def test_cleanup_job_skips_on_empty_upstream(monkeypatch, caplog):
-    """빈 응답을 '전부 고아'로 해석하면 업스트림 장애 한 번에 전체를 지운다."""
-    async def empty(*args, **kwargs):
-        return []
+class _FakeService:
+    """스케줄러 잡이 쓰는 서비스 대역. 인스턴스 생성·close 를 기록한다."""
 
-    monkeypatch.setattr(knowledge_base_service, "get_knowledge_bases", empty)
+    instances = []
+
+    def __init__(self):
+        self.closed = False
+        self.deleted = []
+        type(self).instances.append(self)
+
+    async def get_knowledge_bases(self, *args, **kwargs):
+        return type(self).upstream
+
+    async def delete_knowledge_base(self, knowledge_base_id, user_info=None):
+        self.deleted.append(knowledge_base_id)
+        return True
+
+    async def close(self):
+        self.closed = True
+
+
+def _install_fake_service(monkeypatch, upstream):
+    import app.services.knowledge_base_service as svc_mod
+
+    _FakeService.instances = []
+    _FakeService.upstream = upstream
+    monkeypatch.setattr(svc_mod, "KnowledgeBaseService", _FakeService)
+    return _FakeService
+
+
+def test_cleanup_job_skips_on_empty_upstream(monkeypatch):
+    """빈 응답을 '전부 고아'로 해석하면 업스트림 장애 한 번에 전체를 지운다."""
+    _install_fake_service(monkeypatch, upstream=[])
     called = {"n": 0}
     monkeypatch.setattr(crud, "find_cleanup_targets",
                         lambda *a, **k: called.__setitem__("n", called["n"] + 1) or [])
@@ -294,18 +321,26 @@ def test_cleanup_job_skips_on_empty_upstream(monkeypatch, caplog):
 
 
 def test_cleanup_job_dry_run_does_not_delete(monkeypatch):
-    async def upstream(*args, **kwargs):
-        return [_brief(408, created_at=NOW - timedelta(days=365))]
-
-    deleted = []
-
-    async def fake_delete(kb_id, user_info=None):
-        deleted.append(kb_id)
-        return True
-
-    monkeypatch.setattr(knowledge_base_service, "get_knowledge_bases", upstream)
-    monkeypatch.setattr(knowledge_base_service, "delete_knowledge_base", fake_delete)
+    fake = _install_fake_service(
+        monkeypatch, upstream=[_brief(408, created_at=NOW - timedelta(days=365))]
+    )
     monkeypatch.setattr(settings, "KB_ORPHAN_CLEANUP_DRY_RUN", True)
 
     job_cleanup_orphan_knowledge_bases()
-    assert deleted == [], "dry-run 은 삭제하지 않는다"
+    assert all(not inst.deleted for inst in fake.instances), "dry-run 은 삭제하지 않는다"
+
+
+def test_cleanup_job_uses_a_fresh_client_and_closes_it(monkeypatch):
+    """모듈 싱글턴의 AsyncClient 는 asyncio.run 이 만든 새 루프와 엇갈린다.
+
+    기존 reconcile 잡들과 같이 호출마다 새 인스턴스를 만들고 닫아야 한다.
+    """
+    fake = _install_fake_service(
+        monkeypatch, upstream=[_brief(408, created_at=NOW - timedelta(days=365))]
+    )
+    monkeypatch.setattr(settings, "KB_ORPHAN_CLEANUP_DRY_RUN", True)
+
+    job_cleanup_orphan_knowledge_bases()
+
+    assert fake.instances, "잡은 자체 서비스 인스턴스를 만들어야 한다"
+    assert all(inst.closed for inst in fake.instances), "만든 인스턴스는 모두 닫아야 한다"

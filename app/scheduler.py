@@ -187,12 +187,19 @@ def job_cleanup_orphan_knowledge_bases() -> None:
 
     from app.cruds.knowledge_base import knowledge_base_crud
     from app.services.audit_service import Action, ResourceType, emit
-    from app.services.knowledge_base_service import knowledge_base_service
+    from app.services.knowledge_base_service import KnowledgeBaseService
+
+    async def _run(action):
+        svc = KnowledgeBaseService()  # 신규 client 인스턴스 (루프 교차 재사용 회피)
+        try:
+            return await action(svc)
+        finally:
+            await svc.close()
 
     dry_run = settings.KB_ORPHAN_CLEANUP_DRY_RUN
     db = SessionLocal()
     try:
-        external = asyncio.run(knowledge_base_service.get_knowledge_bases())
+        external = asyncio.run(_run(lambda svc: svc.get_knowledge_bases()))
         if not external:
             # 빈 응답을 "전부 고아"로 해석하면 업스트림 장애 한 번에 전체를 지운다.
             logger.warning("[scheduler] kb orphan cleanup skipped (upstream returned no knowledge bases)")
@@ -210,7 +217,7 @@ def job_cleanup_orphan_knowledge_bases() -> None:
         deleted = 0
         for kb in targets:
             try:
-                if asyncio.run(knowledge_base_service.delete_knowledge_base(kb.id)):
+                if asyncio.run(_run(lambda svc, kb_id=kb.id: svc.delete_knowledge_base(kb_id))):
                     emit(
                         db,
                         action=Action.DELETE,
