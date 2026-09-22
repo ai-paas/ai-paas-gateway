@@ -1162,6 +1162,73 @@ async def get_helm_releases(
         )
 
 # 카탈로그 목록 조회 API
+# 고정 경로가 먼저다. /catalog/{repoName}/{chartName}/values 가 먼저 선언되면
+# releases 가 저장소 이름으로 잡혀 이 핸들러는 영영 실행되지 않는다.
+@router_catalog.get("/catalog/releases/{releaseName}/values")
+async def get_catalog_release_values(
+        clusterId: str = Query(..., description="클러스터 ID", examples=["cluster-001"]),
+        namespace: str = Query(..., description="네임스페이스", examples=["default"]),
+        releaseName: str = Path(..., description="릴리즈 이름", examples=["nginx-test-release"]),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    설치할 때 전달한 values 원문을 조회합니다. 차트 기본값이 아닙니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.get_catalog_release_values(
+            clusterId=clusterId,
+            namespace=namespace,
+            releaseName=releaseName,
+            user_info=user_info
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting release values for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve release values"
+        )
+
+
+# 차트 resources.yaml 조회 API
+@router_catalog.get("/catalog/releases/{releaseName}/resources")
+async def get_catalog_resources(
+        clusterId: str = Query(..., description="클러스터 ID", examples=["cluster-001"]),
+        namespace: str = Query(..., description="네임스페이스", examples=["default"]),
+        releaseName: str = Path(..., description="릴리즈 이름", examples=["nginx-test-release"]),
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    Helm CLI를 사용하여 특정 릴리즈의 리소스 목록을 조회합니다.
+    """
+    try:
+        user_info = _create_user_info_dict(current_user)
+
+        response = await any_cloud_service.get_catalog_resources(
+            clusterId=clusterId,
+            namespace=namespace,
+            releaseName=releaseName,
+            user_info=user_info
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting resources for {current_user.member_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve resource"
+        )
+
+
 @router_catalog.get("/catalog/{repoName}", response_model=AnyCloudPagedResponse)
 async def get_catalog_list(
         repoName: str = Path(..., description="Helm repository 이름", examples=["chart-museum-external"]),
@@ -1327,40 +1394,6 @@ async def get_catalog_values(
             detail="Failed to retrieve values"
         )
 
-# 차트 resources.yaml 조회 API
-@router_catalog.get("/catalog/releases/{releaseName}/resources")
-async def get_catalog_resources(
-        clusterId: str = Query(..., description="클러스터 ID", examples=["cluster-001"]),
-        namespace: str = Query(..., description="네임스페이스", examples=["default"]),
-        releaseName: str = Path(..., description="릴리즈 이름", examples=["nginx-test-release"]),
-        current_user: Member = Depends(get_current_user)
-):
-    """
-    Helm CLI를 사용하여 특정 릴리즈의 리소스 목록을 조회합니다.
-    """
-    try:
-        user_info = _create_user_info_dict(current_user)
-
-        response = await any_cloud_service.get_catalog_resources(
-            clusterId=clusterId,
-            namespace=namespace,
-            releaseName=releaseName,
-            user_info=user_info
-        )
-
-        return response
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting resources for {current_user.member_id}: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve resource"
-        )
-
-
-
 @router_catalog.put("/clusters/{cluster_name}/helm-releases/{release_name}")
 async def upgrade_helm_release(
         cluster_name: str = Path(..., description="대상 클러스터 이름"),
@@ -1425,38 +1458,6 @@ async def rollback_helm_release(
     except Exception as e:
         logger.error(f"Error rolling back {release_name}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to roll back helm release")
-
-
-@router_catalog.get("/catalog/releases/{releaseName}/values")
-async def get_catalog_release_values(
-        clusterId: str = Query(..., description="클러스터 ID", examples=["cluster-001"]),
-        namespace: str = Query(..., description="네임스페이스", examples=["default"]),
-        releaseName: str = Path(..., description="릴리즈 이름", examples=["nginx-test-release"]),
-        current_user: Member = Depends(get_current_user)
-):
-    """
-    Helm CLI를 사용하여 특정 릴리즈의 리소스 목록을 조회합니다.
-    """
-    try:
-        user_info = _create_user_info_dict(current_user)
-
-        response = await any_cloud_service.get_catalog_release_values(
-            clusterId=clusterId,
-            namespace=namespace,
-            releaseName=releaseName,
-            user_info=user_info
-        )
-
-        return response
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting resources for {current_user.member_id}: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve resource"
-        )
 
 
 @router_catalog.post("/catalog/{repoName}/{chartName}/deploy")
@@ -1753,7 +1754,13 @@ async def get_provisioning_defaults(
     """
     try:
         user_info = _create_user_info_dict(current_user)
-        return await any_cloud_service.get_provisioning_defaults(user_info=user_info, provider=provider)
+        return await any_cloud_service.get_provisioning_defaults(
+            user_info=user_info,
+            provider=provider,
+            minVcpu=minVcpu,
+            minMemoryGb=minMemoryGb,
+            gpu=gpu,
+        )
     except HTTPException:
         raise
     except Exception as e:

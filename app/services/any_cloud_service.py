@@ -1204,10 +1204,12 @@ class AnyCloudService:
     async def get_provisioning_defaults(self, user_info: dict, **params) -> dict:
         """CSP 별로 지금 통과하는 생성 기본값 조회"""
         # None 을 그대로 넘기면 빈 쿼리 파라미터가 붙어 백엔드가 빈 문자열로 읽는다.
+        # falsy 가 아니라 None 으로 거른다 — gpu=false 는 "GPU 제외" 라는 뜻이라
+        # 값이 있는 것이고, 떨어뜨리면 "지정 안 함" 과 구분되지 않는다.
         return await self.generic_get_unwrapped(
             path="/v1/providers/provisioning-defaults",
             user_info=user_info,
-            **{k: v for k, v in params.items() if v}
+            **{k: v for k, v in params.items() if v is not None}
         )
 
     async def get_provider_credential_schema(self, provider: str, user_info: dict) -> dict:
