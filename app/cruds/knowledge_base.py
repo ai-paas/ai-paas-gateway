@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 from app.config import settings
+from app.database import SessionLocal
 from app.models.knowledge_base import AttemptState, KnowledgeBase, KnowledgeBaseCreateAttempt
 
 
@@ -179,6 +180,64 @@ class KnowledgeBaseCRUD:
             return True
         return False
 
+    # === 생성 시도 레코드 관련 메서드 ===
+    # 생성·갱신 모두 라우트의 db 세션을 쓰지 않는다. 매핑 write 가 실패해 롤백되면
+    # 정작 기록이 필요한 순간에 시도 행이 함께 사라진다. 한쪽만 분리하면 의미가 없다.
+
+    def create_attempt(
+            self,
+            member_id: str,
+            name: str,
+            filename: Optional[str],
+            request_id: Optional[str],
+            upstream_snapshot: Optional[list],
+    ) -> int:
+        """MLOps 호출 전에 시도를 기록하고 id 를 돌려준다.
+
+        이 쓰기가 실패하면 호출자는 MLOps 를 부르지 않고 종료해 외부 부작용 없이 실패한다.
+        """
+        db = SessionLocal()
+        try:
+            attempt = KnowledgeBaseCreateAttempt(
+                member_id=member_id,
+                name=name,
+                filename=filename,
+                request_id=request_id,
+                upstream_snapshot=upstream_snapshot,
+                state=AttemptState.PENDING,
+            )
+            db.add(attempt)
+            db.commit()
+            return attempt.id
+        finally:
+            db.close()
+
+    def finish_attempt(
+            self,
+            attempt_id: int,
+            state: str,
+            resolved_surro_id: Optional[int] = None,
+            failure_kind: Optional[str] = None,
+    ) -> None:
+        """시도를 종료 상태로 갱신한다. 실패해도 예외를 밖으로 내보내지 않는다."""
+        db = SessionLocal()
+        try:
+            attempt = db.get(KnowledgeBaseCreateAttempt, attempt_id)
+            if attempt is None:
+                return
+            attempt.state = state
+            attempt.finished_at = datetime.now(timezone.utc)
+            if resolved_surro_id is not None:
+                attempt.resolved_surro_id = resolved_surro_id
+            if failure_kind is not None:
+                attempt.failure_kind = failure_kind
+            db.commit()
+        except Exception:
+            logger.exception("Failed to update knowledge base create attempt %s", attempt_id)
+            db.rollback()
+        finally:
+            db.close()
+
     def get_live_attempts(
             self,
             db: Session,
@@ -192,6 +251,52 @@ class KnowledgeBaseCRUD:
                 KnowledgeBaseCreateAttempt.started_at >= cutoff,
             )
         ).all()
+
+    def mark_recovered(self, attempt_id: int, surro_id: int) -> None:
+        """자동 복구로 매핑이 붙은 시도를 recovered 로 올린다 (별도 세션)."""
+        db = SessionLocal()
+        try:
+            attempt = db.get(KnowledgeBaseCreateAttempt, attempt_id)
+            if attempt is None:
+                return
+            attempt.state = AttemptState.RECOVERED
+            attempt.resolved_surro_id = surro_id
+            attempt.recovered_at = datetime.now(timezone.utc)
+            db.commit()
+        except Exception:
+            logger.exception("Failed to mark attempt %s recovered", attempt_id)
+            db.rollback()
+        finally:
+            db.close()
+
+    def get_recoverable_attempts(
+            self,
+            db: Session,
+            member_id: str,
+            now: datetime,
+    ) -> List[KnowledgeBaseCreateAttempt]:
+        """이 사용자의 복구 후보 시도 — orphan_suspect · TTL 이내 · 스냅샷 보유.
+
+        스냅샷이 없는 시도는 Step 4 조건 2를 계산할 수 없어 애초에 대상이 아니다(조건 0).
+        """
+        cutoff = _as_aware(now) - timedelta(minutes=settings.KB_ATTEMPT_TTL_MINUTES)
+        return db.query(KnowledgeBaseCreateAttempt).filter(
+            and_(
+                KnowledgeBaseCreateAttempt.member_id == member_id,
+                KnowledgeBaseCreateAttempt.state == AttemptState.ORPHAN_SUSPECT,
+                KnowledgeBaseCreateAttempt.started_at >= cutoff,
+                KnowledgeBaseCreateAttempt.upstream_snapshot.isnot(None),
+            )
+        ).all()
+
+    def get_known_surro_ids(self, db: Session) -> set:
+        """게이트웨이가 **한 번이라도** 알았던 업스트림 KB id — soft-delete 포함.
+
+        active 만 보면 사용자가 지운 KB 가 다시 "미지" 로 올라와 조건 2의 개수를 부풀리고
+        멀쩡한 복구를 거부시킨다.
+        """
+        rows = db.query(KnowledgeBase.surro_knowledge_id).all()
+        return {row[0] for row in rows}
 
     def get_active_surro_ids(self, db: Session) -> set:
         """active 매핑이 있는 업스트림 KB id 집합 — 고아 차집합의 기준."""
@@ -210,16 +315,15 @@ class KnowledgeBaseCRUD:
     ) -> List[KnowledgeBaseCreateAttempt]:
         """이 업스트림 KB 를 후보로 삼을 수 있는 살아 있는 시도들.
 
-        보호 범위는 복구 범위와 일치해야 한다. MAX_INGEST 창 밖에 생긴 KB 는 Step 4 가 결코
-        복구할 수 없으므로 보호하지 않는다 — 막히는데 복구도 안 되는 구간을 만들지 않기 위함.
-
-        name/filename 은 일부러 보지 않는다. 대조에 KB 상세 조회가 필요해 목록 API 에서 N+1 이
-        되기 때문이며, 느슨한 쪽이 안전 방향이다(과보호는 생겨도 과삭제는 생기지 않는다).
+        보호 범위는 복구 범위와 일치해야 한다. 복구 창 밖 KB 를 붙잡으면 복구되지도 않으면서
+        삭제만 막히는 구간이 생긴다.
         """
         created_at = _as_aware(getattr(external_kb, "created_at", None))
         if created_at is None:
             return []
 
+        # name/filename 은 보지 않는다. 대조에 상세 조회가 필요해 목록 API 에서 N+1 이 되고,
+        # 느슨한 쪽이 안전 방향이다(과보호는 생겨도 과삭제는 생기지 않는다).
         max_ingest = timedelta(seconds=settings.KB_MAX_INGEST_SECONDS)
         found = []
         for t in live_attempts:
@@ -240,6 +344,28 @@ class KnowledgeBaseCRUD:
         한쪽만 고쳐지는 사고가 나므로 여기 하나만 둔다.
         """
         return bool(self.find_protecting_attempts(external_kb, live_attempts))
+
+    def find_cleanup_targets(self, db: Session, external_kbs, now: datetime) -> list:
+        """Step 5 정리 대상 — active 매핑 없음 · ORPHAN_TTL 경과 · `is_protected` 거짓.
+
+        소유자를 판정하지 않으므로 오배정 위험이 없다. 보호 판정은 Step 1(관리자 삭제)과
+        동일한 `is_protected` 를 쓴다 — 두 삭제 경로가 같은 규칙을 거쳐야 한다.
+        """
+        cutoff = _as_aware(now) - timedelta(minutes=settings.PROXY_KB_ORPHAN_TTL_MINUTES)
+        active_ids = self.get_active_surro_ids(db)
+        live_attempts = self.get_live_attempts(db, now)
+
+        targets = []
+        for kb in external_kbs:
+            if kb.id in active_ids:
+                continue
+            created_at = _as_aware(getattr(kb, "created_at", None))
+            if created_at is None or created_at > cutoff:
+                continue
+            if self.is_protected(kb, live_attempts):
+                continue
+            targets.append(kb)
+        return targets
 
     def abandon_attempts(
             self,
@@ -264,14 +390,10 @@ class KnowledgeBaseCRUD:
             db: Session,
             attempt: KnowledgeBaseCreateAttempt,
     ) -> Optional[int]:
-        """조건 6 — 사용자가 이미 같은 것을 갖고 있는가.
+        """사용자가 같은 이름·파일로 이미 성공시킨 KB 의 surro_knowledge_id 를 돌려준다.
 
-        같은 member/name/filename 으로 ``attempt`` 이후에 성공했고 그 매핑이 지금도 active 인
-        KB 의 surro_knowledge_id 를 돌려준다. 있으면 복구하지 않는다. 사용자 목록에 구분할 수
-        없는 중복 두 개가 놓이지 않게 하려는 것이고, 원본은 Step 5 가 회수한다.
-
-        ``started_at`` 비교가 없으면 과거의 성공이 현재 복구를 영구히 막고, active 확인이
-        없으면 사용자가 재시도본을 지운 경우까지 중복으로 판정한다.
+        값이 있으면 복구하지 않는다. 사용자 목록에 구분할 수 없는 중복 두 개가 놓이지 않게
+        하려는 것이고, 되살리지 않은 원본은 정리 잡이 회수한다.
         """
         rows = db.query(KnowledgeBaseCreateAttempt).filter(
             and_(
@@ -279,12 +401,14 @@ class KnowledgeBaseCRUD:
                 KnowledgeBaseCreateAttempt.name == attempt.name,
                 KnowledgeBaseCreateAttempt.filename == attempt.filename,
                 KnowledgeBaseCreateAttempt.state == AttemptState.SUCCEEDED,
+                # 이 비교가 없으면 과거의 성공이 현재 복구를 영구히 막는다.
                 KnowledgeBaseCreateAttempt.started_at > attempt.started_at,
                 KnowledgeBaseCreateAttempt.resolved_surro_id.isnot(None),
             )
         ).all()
 
         for row in rows:
+            # 사용자가 재시도본을 지웠으면 중복이 아니다 — 원본을 복구해야 맞다.
             if self.get_active_knowledge_base_by_surro_id(db, row.resolved_surro_id):
                 return row.resolved_surro_id
         return None
