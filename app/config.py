@@ -101,7 +101,7 @@ class Settings:
     # 필요할 수 있음.
     PROXY_KB_INGEST_TIMEOUT: float = float(os.getenv("PROXY_KB_INGEST_TIMEOUT", "600.0"))
 
-    # 고아 KB 대응 (docs/orphan-kb-plan.md)
+    # 고아 KB 대응 — 타임아웃 등으로 매핑이 저장되지 못한 KB 의 복구·회수 파라미터
     # ATTEMPT_TTL: orphan_suspect 시도를 지켜보는 기간 — 사용자가 목록을 다시 열 때까지의 여유.
     # ORPHAN_TTL : 복구되지 않은 고아를 업스트림에서 회수하기까지의 유예.
     # MAX_INGEST : 업스트림이 타임아웃 이후에도 처리를 마칠 수 있는 최대 시간(복구 창 상한).
@@ -110,9 +110,10 @@ class Settings:
     KB_ATTEMPT_TTL_MINUTES: int = int(os.getenv("KB_ATTEMPT_TTL_MINUTES", "1440"))
     PROXY_KB_ORPHAN_TTL_MINUTES: int = int(os.getenv("PROXY_KB_ORPHAN_TTL_MINUTES", "10080"))
     KB_MAX_INGEST_SECONDS: int = int(os.getenv("KB_MAX_INGEST_SECONDS", "3600"))
-    KB_ATTEMPT_TTL_MINUTES: int = int(os.getenv("KB_ATTEMPT_TTL_MINUTES", "1440"))
-    PROXY_KB_ORPHAN_TTL_MINUTES: int = int(os.getenv("PROXY_KB_ORPHAN_TTL_MINUTES", "10080"))
-    KB_MAX_INGEST_SECONDS: int = int(os.getenv("KB_MAX_INGEST_SECONDS", "3600"))
+    # 고아 정리 잡 — 업스트림 삭제라 되돌릴 수 없다. 기본은 dry-run 으로 대상만 로그에 남긴다.
+    SCHEDULER_INCLUDE_KB_ORPHAN_CLEANUP: bool = _get_bool("SCHEDULER_INCLUDE_KB_ORPHAN_CLEANUP", False)
+    KB_ORPHAN_CLEANUP_DRY_RUN: bool = _get_bool("KB_ORPHAN_CLEANUP_DRY_RUN", True)
+    SCHEDULER_KB_ORPHAN_CLEANUP_HOURS: int = int(os.getenv("SCHEDULER_KB_ORPHAN_CLEANUP_HOURS", "6"))
     MAX_DATASET_FILE_SIZE: int = int(os.getenv("MAX_DATASET_FILE_SIZE", "1073741824"))  # 1GB
 
     HUB_CONNECT_ENABLED: bool = _get_bool("HUB_CONNECT_ENABLED", False)

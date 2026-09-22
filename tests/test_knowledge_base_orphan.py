@@ -1,7 +1,7 @@
-"""고아 Knowledge Base 관리자 라우트 (docs/orphan-kb-plan.md Step 1).
+"""고아 Knowledge Base 관리자 라우트.
 
-검증 대상은 계획서 Step 1의 "검증:" 줄이다 — 고아만 노출 / active 매핑 미노출 /
-매핑 있는 id 삭제 거부 / 보호 대상 409·force 시 삭제 + 시도 abandoned /
+고아만 노출 / active 매핑 미노출 / 매핑 있는 id 삭제 거부 /
+보호 대상 409·force 시 삭제 + 시도 abandoned /
 복구 창 밖 KB 는 살아 있는 시도가 있어도 보호되지 않음.
 """
 from contextlib import contextmanager
