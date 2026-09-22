@@ -100,6 +100,20 @@ class Settings:
     # 정확히 얼마인지는 미확인(MLOps 확인 필요), 단발성 관측치 기반이라 재조정
     # 필요할 수 있음.
     PROXY_KB_INGEST_TIMEOUT: float = float(os.getenv("PROXY_KB_INGEST_TIMEOUT", "600.0"))
+
+    # 고아 KB 대응 — 타임아웃 등으로 매핑이 저장되지 못한 KB 의 복구·회수 파라미터
+    # ATTEMPT_TTL: orphan_suspect 시도를 지켜보는 기간 — 사용자가 목록을 다시 열 때까지의 여유.
+    # ORPHAN_TTL : 복구되지 않은 고아를 업스트림에서 회수하기까지의 유예.
+    # MAX_INGEST : 업스트림이 타임아웃 이후에도 처리를 마칠 수 있는 최대 시간(복구 창 상한).
+    #              PROXY_KB_INGEST_TIMEOUT(600s)에 여유를 더한 값. 콜드스타트 실측치가 없어
+    #              잠정값이며, 넓을수록 복구 창에 무관한 KB가 낄 확률이 올라간다.
+    KB_ATTEMPT_TTL_MINUTES: int = int(os.getenv("KB_ATTEMPT_TTL_MINUTES", "1440"))
+    PROXY_KB_ORPHAN_TTL_MINUTES: int = int(os.getenv("PROXY_KB_ORPHAN_TTL_MINUTES", "10080"))
+    KB_MAX_INGEST_SECONDS: int = int(os.getenv("KB_MAX_INGEST_SECONDS", "3600"))
+    # 고아 정리 잡 — 업스트림 삭제라 되돌릴 수 없다. 기본은 dry-run 으로 대상만 로그에 남긴다.
+    SCHEDULER_INCLUDE_KB_ORPHAN_CLEANUP: bool = _get_bool("SCHEDULER_INCLUDE_KB_ORPHAN_CLEANUP", False)
+    KB_ORPHAN_CLEANUP_DRY_RUN: bool = _get_bool("KB_ORPHAN_CLEANUP_DRY_RUN", True)
+    SCHEDULER_KB_ORPHAN_CLEANUP_HOURS: int = int(os.getenv("SCHEDULER_KB_ORPHAN_CLEANUP_HOURS", "6"))
     MAX_DATASET_FILE_SIZE: int = int(os.getenv("MAX_DATASET_FILE_SIZE", "1073741824"))  # 1GB
 
     HUB_CONNECT_ENABLED: bool = _get_bool("HUB_CONNECT_ENABLED", False)
@@ -174,6 +188,20 @@ class Settings:
                 raise ValueError("EXTERNAL_API_USERNAME is required when PROXY_ENABLED is true")
             if not self.EXTERNAL_API_PASSWORD:
                 raise ValueError("EXTERNAL_API_PASSWORD is required when PROXY_ENABLED is true")
+
+        # 시도가 abandoned 로 포기된 뒤에야 정리가 손대야 한다. 뒤집히면 복구 가능한 KB가
+        # 복구 기회를 얻기 전에 삭제된다.
+        if self.KB_ATTEMPT_TTL_MINUTES >= self.PROXY_KB_ORPHAN_TTL_MINUTES:
+            raise ValueError(
+                "KB_ATTEMPT_TTL_MINUTES must be less than PROXY_KB_ORPHAN_TTL_MINUTES"
+            )
+
+        # 복구 창이 게이트웨이 타임아웃보다 짧으면, 정작 타임아웃 난 건이 창 밖에서 커밋되어
+        # 영원히 복구되지 않는다.
+        if self.KB_MAX_INGEST_SECONDS < self.PROXY_KB_INGEST_TIMEOUT:
+            raise ValueError(
+                "KB_MAX_INGEST_SECONDS must be >= PROXY_KB_INGEST_TIMEOUT"
+            )
 
         if self.HUB_CONNECT_ENABLED and not self.HUB_CONNECT_TARGET_BASE_URL:
             raise ValueError("HUB_CONNECT_TARGET_BASE_URL is required when HUB_CONNECT_ENABLED is true")

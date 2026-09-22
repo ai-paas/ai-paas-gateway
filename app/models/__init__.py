@@ -7,7 +7,7 @@ from .dashboard_cache import ServiceCardSnapshot, ServiceMetricSnapshot
 from .dataset import Dataset
 from .experiment import Experiment
 from .hub_connect import HubConnection
-from .knowledge_base import KnowledgeBase
+from .knowledge_base import AttemptState, KnowledgeBase, KnowledgeBaseCreateAttempt
 from .member import Member
 from .model import Model
 from .model_improvement import ModelImprovement

@@ -176,6 +176,37 @@ class KnowledgeBaseListResponse(BaseModel):
     size: int = Field(..., description="페이지당 항목 수")
 
 
+class OrphanKnowledgeBaseItem(BaseModel):
+    """게이트웨이 매핑이 없어 접근 불가능한 업스트림 Knowledge Base."""
+
+    surro_knowledge_id: int = Field(..., description="업스트림 Knowledge Base ID")
+    name: str = Field(..., description="Knowledge Base 이름")
+    collection_name: str = Field(..., description="Milvus Collection 이름")
+    created_at: Optional[datetime] = Field(None, description="업스트림 생성 시간")
+    is_protected: bool = Field(
+        ...,
+        description="복구 대기 — 살아 있는 생성 시도가 이 KB 를 후보로 삼고 있어 곧 주인이 정해질 수 있다",
+    )
+    protected_by: Optional[str] = Field(
+        None, description="이 KB 를 지켜보는 시도의 요청자와 시각 (is_protected 인 경우)"
+    )
+
+
+class OrphanKnowledgeBaseListResponse(BaseModel):
+    """고아 Knowledge Base 목록 응답"""
+
+    data: List[OrphanKnowledgeBaseItem] = Field(..., description="고아 목록")
+    total: int = Field(..., description="전체 항목 수")
+
+
+class OrphanKnowledgeBaseDeleteResponse(BaseModel):
+    """고아 Knowledge Base 삭제 응답"""
+
+    surro_knowledge_id: int = Field(..., description="삭제한 Knowledge Base ID")
+    forced: bool = Field(..., description="보호 대상을 force 로 삭제했는지")
+    abandoned_attempts: int = Field(..., description="함께 abandoned 처리된 시도 레코드 수")
+
+
 class KnowledgeBaseSearchRequest(BaseModel):
     """지식베이스 검색 요청"""
 

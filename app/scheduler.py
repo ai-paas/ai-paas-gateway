@@ -177,6 +177,66 @@ def job_reconcile_workflow_mappings() -> None:
         db.close()
 
 
+def job_cleanup_orphan_knowledge_bases() -> None:
+    """복구되지 않은 고아 KB 를 업스트림에서 삭제해 자원을 회수한다.
+    목록 조회에 얹을 수 없는 유일한 단계다 — 정리 대상은 정의상 아무도 조회하지 않는 KB 다.
+    소유자를 판정하지 않으므로 오배정 위험은 원천적으로 없다.
+    """
+    import asyncio
+    from datetime import datetime, timezone
+
+    from app.cruds.knowledge_base import knowledge_base_crud
+    from app.services.audit_service import Action, ResourceType, emit
+    from app.services.knowledge_base_service import KnowledgeBaseService
+
+    async def _run(action):
+        svc = KnowledgeBaseService()  # 신규 client 인스턴스 (루프 교차 재사용 회피)
+        try:
+            return await action(svc)
+        finally:
+            await svc.close()
+
+    dry_run = settings.KB_ORPHAN_CLEANUP_DRY_RUN
+    db = SessionLocal()
+    try:
+        external = asyncio.run(_run(lambda svc: svc.get_knowledge_bases()))
+        if not external:
+            # 빈 응답을 "전부 고아"로 해석하면 업스트림 장애 한 번에 전체를 지운다.
+            logger.warning("[scheduler] kb orphan cleanup skipped (upstream returned no knowledge bases)")
+            return
+
+        targets = knowledge_base_crud.find_cleanup_targets(db, external, datetime.now(timezone.utc))
+
+        if dry_run:
+            logger.info(
+                "[scheduler] kb orphan cleanup DRY-RUN: %d target(s): %s",
+                len(targets), [(kb.id, kb.name) for kb in targets],
+            )
+            return
+
+        deleted = 0
+        for kb in targets:
+            try:
+                if asyncio.run(_run(lambda svc, kb_id=kb.id: svc.delete_knowledge_base(kb_id))):
+                    emit(
+                        db,
+                        action=Action.DELETE,
+                        resource_type=ResourceType.KNOWLEDGE_BASE,
+                        actor_member_id="system:kb-orphan-cleanup",
+                        resource_id=str(kb.id),
+                        metadata={"orphan": True, "name": kb.name},
+                    )
+                    deleted += 1
+            except Exception:
+                logger.exception("[scheduler] failed to delete orphan knowledge base %s", kb.id)
+
+        logger.info("[scheduler] kb orphan cleanup: %d target(s), %d deleted", len(targets), deleted)
+    except Exception:
+        logger.exception("[scheduler] kb orphan cleanup failed")
+    finally:
+        db.close()
+
+
 # ---------- lifecycle ----------
 
 def start_scheduler() -> Optional[BackgroundScheduler]:
@@ -277,6 +337,21 @@ def start_scheduler() -> Optional[BackgroundScheduler]:
     else:
         logger.info(
             "[scheduler] workflow mapping reconcile job skipped (SCHEDULER_INCLUDE_WORKFLOW_RECONCILE=false)"
+        )
+
+    # 고아 KB 정리 — 업스트림 삭제(되돌릴 수 없음). default off, 켜도 기본은 dry-run.
+    if settings.SCHEDULER_INCLUDE_KB_ORPHAN_CLEANUP:
+        sched.add_job(
+            job_cleanup_orphan_knowledge_bases,
+            trigger=IntervalTrigger(hours=settings.SCHEDULER_KB_ORPHAN_CLEANUP_HOURS),
+            id="cleanup_orphan_knowledge_bases",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+    else:
+        logger.info(
+            "[scheduler] kb orphan cleanup job skipped (SCHEDULER_INCLUDE_KB_ORPHAN_CLEANUP=false)"
         )
 
     sched.start()
