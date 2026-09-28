@@ -423,6 +423,33 @@ async def _snapshot_upstream_ids(user_info: dict) -> Optional[list]:
         return None
 
 
+def _claim_candidate(db: Session, attempt, candidate, detail) -> bool:
+    """락 안에서 판정을 다시 하고 매핑을 만든다 — 성공하면 True.
+
+    앞선 판정은 업스트림 호출을 await 하는 사이에 무효가 될 수 있다. 관리자가 이 KB 를
+    이미 회수했거나 다른 요청이 먼저 복구했을 수 있어 둘 다 여기서 다시 확인한다.
+    이 함수 안에서는 await 하지 않는다 — 락을 쥔 채 업스트림을 기다리면 그 응답을 이어받을
+    이벤트 루프가 같은 락을 기다리는 다른 요청에 막힌다.
+    """
+    if not knowledge_base_crud.try_lock_surro_knowledge_id(db, candidate.id):
+        return False     # 다른 요청이 이 KB 를 다루는 중 — 다음 목록 조회에서 다시 시도한다
+    db.refresh(attempt)
+    if attempt.state != AttemptState.ORPHAN_SUSPECT:
+        return False
+    if knowledge_base_crud.get_active_knowledge_base_by_surro_id(db, candidate.id):
+        return False
+
+    knowledge_base_crud.create_knowledge_base(
+        db=db,
+        name=detail.name,
+        description=detail.description,
+        created_by=attempt.member_id,
+        surro_knowledge_id=candidate.id,
+        collection_name=detail.collection_name,
+    )
+    return True
+
+
 async def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
     """호출자의 고아 KB 복구 시도. 복구한 건수 반환. 아래 판정을 하나라도 통과 못 하면 복구하지 않는다. """
     now = datetime.now(timezone.utc)
@@ -462,24 +489,17 @@ async def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
         if detail is None or not any(f.name == attempt.filename for f in detail.files):
             continue
 
-        # 위 판정은 업스트림 호출을 await 하는 사이에 무효가 될 수 있다 — 관리자가 이 KB 를
-        # 이미 회수했거나 다른 요청이 먼저 복구했을 수 있다. 락 안에서 둘 다 다시 확인한다.
-        if not knowledge_base_crud.try_lock_surro_knowledge_id(db, candidate.id):
-            continue     # 다른 요청이 이 KB 를 다루는 중 — 다음 목록 조회에서 다시 시도한다
-        db.refresh(attempt)
-        if attempt.state != AttemptState.ORPHAN_SUSPECT:
-            continue
-        if knowledge_base_crud.get_active_knowledge_base_by_surro_id(db, candidate.id):
+        # 판정과 매핑 write 를 이 후보의 트랜잭션 안에 가둔다. 예외 경로는 호출자가 롤백한다.
+        if not _claim_candidate(db, attempt, candidate, detail):
+            # 트랜잭션 범위 락은 commit/rollback 으로만 풀린다. 여기서 닫지 않으면 다음
+            # 후보의 상세 조회를 락을 쥔 채 await 하게 되고, 그 사이 같은 KB 를 다루는 다른
+            # 요청이 전부 막힌다. 이 분기는 읽기만 했으므로 commit 으로 닫는다 — rollback 은
+            # 같은 세션의 앞선 준비 상태까지 되돌린다.
+            db.commit()
             continue
 
-        knowledge_base_crud.create_knowledge_base(
-            db=db,
-            name=detail.name,
-            description=detail.description,
-            created_by=attempt.member_id,
-            surro_knowledge_id=candidate.id,
-            collection_name=detail.collection_name,
-        )
+        # 성공 경로는 create_knowledge_base 의 commit 이 이미 락을 풀었다. 매핑이 남아 있어
+        # 다른 요청은 그것을 보고 물러난다.
         knowledge_base_crud.mark_recovered(attempt.id, candidate.id)
         # 같은 요청의 다음 시도가 이 KB 를 다시 후보로 삼아 헛되이 상세를 부르지 않게 한다.
         known_ids.add(candidate.id)

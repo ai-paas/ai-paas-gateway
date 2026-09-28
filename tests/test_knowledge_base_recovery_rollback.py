@@ -93,7 +93,7 @@ def test_list_survives_failure_after_partial_recovery(real_db):
 
     calls = []
 
-    def fail_on_second_detail():
+    def fail_on_second_detail(_kb_id):
         calls.append(1)
         if len(calls) == 2:
             raise RuntimeError("upstream hiccup")
@@ -140,7 +140,7 @@ def test_list_survives_db_error_during_recovery(real_db):
 
     calls = []
 
-    def break_session_on_second_detail():
+    def break_session_on_second_detail(_kb_id):
         calls.append(1)
         if len(calls) == 2:
             # NOT NULL 을 전부 위반해 flush 를 실패시킨다.

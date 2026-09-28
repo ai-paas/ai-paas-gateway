@@ -85,8 +85,8 @@ def _client(db, user, upstream, detail=None, on_detail=None):
 
     async def fake_detail(knowledge_base_id, user_info=None):
         if on_detail is not None:
-            on_detail()
-        return detail
+            on_detail(knowledge_base_id)
+        return detail(knowledge_base_id) if callable(detail) else detail
 
     originals = (knowledge_base_service.get_knowledge_bases,
                  knowledge_base_service.get_knowledge_base)
@@ -468,7 +468,7 @@ def test_no_recovery_when_mapping_appeared_during_upstream_call(db, sample_membe
     """상세 조회를 await 하는 사이 다른 요청이 먼저 복구를 끝낸 경우 — 중복 매핑 금지."""
     attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2])
 
-    def other_request_recovers_first():
+    def other_request_recovers_first(_kb_id):
         _mapping(db, admin_member.member_id, surro_id=407)
 
     with _client(db, sample_member, [_brief(407)], detail=_detail(407),
@@ -489,7 +489,7 @@ def test_no_recovery_when_attempt_was_abandoned_during_upstream_call(db, sample_
     """
     attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2])
 
-    def admin_force_deletes():
+    def admin_force_deletes(_kb_id):
         attempt.state = AttemptState.ABANDONED
         db.flush()
 
@@ -500,6 +500,47 @@ def test_no_recovery_when_attempt_was_abandoned_during_upstream_call(db, sample_
     assert db.query(KnowledgeBase).filter(
         KnowledgeBase.surro_knowledge_id == 407
     ).first() is None
+
+
+def test_lock_is_released_before_the_next_candidate_upstream_call(db, sample_member, monkeypatch):
+    """후보 하나를 락 안에서 건너뛰었으면, 다음 후보의 업스트림 조회 전에 트랜잭션을 닫아야 한다.
+
+    트랜잭션 범위 락은 commit/rollback 으로만 풀린다. 쥔 채로 await 하면, 같은 KB 를 다루는
+    다른 요청이 그 락을 기다리며 이벤트 루프를 멈춰 서로를 기다린다.
+    트랜잭션이 닫혔는지는 세션의 commit 호출로 관찰한다.
+    """
+    events = []
+    a1 = _attempt(db, sample_member.member_id, snapshot=[1, 2], name="첫번째",
+                  request_id="req-1")
+    a2 = _attempt(db, sample_member.member_id, snapshot=[1, 2], name="두번째",
+                  started_at=T0 + timedelta(minutes=1), request_id="req-2")
+
+    def fake_try_lock(_db, surro_id):
+        events.append(f"lock:{surro_id}")
+        return surro_id != 407          # 407 은 경합으로 건너뛰게 만든다
+    monkeypatch.setattr(crud, "try_lock_surro_knowledge_id", fake_try_lock)
+
+    real_commit = db.commit
+
+    def spy_commit():
+        events.append("commit")
+        real_commit()
+    monkeypatch.setattr(db, "commit", spy_commit)
+
+    upstream = [_brief(407, name="첫번째"), _brief(408, name="두번째")]
+
+    with _client(db, sample_member, upstream,
+                 detail=lambda kb_id: _detail(kb_id, name=f"kb{kb_id}"),
+                 on_detail=lambda kb_id: events.append(f"detail:{kb_id}")) as client:
+        assert client.get(KB_LIST).status_code == 200
+
+    assert events[:4] == ["detail:407", "lock:407", "commit", "detail:408"], (
+        f"락을 쥔 채 다음 후보를 await 했다: {events}"
+    )
+    db.refresh(a1)
+    db.refresh(a2)
+    assert a1.state == AttemptState.ORPHAN_SUSPECT, "경합한 후보는 다음 기회를 기다린다"
+    assert a2.state == AttemptState.RECOVERED, "경합이 뒤 후보의 복구까지 막으면 안 된다"
 
 
 def test_recovery_defers_when_lock_is_contended(db, sample_member, monkeypatch):
