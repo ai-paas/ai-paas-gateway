@@ -378,6 +378,28 @@ def test_delete_returns_404_when_missing_upstream(db, admin_member):
         assert client.delete(f"{ORPHANS}/407").status_code == 404
 
 
+def test_delete_returns_409_when_lock_is_contended(db, admin_member, monkeypatch):
+    """관리자 삭제는 락 경합을 조용히 넘기지 않는다.
+
+    복구처럼 건너뛰면 관리자는 200 과 함께 "지웠다" 는 응답을 받는데 KB 는 그대로 남는다.
+    실패를 그대로 돌려주어 다시 시도하게 한다.
+    """
+    from app.cruds.knowledge_base import knowledge_base_crud
+
+    monkeypatch.setattr(knowledge_base_crud, "try_lock_surro_knowledge_id", lambda *a, **k: False)
+    delete_calls = []
+
+    with _client(db, admin_member, upstream=[_external(407)],
+                 delete_calls=delete_calls) as client:
+        res = client.delete(f"{ORPHANS}/407")
+
+    assert res.status_code == 409
+    assert delete_calls == [], "업스트림 DELETE 가 불리면 안 된다"
+    assert db.query(AuditLog).filter(
+        AuditLog.resource_id == "407"
+    ).count() == 0, "삭제하지 않았으므로 감사 기록도 없어야 한다"
+
+
 def test_delete_requires_admin(db, sample_member):
     with _client(db, sample_member, upstream=[_external(407)], admin=False) as client:
         assert client.delete(f"{ORPHANS}/407").status_code == 403

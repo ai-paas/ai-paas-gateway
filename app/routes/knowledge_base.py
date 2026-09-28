@@ -464,7 +464,8 @@ async def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
 
         # 위 판정은 업스트림 호출을 await 하는 사이에 무효가 될 수 있다 — 관리자가 이 KB 를
         # 이미 회수했거나 다른 요청이 먼저 복구했을 수 있다. 락 안에서 둘 다 다시 확인한다.
-        knowledge_base_crud.lock_surro_knowledge_id(db, candidate.id)
+        if not knowledge_base_crud.try_lock_surro_knowledge_id(db, candidate.id):
+            continue     # 다른 요청이 이 KB 를 다루는 중 — 다음 목록 조회에서 다시 시도한다
         db.refresh(attempt)
         if attempt.state != AttemptState.ORPHAN_SUSPECT:
             continue
@@ -882,7 +883,12 @@ async def delete_orphan_knowledge_base(
 
     # 업스트림 목록을 await 하는 사이에 자동 복구가 끝나 주인이 생겼을 수 있다. 락을 잡고
     # 매핑과 보호 여부를 모두 다시 확인한다 — 락 밖의 재조회는 그 직후의 경합을 막지 못한다.
-    knowledge_base_crud.lock_surro_knowledge_id(db, surro_knowledge_id)
+    if not knowledge_base_crud.try_lock_surro_knowledge_id(db, surro_knowledge_id):
+        # 복구처럼 조용히 건너뛰면 관리자는 성공 응답을 받고 KB 는 남는다. 실패를 돌려준다.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Another operation is holding this knowledge base; retry shortly",
+        )
     if knowledge_base_crud.get_active_knowledge_base_by_surro_id(db, surro_knowledge_id):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

@@ -502,33 +502,81 @@ def test_no_recovery_when_attempt_was_abandoned_during_upstream_call(db, sample_
     ).first() is None
 
 
-def test_lock_is_noop_outside_postgresql(db):
-    """SQLite 등 advisory lock 이 없는 백엔드에서는 아무 일도 하지 않아야 한다."""
-    crud.lock_surro_knowledge_id(db, 407)
+def test_recovery_defers_when_lock_is_contended(db, sample_member, monkeypatch):
+    """락 경합 시 복구를 보류한다 — 기다리지 않는다.
+
+    복구는 지금 당장 해야 하는 일이 아니다. 기다리면 그동안 이벤트 루프가 멈춰, 락을 쥔
+    요청의 업스트림 응답을 이어받을 주체가 사라진다.
+    """
+    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2])
+    monkeypatch.setattr(crud, "try_lock_surro_knowledge_id", lambda *a, **k: False)
+
+    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
+        assert client.get(KB_LIST).json()["total"] == 0
+
+    db.refresh(attempt)
+    assert attempt.state == AttemptState.ORPHAN_SUSPECT, "보류일 뿐 포기가 아니다"
+    assert db.query(KnowledgeBase).filter(
+        KnowledgeBase.surro_knowledge_id == 407
+    ).first() is None
 
 
-def test_lock_emits_transaction_scoped_advisory_lock_on_postgresql():
-    """PostgreSQL 에서 거는 SQL 의 형태를 고정한다.
+def test_recovery_completes_on_the_next_call_after_contention(db, sample_member, monkeypatch):
+    """보류된 복구는 다음 목록 조회에서 완료된다 — 경합이 영구 지연이 되면 안 된다."""
+    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2])
 
-    테스트는 SQLite 로 돌아 실제 락 SQL 이 한 번도 실행되지 않는다. 직렬화 자체는 이
-    테스트로 증명되지 않으며(PostgreSQL 실행이 필요하다), 여기서는 파라미터 이름이나
-    함수명이 바뀌어 조용히 no-op 이 되는 회귀만 막는다.
+    with monkeypatch.context() as m:
+        m.setattr(crud, "try_lock_surro_knowledge_id", lambda *a, **k: False)
+        with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
+            assert client.get(KB_LIST).json()["total"] == 0
+
+    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
+        assert client.get(KB_LIST).json()["total"] == 1
+
+    db.refresh(attempt)
+    assert attempt.state == AttemptState.RECOVERED
+
+
+def test_try_lock_is_noop_outside_postgresql(db):
+    """SQLite 등 advisory lock 이 없는 백엔드에서는 항상 획득한 것으로 본다 — 단일 커넥션이다."""
+    assert crud.try_lock_surro_knowledge_id(db, 407) is True
+
+
+def test_try_lock_does_not_wait_and_reports_contention():
+    """PostgreSQL 에서 거는 SQL 의 형태와 반환 규약을 고정한다.
+
+    테스트는 SQLite 로 돌아 실제 락 SQL 이 한 번도 실행되지 않는다. 직렬화 자체는 이 테스트로
+    증명되지 않으며(PostgreSQL 실행이 필요하다), 여기서는 (1) 대기하는 락으로 되돌아가는 회귀와
+    (2) 경합 결과를 삼켜 항상 획득한 것처럼 구는 회귀를 막는다. 대기하면 안 되는 이유는 이
+    락을 부르는 라우트가 async 인데 세션은 동기라, 대기하는 동안 이벤트 루프가 통째로 멈추기
+    때문이다.
     """
     captured = {}
+
+    class _Result:
+        def __init__(self, value):
+            self._value = value
+
+        def scalar(self):
+            return self._value
 
     class _Session:
         class bind:
             class dialect:
                 name = "postgresql"
 
+        def __init__(self, value):
+            self._value = value
+
         def execute(self, statement, params=None):
             captured["sql"] = str(statement)
             captured["params"] = params
+            return _Result(self._value)
 
-    crud.lock_surro_knowledge_id(_Session(), 407)
-
-    assert "pg_advisory_xact_lock" in captured["sql"], "세션 범위가 아니라 트랜잭션 범위여야 한다"
+    assert crud.try_lock_surro_knowledge_id(_Session(True), 407) is True
+    assert "pg_try_advisory_xact_lock" in captured["sql"], "대기형이면 이벤트 루프가 멈춘다"
     assert captured["params"]["id"] == 407
+    assert crud.try_lock_surro_knowledge_id(_Session(False), 407) is False, "경합을 삼키면 안 된다"
 
 
 def test_recoverable_attempts_are_id_ordered(db, sample_member):

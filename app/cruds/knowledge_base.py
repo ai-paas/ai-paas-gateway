@@ -12,7 +12,7 @@ from app.database import SessionLocal
 from app.models.knowledge_base import AttemptState, KnowledgeBase, KnowledgeBaseCreateAttempt
 
 
-# pg_advisory_xact_lock 의 첫 인자. 다른 기능이 같은 정수로 락을 잡아 무관한 두 작업이
+# pg_try_advisory_xact_lock 의 첫 인자. 다른 기능이 같은 정수로 락을 잡아 무관한 두 작업이
 # 서로를 기다리는 일이 없도록, KB 전용 네임스페이스를 고정한다.
 _KB_ADVISORY_LOCK_NAMESPACE = 0x4B42  # 'KB'
 
@@ -288,12 +288,17 @@ class KnowledgeBaseCRUD:
             KnowledgeBaseCreateAttempt.member_id != member_id
         ).all()
 
-    def lock_surro_knowledge_id(self, db: Session, surro_knowledge_id: int) -> None:
-        """이 업스트림 KB 에 대한 트랜잭션 범위 락 — commit/rollback 시 자동 해제된다.
+    def try_lock_surro_knowledge_id(self, db: Session, surro_knowledge_id: int) -> bool:
+        """이 업스트림 KB 에 대한 트랜잭션 범위 락을 대기 없이 시도한다 — 얻으면 True.
 
         자동 복구와 관리자 삭제는 둘 다 업스트림 호출을 await 하는 동안 판정 근거가 무효가
         될 수 있다. 판정과 쓰기를 이 락 안에서 다시 묶어야 하며, 워커가 여러 개면 프로세스
-        내 잠금은 소용이 없으므로 DB 락을 쓴다.
+        내 잠금은 소용이 없으므로 DB 락을 쓴다. 락은 commit/rollback 으로만 풀린다.
+
+        기다리지 않는 이유: 이 락을 부르는 라우트는 async 인데 세션은 동기 드라이버라, 락
+        대기가 이벤트 루프 스레드를 통째로 멈춘다. 락을 쥔 요청이 업스트림 응답을 기다리는
+        중이면 그 응답을 이어받을 루프가 없어 서로를 무기한 기다리게 된다. 복구도 삭제도
+        지금 당장 해야 하는 일이 아니므로, 경합하면 물러나고 호출자가 각자 처리한다.
 
         락 안의 재확인이 다른 세션의 최신 커밋을 보려면 READ COMMITTED 여야 한다(현재
         운영 DB 의 기본값). REPEATABLE READ 이상으로 올리면 재확인이 트랜잭션 시작 시점의
@@ -301,10 +306,12 @@ class KnowledgeBaseCRUD:
         """
         # SQLite 테스트 환경에는 advisory lock 이 없다. 단일 커넥션이라 직렬화도 불필요하다.
         if db.bind is None or db.bind.dialect.name != "postgresql":
-            return
-        db.execute(
-            text("SELECT pg_advisory_xact_lock(:ns, :id)"),
-            {"ns": _KB_ADVISORY_LOCK_NAMESPACE, "id": surro_knowledge_id},
+            return True
+        return bool(
+            db.execute(
+                text("SELECT pg_try_advisory_xact_lock(:ns, :id)"),
+                {"ns": _KB_ADVISORY_LOCK_NAMESPACE, "id": surro_knowledge_id},
+            ).scalar()
         )
 
     def mark_recovered(self, attempt_id: int, surro_id: int) -> None:
