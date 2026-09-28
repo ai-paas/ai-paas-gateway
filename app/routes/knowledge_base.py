@@ -450,7 +450,8 @@ def _claim_candidate(db: Session, attempt, candidate, detail) -> bool:
 
 
 async def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
-    """호출자의 고아 KB 복구 시도. 복구한 건수 반환. 아래 판정을 하나라도 통과 못 하면 복구하지 않는다. """
+    """호출자의 고아 KB 복구 시도. 복구한 건수 반환. 
+    소유권을 확실히 판정할 수 없는 경우에는 복구하지 않는다. """
     now = datetime.now(timezone.utc)
     attempts = knowledge_base_crud.get_recoverable_attempts(db, current_user.member_id, now)
     if not attempts:
@@ -461,12 +462,6 @@ async def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
     recovered = 0
 
     for attempt in attempts:
-        # 후보 추리기 — 이 시도 이후 업스트림에 나타난, 게이트웨이가 모르는 같은 이름의 KB.
-        # find_protecting_attempts 가 "스냅샷 밖 + 복구 창 안" 을 함께 판정한다.
-        # known_ids 는 soft-delete 된 매핑까지 포함한다 — 한 번이라도 알았던 KB 는 미지가 아니다.
-        # 생성 시각을 모르는 KB 는 내 시도 이후에 생긴 것인지 판정할 수 없어 후보로 삼지
-        # 않는다. 보호 판정은 같은 결측을 반대 방향(보호)으로 읽으므로, 그 함수만 믿으면
-        # 시각 없는 KB 가 여기서도 후보가 되어 원래부터 있던 KB 를 가져가게 된다.
         candidates = [
             kb for kb in external_kbs
             if kb.id not in known_ids
@@ -474,40 +469,34 @@ async def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
             and getattr(kb, "created_at", None) is not None
             and knowledge_base_crud.find_protecting_attempts(kb, [attempt])
         ]
+        # 후보가 없으면 아직 생성되지 않은 것이고, 여러 개면 소유권을 특정할 수 없다.
         if len(candidates) != 1:
-            continue     # 0개면 아직 안 나타났고, 2개 이상이면 어느 쪽인지 구별할 수 없다
+            continue     
         candidate = candidates[0]
 
-        # 복수 시도 판정 — 다른 사용자의 시도도 이 KB 를 후보로 삼고 있으면 오배정 위험이 있다.
+        # 다른 사용자의 시도가 같은 KB를 가리키면 오배정 위험이 있음으로 복구하지 않는다. 
         rivals = [t for t in conflicting if t.name == attempt.name]
         if knowledge_base_crud.find_protecting_attempts(candidate, rivals):
-            continue     # 다른 사용자의 시도도 이 KB 를 노린다 — 오배정 위험
+            continue  
         if knowledge_base_crud.find_duplicate_success(db, attempt) is not None:
-            continue     # 같은 이름·파일로 이미 성공한 재시도가 있다 — 중복을 만들지 않는다
+            continue   
 
-        # 업로드 파일명 대조. 후보가 하나로 좁혀진 뒤에만 상세를 부른다(N+1 회피).
+        # 후보가 하나로 좁혀진 뒤에 상세 조회를 하여 업로드 파일명을 확인한다(N+1 회피).
         detail = await knowledge_base_service.get_knowledge_base(candidate.id, _user_info(current_user))
         if detail is None or not any(f.name == attempt.filename for f in detail.files):
             continue
 
-        # 판정과 매핑 write 를 이 후보의 트랜잭션 안에 가둔다. 예외 경로는 호출자가 롤백한다.
         if not _claim_candidate(db, attempt, candidate, detail):
-            # 트랜잭션 범위 락은 commit/rollback 으로만 풀린다. 여기서 닫지 않으면 다음
-            # 후보의 상세 조회를 락을 쥔 채 await 하게 되고, 그 사이 같은 KB 를 다루는 다른
-            # 요청이 전부 막힌다. 이 분기는 읽기만 했으므로 commit 으로 닫는다 — rollback 은
-            # 같은 세션의 앞선 준비 상태까지 되돌린다.
+            # claim 실패 후 트랜잭션을 종료해 락을 다음 후보까지 유지하지 않는다.
             db.commit()
             continue
 
-        # 성공 경로는 create_knowledge_base 의 commit 이 이미 락을 풀었다. 매핑이 남아 있어
-        # 다른 요청은 그것을 보고 물러난다.
         knowledge_base_crud.mark_recovered(attempt.id, candidate.id)
-        # 같은 요청의 다음 시도가 이 KB 를 다시 후보로 삼아 헛되이 상세를 부르지 않게 한다.
+        
+        # 같은 요청의 다음 시도에서 이미 복구된 KB를 다시 조회하지 않는다.
         known_ids.add(candidate.id)
         recovered += 1
 
-        # 복구는 소유권을 부여하는 유일한 자동 경로다. created_by 가 게이트웨이의 권한
-        # 근거인 이상, 누가 왜 그 주인이 됐는지 남기지 않으면 나중에 되짚을 수 없다.
         emit(
             db,
             action=Action.CREATE,
@@ -827,7 +816,7 @@ async def get_knowledge_bases(
     return KnowledgeBaseListResponse(data=response_data, total=total, page=page, size=size)
 
 
-# 아래 두 라우트는 "/{surro_knowledge_id}" 보다 **먼저** 등록되어야 한다.
+# 아래 두 라우트는 "/{surro_knowledge_id}" 보다 먼저 등록되어야 한다.
 # FastAPI 는 등록 순서대로 매칭하므로, 뒤에 두면 "admin" 이 경로 파라미터로 파싱되려다 422 가 난다.
 @router.get(
     "/admin/orphans",
@@ -902,8 +891,6 @@ async def delete_orphan_knowledge_base(
     if target is None:
         raise HTTPException(status_code=404, detail="Knowledge base not found in external service")
 
-    # 업스트림 목록을 await 하는 사이에 자동 복구가 끝나 주인이 생겼을 수 있다. 락을 잡고
-    # 매핑과 보호 여부를 모두 다시 확인한다 — 락 밖의 재조회는 그 직후의 경합을 막지 못한다.
     if not knowledge_base_crud.try_lock_surro_knowledge_id(db, surro_knowledge_id):
         # 복구처럼 조용히 건너뛰면 관리자는 성공 응답을 받고 KB 는 남는다. 실패를 돌려준다.
         raise HTTPException(
@@ -926,14 +913,6 @@ async def delete_orphan_knowledge_base(
                 "Use ?force=true to delete anyway."
             ),
         )
-
-    # 업스트림 DELETE 는 락 밖에서 일어난다 — 트랜잭션 범위 락은 commit 으로 풀리고, 업스트림
-    # HTTP 호출을 트랜잭션 안에 둘 수는 없다. 그래서 안전을 보장하는 것은 락이 아니라 이 선점과,
-    # 복구 후보가 업스트림 실시간 목록에서만 나온다는 성질이다. 지워진 KB 는 다음 목록에
-    # 나타나지 않으므로 뒤늦은 복구가 사라진 KB 에 매핑을 붙일 수 없다.
-    # (시도 시작 시각과 업스트림 생성 시각은 서로 다른 기계의 시계라, 시간 창만으로는
-    #  뒤늦은 시도가 끼어들지 않는다고 말할 수 없다. 근거는 위의 두 가지다.)
-    # 업스트림 삭제가 실패하면 시도는 abandoned 로 남아 복구되지 않으므로 아래에서 로그를 남긴다.
     abandoned = knowledge_base_crud.abandon_attempts(db, protectors)
     db.commit()
 

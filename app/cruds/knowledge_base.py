@@ -231,13 +231,7 @@ class KnowledgeBaseCRUD:
             resolved_surro_id: Optional[int] = None,
             failure_kind: Optional[str] = None,
     ) -> None:
-        """시도를 종료 상태로 갱신한다. 실패해도 예외를 밖으로 내보내지 않는다.
-
-        이미 결말이 난 시도는 건드리지 않는다. 관리자 force 삭제가 시도를 끊은 직후 그
-        생성 요청이 타임아웃으로 돌아오면, 여기서 상태를 되돌려 시도가 다시 살아난다.
-        붙을 대상은 이미 업스트림에서 지워졌는데 시도 TTL 동안 남아, 같은 시간 창에 생긴
-        무관한 KB 를 계속 보호하고 다른 사용자의 복구와 정리 잡까지 막는다.
-        """
+        """시도를 종료 상태로 갱신한다. 실패해도 예외를 밖으로 내보내지 않는다."""
         db = SessionLocal()
         try:
             attempt = db.get(KnowledgeBaseCreateAttempt, attempt_id)
@@ -279,16 +273,10 @@ class KnowledgeBaseCRUD:
             db: Session,
             now: datetime,
     ) -> List[KnowledgeBaseCreateAttempt]:
-        """삭제 보호 집합 — 아직 주인이 정해질 수 있는 모든 시도.
-
-        pending 을 반드시 포함한다. 생성이 진행 중인 KB 는 업스트림에 이미 보이는데 매핑은
-        아직 없어, 빼면 관리자 삭제와 정리 잡이 남이 만드는 중인 KB 를 고아로 보고 지운다.
-
-        이 집합은 자동 복구 대상의 상위집합이다. 복구는 스냅샷이 있는 시도만 대상으로 삼지만
-        보호는 스냅샷 없는 시도까지 포함하므로, 보호만 되고 복구되지 않는 구간이 생긴다.
-        그 구간은 시도 TTL 로 유계이고 관리자에게는 force 가 있는 반면, 반대로 범위를 맞추려고
-        보호를 줄이면 되돌릴 수 없는 과삭제가 된다.
-        """
+        """삭제 보호 집합 — 아직 주인이 정해질 수 있는 모든 시도. 
+        자동 복구와 관리자 삭제가 이 집합을 공유한다. TTL 이 지나면 자동으로 제외된다.
+        이 집합은 자동 복구 대상의 상위집합이다 — 복구는 스냅샷 있는 시도만 대상으로 하고,
+        보호는 스냅샷 없는 시도까지 포함한다. 범위를 맞추려고 보호를 줄이면 과삭제가 된다."""
         return self._live_attempts_query(db, now).all()
 
     def get_conflicting_attempts(
@@ -298,30 +286,19 @@ class KnowledgeBaseCRUD:
             member_id: str,
     ) -> List[KnowledgeBaseCreateAttempt]:
         """복구 충돌 집합 — **다른 사용자**의 살아 있는 시도.
-
-        같은 사용자의 시도는 넣지 않는다. 어느 시도의 결과로 복구하든 소유자가 같아 오배정이
-        생길 수 없는 반면, 넣으면 타임아웃 후 재시도한 사용자가 자기 재시도 때문에 영영
-        복구되지 않는다 — 타임아웃을 겪은 사용자가 가장 흔히 밟는 경로다.
-        """
+        자신의 시도가 있다면 후에 영영 재생성을 못 하게 되므로, 그 시도는 충돌로 보지 않는다.""" 
         return self._live_attempts_query(db, now).filter(
             KnowledgeBaseCreateAttempt.member_id != member_id
         ).all()
 
     def try_lock_surro_knowledge_id(self, db: Session, surro_knowledge_id: int) -> bool:
-        """이 업스트림 KB 에 대한 트랜잭션 범위 락을 대기 없이 시도한다 — 얻으면 True.
+        """업스트림 KB에 대한 트랜잭션 범위 advisory lock을 대기 없이 시도한다.
 
-        자동 복구와 관리자 삭제는 둘 다 업스트림 호출을 await 하는 동안 판정 근거가 무효가
-        될 수 있다. 판정과 쓰기를 이 락 안에서 다시 묶어야 하며, 워커가 여러 개면 프로세스
-        내 잠금은 소용이 없으므로 DB 락을 쓴다. 락은 commit/rollback 으로만 풀린다.
-
-        기다리지 않는 이유: 이 락을 부르는 라우트는 async 인데 세션은 동기 드라이버라, 락
-        대기가 이벤트 루프 스레드를 통째로 멈춘다. 락을 쥔 요청이 업스트림 응답을 기다리는
-        중이면 그 응답을 이어받을 루프가 없어 서로를 무기한 기다리게 된다. 복구도 삭제도
-        지금 당장 해야 하는 일이 아니므로, 경합하면 물러나고 호출자가 각자 처리한다.
-
-        락 안의 재확인이 다른 세션의 최신 커밋을 보려면 READ COMMITTED 여야 한다(현재
-        운영 DB 의 기본값). REPEATABLE READ 이상으로 올리면 재확인이 트랜잭션 시작 시점의
-        스냅샷을 읽어, 예외 없이 조용히 무력화된다.
+        자동 복구와 관리자 삭제의 판정·쓰기를 동기화하기 위한 락이다.
+        락 경합 시 이벤트 루프를 blocking하지 않고 즉시 False를 반환한다.
+        락은 현재 트랜잭션의 commit/rollback 시 해제된다.
+        락 안의 재확인이 다른 세션의 커밋을 보려면 격리 수준이 READ COMMITTED 여야 한다(운영
+        기본값). 그보다 높이면 재확인이 트랜잭션 시작 시점 스냅샷을 읽어 조용히 무력화된다.
         """
         # SQLite 테스트 환경에는 advisory lock 이 없다. 단일 커넥션이라 직렬화도 불필요하다.
         if db.bind is None or db.bind.dialect.name != "postgresql":
@@ -368,13 +345,10 @@ class KnowledgeBaseCRUD:
                 KnowledgeBaseCreateAttempt.started_at >= cutoff,
                 KnowledgeBaseCreateAttempt.upstream_snapshot.isnot(None),
             )
-            # 호출자가 이 순서대로 후보 KB 락을 잡는다. 정렬이 없으면 동시 요청 둘이 락을
-            # 엇갈린 순서로 잡아 데드락이 날 수 있다.
+            # 정렬로 후보 KB 락을 잡아 락이 엇갈리는 상황(데드락)을 방지한다. 
 
         ).order_by(KnowledgeBaseCreateAttempt.id).all()
-        # 위 IS NOT NULL 만으로는 스냅샷 없는 시도가 걸러지지 않는다. JSON 컬럼은 파이썬 None
-        # 을 SQL NULL 이 아니라 JSON null 로 저장하기 때문이다. 여기서 한 번 더 거르지 않으면
-        # 스냅샷 없는 시도가 후보로 새어 나가 원래부터 있던 KB 를 자기 것으로 가져간다.
+        # JSON 컬럼은 파이썬 None을 JSON의 null로 저장하기에 한번 더 필터링한다. 
         return [r for r in rows if r.upstream_snapshot is not None]
 
     def get_known_surro_ids(self, db: Session) -> set:
@@ -408,26 +382,14 @@ class KnowledgeBaseCRUD:
         """
         created_at = _as_aware(getattr(external_kb, "created_at", None))
         if created_at is None:
-            # 생성 시각이 없으면 시간 창 판정 자체가 불가능하다 — 스냅샷 없음과 같은 종류의
-            # 모름이므로 같은 방향으로 처리한다. 정리 잡은 이미 시각 없는 KB 를 대상에서
-            # 빼는데(find_cleanup_targets), 여기서만 반대로 읽으면 자동으로는 못 지우는 KB 를
-            # 관리자는 force 없이 언제나 지울 수 있게 된다.
-            # 살아 있는 시도가 하나도 없으면 보호할 근거도 없으므로 그대로 빈 목록이 된다.
             return list(live_attempts)
-
-        # name/filename 은 보지 않는다. 대조에 상세 조회가 필요해 목록 API 에서 N+1 이 되고,
-        # 느슨한 쪽이 안전 방향이다(과보호는 생겨도 과삭제는 생기지 않는다).
+        
         max_ingest = timedelta(seconds=settings.KB_MAX_INGEST_SECONDS)
         found = []
         for t in live_attempts:
-            # 스냅샷이 있으면 그 시도 이전부터 있던 KB 는 후보가 아니다. 스냅샷이 없는 것은
-            # 업스트림 목록 조회가 실패했다는 뜻이고, 고아가 생기는 상황이 정확히 그때다.
-            # 그 판정을 할 수 없다는 이유로 배제하면 생성 중인 KB 가 삭제되고, 남이 만드는
-            # KB 가 복구로 넘어간다.
             if t.upstream_snapshot is not None and external_kb.id in t.upstream_snapshot:
                 continue
-            # 시간 창은 스냅샷 없이도 판정할 수 있다. 스냅샷 없는 시도의 보호 범위는 이 창으로
-            # 묶여, 그 시도가 진행 중일 때 생긴 KB 에만 걸린다.
+            # 스냅샷이 없는 시도의 보호 범위를 시간으로 설정한다. 
             started_at = _as_aware(t.started_at)
             if not (started_at <= created_at <= started_at + max_ingest):
                 continue                         # 복구 창 밖 → 보호해도 복구되지 않는다
@@ -461,10 +423,7 @@ class KnowledgeBaseCRUD:
             db: Session,
             attempts: List[KnowledgeBaseCreateAttempt],
     ) -> int:
-        """보호 대상이 강제 삭제됐을 때, 그것을 지켜보던 시도를 즉시 포기 처리한다.
-
-        그대로 두면 붙을 대상이 없는 시도가 ATTEMPT_TTL 동안 남아 무관한 고아를 계속 보호한다.
-        """
+        """보호 대상이 강제 삭제됐을 때, 그것을 지켜보던 시도를 즉시 포기 처리한다."""
         if not attempts:
             return 0
         now = datetime.now(timezone.utc)
@@ -479,11 +438,7 @@ class KnowledgeBaseCRUD:
             db: Session,
             attempt: KnowledgeBaseCreateAttempt,
     ) -> Optional[int]:
-        """사용자가 같은 이름·파일로 이미 성공시킨 KB 의 surro_knowledge_id 를 돌려준다.
-
-        값이 있으면 복구하지 않는다. 사용자 목록에 구분할 수 없는 중복 두 개가 놓이지 않게
-        하려는 것이고, 되살리지 않은 원본은 정리 잡이 회수한다.
-        """
+        """사용자가 같은 이름·파일로 이미 성공시킨 KB 의 surro_knowledge_id 를 돌려준다."""
         rows = db.query(KnowledgeBaseCreateAttempt).filter(
             and_(
                 KnowledgeBaseCreateAttempt.member_id == attempt.member_id,
