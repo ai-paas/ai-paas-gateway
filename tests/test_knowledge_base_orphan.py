@@ -39,11 +39,13 @@ def _external(kb_id, name="kb", created_at=None):
 
 
 @contextmanager
-def _client(db, user, upstream, deleted=True, admin=True, on_list=None, delete_calls=None):
+def _client(db, user, upstream, deleted=True, admin=True, on_list=None, delete_calls=None,
+            on_delete=None):
     """업스트림 응답을 고정한 TestClient.
 
-    `on_list` 는 업스트림 목록을 await 하는 동안 다른 요청이 끼어드는 상황을 재현한다 —
-    라우트가 그 await 전후로 판정을 다시 하는지 검증하는 용도다.
+    `on_list` 는 업스트림 목록을 await 하는 동안, `on_delete` 는 업스트림 DELETE 를 await 하는
+    동안 다른 작업이 끼어드는 상황을 재현한다 — 라우트가 그 await 전에 판정을 다시 했는지,
+    선점을 끝냈는지 검증하는 용도다.
     `delete_calls` 를 주면 업스트림 DELETE 가 실제로 불렸는지 확인할 수 있다.
     """
     async def fake_list(*args, **kwargs):
@@ -54,6 +56,8 @@ def _client(db, user, upstream, deleted=True, admin=True, on_list=None, delete_c
     async def fake_delete(knowledge_base_id, user_info=None):
         if delete_calls is not None:
             delete_calls.append(knowledge_base_id)
+        if on_delete is not None:
+            on_delete(knowledge_base_id)
         return deleted
 
     original_list = knowledge_base_service.get_knowledge_bases
@@ -331,6 +335,57 @@ def test_delete_abandons_protectors_before_calling_upstream(db, admin_member):
 
     assert res.status_code == 200
     assert states_at_delete == [AttemptState.ABANDONED]
+
+
+def test_every_live_attempt_is_cut_before_upstream_delete_starts(db, admin_member, sample_member):
+    """업스트림 DELETE 가 시작되는 시점에는 이 KB 를 가져갈 수 있는 시도가 전부 끊겨 있어야 한다.
+
+    DELETE 는 락 밖에서 일어난다 — 트랜잭션 범위 락은 commit 으로 풀리고, 업스트림 HTTP 호출을
+    트랜잭션 안에 둘 수는 없다. 그래서 안전성은 락이 아니라 선점이 보장한다: 락 안에서 후보를
+    모두 끊어 커밋한 뒤에 DELETE 를 부른다. 스냅샷이 없어 판정할 수 없는 시도도 후보이므로
+    함께 끊겨야 하며, 하나라도 살아남으면 사라진 KB 에 매핑이 붙는다.
+    """
+    with_snapshot = _attempt(db, sample_member.member_id, snapshot=[1, 2, 3])
+    without_snapshot = _attempt(db, sample_member.member_id, snapshot=None,
+                                state=AttemptState.PENDING)
+    states_at_delete = []
+
+    def inspect(_kb_id):
+        db.refresh(with_snapshot)
+        db.refresh(without_snapshot)
+        states_at_delete.append((with_snapshot.state, without_snapshot.state))
+
+    with _client(db, admin_member, upstream=[_external(407)], on_delete=inspect) as client:
+        res = client.delete(f"{ORPHANS}/407?force=true")
+
+    assert res.status_code == 200
+    assert states_at_delete == [(AttemptState.ABANDONED, AttemptState.ABANDONED)],         "DELETE 시점에 살아 있는 시도가 남으면 선점이 불완전하다"
+
+
+def test_attempt_started_during_upstream_delete_cannot_claim_the_kb(db, admin_member, sample_member):
+    """DELETE 를 await 하는 사이에 시작된 생성 시도는 이 KB 를 가져갈 수 없다.
+
+    선점이 성립하려면 끊어 놓은 뒤로 후보가 다시 생기지 않아야 한다. 새 시도는 시작 시각이
+    KB 생성 시각보다 뒤라 시간 창에서 탈락한다 — 스냅샷이 비어 있어도 마찬가지다.
+    """
+    from app.cruds.knowledge_base import knowledge_base_crud
+
+    claimants_after_new_attempt = []
+
+    def start_new_attempt(_kb_id):
+        _attempt(db, sample_member.member_id, snapshot=None,
+                 started_at=datetime.now(timezone.utc), state=AttemptState.PENDING)
+        live = knowledge_base_crud.get_live_attempts(db, datetime.now(timezone.utc))
+        claimants_after_new_attempt.append(
+            knowledge_base_crud.find_protecting_attempts(_external(407), live)
+        )
+
+    with _client(db, admin_member, upstream=[_external(407)],
+                 on_delete=start_new_attempt) as client:
+        res = client.delete(f"{ORPHANS}/407")
+
+    assert res.status_code == 200
+    assert claimants_after_new_attempt == [[]], "뒤늦게 시작한 시도가 후보가 되면 선점이 무의미하다"
 
 
 def test_delete_unprotected_orphan_succeeds(db, admin_member):

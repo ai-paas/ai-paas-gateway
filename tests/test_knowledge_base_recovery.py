@@ -661,6 +661,28 @@ def test_cleanup_targets_exclude_active_and_protected(db, sample_member):
     assert [kb.id for kb in targets] == [408]
 
 
+def test_cleanup_target_cannot_be_claimed_by_any_live_attempt(db, sample_member):
+    """정리 잡은 락도 선점도 없이 업스트림을 지운다 — 대상이 복구 창과 겹치지 않아야 안전하다.
+
+    그 전제를 만드는 것은 설정 검증이다(시도 TTL < 고아 TTL). 정리 대상은 고아 TTL 을 넘긴
+    KB 이고 살아 있는 시도는 시도 TTL 이내라, 시도 시작 시각이 항상 KB 생성 시각보다 뒤가
+    되어 시간 창이 겹칠 수 없다. 이 관계가 깨지면 락 없는 삭제가 곧바로 위험해진다.
+    """
+    assert settings.KB_ATTEMPT_TTL_MINUTES < settings.PROXY_KB_ORPHAN_TTL_MINUTES
+
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=settings.PROXY_KB_ORPHAN_TTL_MINUTES + 1)
+    stale_kb = _brief(407, created_at=old)
+
+    # 살아 있을 수 있는 가장 이른 시도 — 시도 TTL 경계.
+    _attempt(db, sample_member.member_id, snapshot=None, state=AttemptState.PENDING,
+             started_at=now - timedelta(minutes=settings.KB_ATTEMPT_TTL_MINUTES - 1))
+
+    live = crud.get_live_attempts(db, now)
+    assert crud.find_protecting_attempts(stale_kb, live) == []
+    assert [kb.id for kb in crud.find_cleanup_targets(db, [stale_kb], now)] == [407]
+
+
 class _FakeService:
     """스케줄러 잡이 쓰는 서비스 대역. 인스턴스 생성·close 를 기록한다."""
 
