@@ -429,13 +429,7 @@ async def _snapshot_upstream_ids(user_info: dict) -> Optional[list]:
 
 
 def _claim_candidate(db: Session, attempt, candidate, detail) -> bool:
-    """락 안에서 판정을 다시 하고 매핑을 만든다 — 성공하면 True.
-
-    앞선 판정은 업스트림 호출을 await 하는 사이에 무효가 될 수 있다. 관리자가 이 KB 를
-    이미 회수했거나 다른 요청이 먼저 복구했을 수 있어 둘 다 여기서 다시 확인한다.
-    이 함수 안에서는 await 하지 않는다 — 락을 쥔 채 업스트림을 기다리면 그 응답을 이어받을
-    이벤트 루프가 같은 락을 기다리는 다른 요청에 막힌다.
-    """
+    """락 안에서 판정을 다시 하고 매핑을 만든다 — 성공하면 True."""
     if not knowledge_base_crud.try_lock_surro_knowledge_id(db, candidate.id):
         return False     # 다른 요청이 이 KB 를 다루는 중 — 다음 목록 조회에서 다시 시도한다
     db.refresh(attempt)
@@ -468,14 +462,16 @@ async def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
 
     for attempt in attempts:
         # 후보 추리기 — 이 시도 이후 업스트림에 나타난, 게이트웨이가 모르는 같은 이름의 KB.
-        # 이름은 목록 응답에 이미 있어 추가 호출이 들지 않는다. 여기서 거르지 않으면 같은
-        # 시간대에 타임아웃한 무관한 KB 까지 후보로 세어져 멀쩡한 복구가 막힌다.
         # find_protecting_attempts 가 "스냅샷 밖 + 복구 창 안" 을 함께 판정한다.
         # known_ids 는 soft-delete 된 매핑까지 포함한다 — 한 번이라도 알았던 KB 는 미지가 아니다.
+        # 생성 시각을 모르는 KB 는 내 시도 이후에 생긴 것인지 판정할 수 없어 후보로 삼지
+        # 않는다. 보호 판정은 같은 결측을 반대 방향(보호)으로 읽으므로, 그 함수만 믿으면
+        # 시각 없는 KB 가 여기서도 후보가 되어 원래부터 있던 KB 를 가져가게 된다.
         candidates = [
             kb for kb in external_kbs
             if kb.id not in known_ids
             and kb.name == attempt.name
+            and getattr(kb, "created_at", None) is not None
             and knowledge_base_crud.find_protecting_attempts(kb, [attempt])
         ]
         if len(candidates) != 1:
@@ -931,8 +927,13 @@ async def delete_orphan_knowledge_base(
             ),
         )
 
-    # 업스트림 삭제 전에 보호 시도를 모두 abandoned 상태로 바꾼다. 업스트림 삭제가 실패하면
-    # orphan_suspect 상태로 남아있어 복구 시도가 계속된다.
+    # 업스트림 DELETE 는 락 밖에서 일어난다 — 트랜잭션 범위 락은 commit 으로 풀리고, 업스트림
+    # HTTP 호출을 트랜잭션 안에 둘 수는 없다. 그래서 안전을 보장하는 것은 락이 아니라 이 선점과,
+    # 복구 후보가 업스트림 실시간 목록에서만 나온다는 성질이다. 지워진 KB 는 다음 목록에
+    # 나타나지 않으므로 뒤늦은 복구가 사라진 KB 에 매핑을 붙일 수 없다.
+    # (시도 시작 시각과 업스트림 생성 시각은 서로 다른 기계의 시계라, 시간 창만으로는
+    #  뒤늦은 시도가 끼어들지 않는다고 말할 수 없다. 근거는 위의 두 가지다.)
+    # 업스트림 삭제가 실패하면 시도는 abandoned 로 남아 복구되지 않으므로 아래에서 로그를 남긴다.
     abandoned = knowledge_base_crud.abandon_attempts(db, protectors)
     db.commit()
 

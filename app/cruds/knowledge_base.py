@@ -16,6 +16,13 @@ from app.models.knowledge_base import AttemptState, KnowledgeBase, KnowledgeBase
 # 서로를 기다리는 일이 없도록, KB 전용 네임스페이스를 고정한다.
 _KB_ADVISORY_LOCK_NAMESPACE = 0x4B42  # 'KB'
 
+# 여기 도달한 시도는 결말이 났다. 되돌아가는 전이를 허용하면 포기시킨 시도가 되살아난다.
+_TERMINAL_ATTEMPT_STATES = (
+    AttemptState.SUCCEEDED,
+    AttemptState.ABANDONED,
+    AttemptState.RECOVERED,
+)
+
 
 def _as_aware(value: Optional[datetime]) -> Optional[datetime]:
     """naive datetime 을 UTC 로 간주해 aware 로 맞춘다.
@@ -224,11 +231,23 @@ class KnowledgeBaseCRUD:
             resolved_surro_id: Optional[int] = None,
             failure_kind: Optional[str] = None,
     ) -> None:
-        """시도를 종료 상태로 갱신한다. 실패해도 예외를 밖으로 내보내지 않는다."""
+        """시도를 종료 상태로 갱신한다. 실패해도 예외를 밖으로 내보내지 않는다.
+
+        이미 결말이 난 시도는 건드리지 않는다. 관리자 force 삭제가 시도를 끊은 직후 그
+        생성 요청이 타임아웃으로 돌아오면, 여기서 상태를 되돌려 시도가 다시 살아난다.
+        붙을 대상은 이미 업스트림에서 지워졌는데 시도 TTL 동안 남아, 같은 시간 창에 생긴
+        무관한 KB 를 계속 보호하고 다른 사용자의 복구와 정리 잡까지 막는다.
+        """
         db = SessionLocal()
         try:
             attempt = db.get(KnowledgeBaseCreateAttempt, attempt_id)
             if attempt is None:
+                return
+            if attempt.state in _TERMINAL_ATTEMPT_STATES:
+                logger.info(
+                    "Ignoring %s for already finished knowledge base create attempt %s (state=%s)",
+                    state, attempt_id, attempt.state,
+                )
                 return
             attempt.state = state
             attempt.finished_at = datetime.now(timezone.utc)
@@ -389,7 +408,12 @@ class KnowledgeBaseCRUD:
         """
         created_at = _as_aware(getattr(external_kb, "created_at", None))
         if created_at is None:
-            return []
+            # 생성 시각이 없으면 시간 창 판정 자체가 불가능하다 — 스냅샷 없음과 같은 종류의
+            # 모름이므로 같은 방향으로 처리한다. 정리 잡은 이미 시각 없는 KB 를 대상에서
+            # 빼는데(find_cleanup_targets), 여기서만 반대로 읽으면 자동으로는 못 지우는 KB 를
+            # 관리자는 force 없이 언제나 지울 수 있게 된다.
+            # 살아 있는 시도가 하나도 없으면 보호할 근거도 없으므로 그대로 빈 목록이 된다.
+            return list(live_attempts)
 
         # name/filename 은 보지 않는다. 대조에 상세 조회가 필요해 목록 API 에서 N+1 이 되고,
         # 느슨한 쪽이 안전 방향이다(과보호는 생겨도 과삭제는 생기지 않는다).

@@ -396,6 +396,23 @@ def test_own_pending_retry_does_not_block_recovery(db, sample_member):
     assert attempt.state == AttemptState.RECOVERED
 
 
+def test_finish_attempt_does_not_revive_a_terminal_attempt(db, sample_member):
+    """종결된 시도는 되살아나지 않는다.
+
+    관리자가 force 삭제로 시도를 끊은 직후, 진행 중이던 그 생성 요청이 타임아웃으로 돌아와
+    상태를 orphan_suspect 로 덮어쓰면 시도가 다시 살아난다. 붙을 대상은 이미 업스트림에서
+    지워졌는데 시도 TTL 동안 남아, 같은 시간 창에 생긴 무관한 KB 를 계속 보호하고 다른
+    사용자의 자동 복구와 정리 잡까지 막는다.
+    """
+    for terminal in (AttemptState.ABANDONED, AttemptState.RECOVERED, AttemptState.SUCCEEDED):
+        attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2],
+                           state=terminal, request_id=f"req-{terminal}")
+        crud.finish_attempt(attempt.id, state=AttemptState.ORPHAN_SUSPECT,
+                            failure_kind="504")
+        db.refresh(attempt)
+        assert attempt.state == terminal, f"{terminal} 이 되살아났다"
+
+
 def test_recoverable_attempts_exclude_missing_snapshot(db, sample_member):
     """스냅샷 없는 시도는 복구 후보 조회에서 빠져야 한다.
 
@@ -661,6 +678,22 @@ def test_cleanup_targets_exclude_active_and_protected(db, sample_member):
     assert [kb.id for kb in targets] == [408]
 
 
+def test_settings_reject_attempt_ttl_not_shorter_than_orphan_ttl(monkeypatch):
+    """시도 TTL 이 고아 TTL 보다 짧지 않은 설정은 기동 자체를 거부해야 한다.
+
+    정리 잡은 락도 선점도 없이 업스트림을 지우고, 그게 안전한 근거는 정리 대상 창과 복구 창이
+    겹칠 수 없다는 것 하나뿐이다. 그 관계를 만드는 것이 이 검증이므로, 검증이 사라지면 락 없는
+    삭제가 곧바로 위험해진다. 현재 기본값만 확인하면 검증을 통째로 지워도 알아채지 못한다.
+    """
+    from app.config import Settings
+
+    monkeypatch.setattr(Settings, "KB_ATTEMPT_TTL_MINUTES", 10080)
+    monkeypatch.setattr(Settings, "PROXY_KB_ORPHAN_TTL_MINUTES", 1440)
+
+    with pytest.raises(ValueError, match="KB_ATTEMPT_TTL_MINUTES"):
+        Settings()
+
+
 def test_cleanup_target_cannot_be_claimed_by_any_live_attempt(db, sample_member):
     """정리 잡은 락도 선점도 없이 업스트림을 지운다 — 대상이 복구 창과 겹치지 않아야 안전하다.
 
@@ -668,8 +701,6 @@ def test_cleanup_target_cannot_be_claimed_by_any_live_attempt(db, sample_member)
     KB 이고 살아 있는 시도는 시도 TTL 이내라, 시도 시작 시각이 항상 KB 생성 시각보다 뒤가
     되어 시간 창이 겹칠 수 없다. 이 관계가 깨지면 락 없는 삭제가 곧바로 위험해진다.
     """
-    assert settings.KB_ATTEMPT_TTL_MINUTES < settings.PROXY_KB_ORPHAN_TTL_MINUTES
-
     now = datetime.now(timezone.utc)
     old = now - timedelta(minutes=settings.PROXY_KB_ORPHAN_TTL_MINUTES + 1)
     stale_kb = _brief(407, created_at=old)

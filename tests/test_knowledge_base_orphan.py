@@ -158,11 +158,12 @@ def test_list_orphans_marks_snapshotless_pending_create_as_protected(db, admin_m
     assert sample_member.member_id in body["data"][0]["protected_by"]
 
 
-def test_list_orphans_treats_missing_created_at_as_unknown(db, admin_member, sample_member):
-    """업스트림이 created_at 을 주지 않으면 시간 창 판정 자체가 불가능하다.
+def test_list_orphans_protects_kb_with_unknown_created_at(db, admin_member, sample_member):
+    """업스트림이 created_at 을 주지 않으면 시간 창 판정 자체가 불가능하다 — 보호 쪽으로 떨어진다.
 
-    지금은 보호하지 않는 쪽으로 떨어진다. 이 테스트는 그 선택을 눈에 보이게 고정해, 나중에
-    바꿀 때 조용히 지나가지 않게 한다 — 되돌릴 수 없는 삭제가 걸려 있는 판정이다.
+    생성 시각을 모른다는 것은 "이 KB 가 진행 중인 시도의 결과물이 아니다" 를 확인할 수 없다는
+    뜻이다. 정리 잡은 이미 같은 결측을 보수적으로 다뤄 대상에서 제외하는데, 관리자 삭제만
+    반대로 동작하면 자동으로는 못 지우는 KB 를 수동으로는 언제나 지울 수 있게 된다.
     """
     _attempt(db, sample_member.member_id, snapshot=None, state=AttemptState.PENDING)
     kb = _external(407)
@@ -171,7 +172,37 @@ def test_list_orphans_treats_missing_created_at_as_unknown(db, admin_member, sam
     with _client(db, admin_member, [kb]) as client:
         body = client.get(ORPHANS).json()
 
+    assert body["data"][0]["is_protected"] is True
+    assert sample_member.member_id in body["data"][0]["protected_by"]
+
+
+def test_list_orphans_does_not_protect_unknown_created_at_without_live_attempts(db, admin_member):
+    """살아 있는 시도가 없으면 created_at 을 몰라도 보호하지 않는다.
+
+    보호의 근거는 "진행 중인 시도의 결과물일 수 있다" 이므로, 진행 중인 시도가 하나도 없으면
+    근거가 없다. 여기까지 보호하면 관리자가 손댈 수 없는 KB 가 생긴다.
+    """
+    kb = _external(407)
+    kb.created_at = None
+
+    with _client(db, admin_member, [kb]) as client:
+        body = client.get(ORPHANS).json()
+
     assert body["data"][0]["is_protected"] is False
+
+
+def test_delete_rejects_unknown_created_at_while_a_create_is_live(db, admin_member, sample_member):
+    """생성 시각을 모르는 KB 는 진행 중인 시도가 있는 한 force 없이 지울 수 없다."""
+    _attempt(db, sample_member.member_id, snapshot=None, state=AttemptState.PENDING)
+    kb = _external(407)
+    kb.created_at = None
+    delete_calls = []
+
+    with _client(db, admin_member, upstream=[kb], delete_calls=delete_calls) as client:
+        res = client.delete(f"{ORPHANS}/407")
+
+    assert res.status_code == 409
+    assert delete_calls == [], "업스트림 DELETE 가 불리면 안 된다"
 
 
 def test_list_orphans_outside_recovery_window_is_not_protected(db, admin_member):
