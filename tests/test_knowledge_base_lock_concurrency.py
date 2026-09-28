@@ -285,6 +285,131 @@ def test_locks_on_different_ids_do_not_block_each_other(member):
     assert seen["other_id"] is True
 
 
+def test_event_loop_stays_responsive_while_another_transaction_holds_the_lock(member):
+    """락이 잡혀 있는 동안에도 이벤트 루프가 멈추지 않는다.
+
+    라우트는 async 인데 세션은 동기 드라이버다. 대기하는 락을 async 핸들러 안에서 부르면
+    루프 스레드가 통째로 멈춰, 같은 루프에 걸린 다른 콜백이 전부 밀린다. 그 콜백 중에는
+    락을 쥔 요청의 업스트림 응답 처리도 들어 있어, 서로를 풀어 줄 주체가 사라진다.
+
+    락 획득 결과만 보는 테스트로는 이 증상이 드러나지 않는다 — 루프가 실제로 밀렸는지는
+    주기적으로 깨어나는 콜백의 지연으로만 관찰된다.
+    """
+    import asyncio
+
+    a_locked = threading.Event()
+    release = threading.Event()
+
+    def holder():
+        session = Session(bind=_engine)
+        try:
+            assert crud.try_lock_surro_knowledge_id(session, SURRO) is True
+            a_locked.set()
+            # 프로브가 끝나기를 기다리지 않고 시간으로 쥔다. 대기형 락이라면 프로브가
+            # 이 시간만큼 루프를 막으므로, 지연이 그대로 드러난다.
+            release.wait(HOLD_SECONDS)
+        finally:
+            session.rollback()
+            session.close()
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    try:
+        assert a_locked.wait(SYNC_TIMEOUT), "락을 쥐는 스레드가 시작되지 못했다"
+
+        async def scenario():
+            gaps = []
+
+            async def heartbeat():
+                last = time.monotonic()
+                while True:
+                    await asyncio.sleep(0.05)
+                    now = time.monotonic()
+                    gaps.append(now - last)
+                    last = now
+
+            beat = asyncio.create_task(heartbeat())
+            await asyncio.sleep(0.15)          # 평소 간격을 먼저 몇 번 쌓는다
+
+            # async 핸들러가 동기 세션으로 락을 잡는 실제 모양.
+            session = Session(bind=_engine)
+            try:
+                acquired = crud.try_lock_surro_knowledge_id(session, SURRO)
+            finally:
+                session.rollback()
+                session.close()
+
+            await asyncio.sleep(0.15)
+            beat.cancel()
+            return acquired, max(gaps)
+
+        acquired, worst_gap = asyncio.run(scenario())
+    finally:
+        release.set()
+        thread.join(timeout=SYNC_TIMEOUT)
+
+    assert acquired is False, "락이 잡혀 있는데 획득했다"
+    assert worst_gap < HOLD_SECONDS / 4, (
+        f"락 획득이 이벤트 루프를 {worst_gap:.3f}s 멈춰 세웠다 — 50ms 주기 콜백이 그만큼 밀렸다"
+    )
+
+
+def test_skipped_candidate_keeps_the_lock_until_the_caller_ends_the_transaction(member):
+    """락을 잡은 뒤 건너뛰는 분기도 결국 락을 풀어야 한다.
+
+    상세 조회를 기다리는 사이 다른 요청이 먼저 복구를 끝내면, 락을 잡은 뒤 상태를 다시 읽고
+    물러난다. `_claim_candidate` 자체는 트랜잭션을 닫지 않으므로 그 시점까지 락이 남아 있고,
+    닫는 책임은 호출자에게 있다. 호출자가 닫지 않으면 락이 요청 끝까지 유지되어, 다음 후보의
+    업스트림 조회를 락을 쥔 채 기다리게 된다.
+    """
+    now = datetime.now(timezone.utc)
+    setup = Session(bind=_engine)
+    try:
+        # 다른 요청이 이미 복구를 끝낸 상태 — 락 안의 재확인이 물러나야 하는 경우.
+        attempt = KnowledgeBaseCreateAttempt(
+            member_id=member, name="락 테스트 KB", filename="f.pdf",
+            request_id="skip-1", upstream_snapshot=[1, 2],
+            state=AttemptState.RECOVERED, started_at=now - timedelta(minutes=5),
+        )
+        setup.add(attempt)
+        setup.commit()
+        attempt_id = attempt.id
+    finally:
+        setup.close()
+
+    candidate = SimpleNamespace(id=SURRO)
+    detail = SimpleNamespace(
+        name="락 테스트 KB", description=None, collection_name=f"col_{SURRO}"
+    )
+
+    worker = Session(bind=_engine)
+    probe = Session(bind=_engine)
+    try:
+        claimed = _claim_candidate(
+            worker, worker.get(KnowledgeBaseCreateAttempt, attempt_id), candidate, detail
+        )
+        assert claimed is False, "복구가 끝난 시도로 매핑을 만들면 안 된다"
+
+        assert crud.try_lock_surro_knowledge_id(probe, SURRO) is False,             "건너뛴 시점에는 아직 락을 쥐고 있어야 한다 — 이 테스트의 전제"
+        probe.rollback()
+
+        worker.commit()                    # 호출자가 하는 일
+        assert crud.try_lock_surro_knowledge_id(probe, SURRO) is True,             "건너뛰기 분기가 락을 놓지 못했다 — 요청이 끝날 때까지 다른 복구가 막힌다"
+    finally:
+        probe.rollback()
+        probe.close()
+        worker.rollback()
+        worker.close()
+
+    check = Session(bind=_engine)
+    try:
+        assert check.query(KnowledgeBase).filter(
+            KnowledgeBase.surro_knowledge_id == SURRO
+        ).count() == 0
+    finally:
+        check.close()
+
+
 def test_only_one_of_two_racing_claims_creates_a_mapping(member):
     """같은 KB 를 노리는 복구 두 건이 동시에 들어와도 매핑은 하나만 생긴다.
 
