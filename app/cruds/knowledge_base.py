@@ -264,6 +264,11 @@ class KnowledgeBaseCRUD:
 
         pending 을 반드시 포함한다. 생성이 진행 중인 KB 는 업스트림에 이미 보이는데 매핑은
         아직 없어, 빼면 관리자 삭제와 정리 잡이 남이 만드는 중인 KB 를 고아로 보고 지운다.
+
+        이 집합은 자동 복구 대상의 상위집합이다. 복구는 스냅샷이 있는 시도만 대상으로 삼지만
+        보호는 스냅샷 없는 시도까지 포함하므로, 보호만 되고 복구되지 않는 구간이 생긴다.
+        그 구간은 시도 TTL 로 유계이고 관리자에게는 force 가 있는 반면, 반대로 범위를 맞추려고
+        보호를 줄이면 되돌릴 수 없는 과삭제가 된다.
         """
         return self._live_attempts_query(db, now).all()
 
@@ -330,7 +335,7 @@ class KnowledgeBaseCRUD:
         스냅샷이 없으면 "이 시도 이후에 생긴 KB" 를 가려낼 수 없어 후보를 특정할 방법이 없다.
         """
         cutoff = _as_aware(now) - timedelta(minutes=settings.KB_ATTEMPT_TTL_MINUTES)
-        return db.query(KnowledgeBaseCreateAttempt).filter(
+        rows = db.query(KnowledgeBaseCreateAttempt).filter(
             and_(
                 KnowledgeBaseCreateAttempt.member_id == member_id,
                 KnowledgeBaseCreateAttempt.state == AttemptState.ORPHAN_SUSPECT,
@@ -341,6 +346,10 @@ class KnowledgeBaseCRUD:
             # 엇갈린 순서로 잡아 데드락이 날 수 있다.
 
         ).order_by(KnowledgeBaseCreateAttempt.id).all()
+        # 위 IS NOT NULL 만으로는 스냅샷 없는 시도가 걸러지지 않는다. JSON 컬럼은 파이썬 None
+        # 을 SQL NULL 이 아니라 JSON null 로 저장하기 때문이다. 여기서 한 번 더 거르지 않으면
+        # 스냅샷 없는 시도가 후보로 새어 나가 원래부터 있던 KB 를 자기 것으로 가져간다.
+        return [r for r in rows if r.upstream_snapshot is not None]
 
     def get_known_surro_ids(self, db: Session) -> set:
         """게이트웨이가 **한 번이라도** 알았던 업스트림 KB id — soft-delete 포함.
@@ -368,8 +377,8 @@ class KnowledgeBaseCRUD:
     ) -> List[KnowledgeBaseCreateAttempt]:
         """이 업스트림 KB 를 후보로 삼을 수 있는 살아 있는 시도들.
 
-        보호 범위는 복구 범위와 일치해야 한다. 복구 창 밖 KB 를 붙잡으면 복구되지도 않으면서
-        삭제만 막히는 구간이 생긴다.
+        삭제 보호와 복구 충돌 판정이 이 하나를 공유한다. 빈 반환은 "이 KB 를 가져갈 수 있는
+        시도가 없다" 로 읽히므로, 판정할 수 없는 시도를 여기서 버리면 모름이 없음으로 둔갑한다.
         """
         created_at = _as_aware(getattr(external_kb, "created_at", None))
         if created_at is None:
@@ -380,10 +389,14 @@ class KnowledgeBaseCRUD:
         max_ingest = timedelta(seconds=settings.KB_MAX_INGEST_SECONDS)
         found = []
         for t in live_attempts:
-            if t.upstream_snapshot is None:
-                continue                         # 스냅샷 없는 시도는 후보를 계산할 수 없다
-            if external_kb.id in t.upstream_snapshot:
-                continue                         # 그 시도 이전부터 있던 KB
+            # 스냅샷이 있으면 그 시도 이전부터 있던 KB 는 후보가 아니다. 스냅샷이 없는 것은
+            # 업스트림 목록 조회가 실패했다는 뜻이고, 고아가 생기는 상황이 정확히 그때다.
+            # 그 판정을 할 수 없다는 이유로 배제하면 생성 중인 KB 가 삭제되고, 남이 만드는
+            # KB 가 복구로 넘어간다.
+            if t.upstream_snapshot is not None and external_kb.id in t.upstream_snapshot:
+                continue
+            # 시간 창은 스냅샷 없이도 판정할 수 있다. 스냅샷 없는 시도의 보호 범위는 이 창으로
+            # 묶여, 그 시도가 진행 중일 때 생긴 KB 에만 걸린다.
             started_at = _as_aware(t.started_at)
             if not (started_at <= created_at <= started_at + max_ingest):
                 continue                         # 복구 창 밖 → 보호해도 복구되지 않는다

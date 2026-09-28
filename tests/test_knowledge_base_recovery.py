@@ -396,6 +396,74 @@ def test_own_pending_retry_does_not_block_recovery(db, sample_member):
     assert attempt.state == AttemptState.RECOVERED
 
 
+def test_recoverable_attempts_exclude_missing_snapshot(db, sample_member):
+    """스냅샷 없는 시도는 복구 후보 조회에서 빠져야 한다.
+
+    JSON 컬럼에 None 을 넣으면 SQL NULL 이 아니라 JSON null 로 저장되어 `IS NOT NULL` 에
+    그대로 걸린다. SQL 조건만 믿으면 스냅샷 없는 시도가 후보로 새어 나가고, 그러면 "이 시도
+    이후에 생긴 KB" 를 가려낼 수 없어 원래부터 있던 KB 를 자기 것으로 가져간다.
+    """
+    _attempt(db, sample_member.member_id, snapshot=None, request_id="req-none")
+    kept = _attempt(db, sample_member.member_id, snapshot=[1, 2], request_id="req-snap")
+
+    rows = crud.get_recoverable_attempts(db, sample_member.member_id, NOW)
+
+    assert [r.id for r in rows] == [kept.id]
+
+
+def test_no_recovery_while_another_users_snapshotless_create_is_pending(db, sample_member, admin_member):
+    """다른 사용자의 생성이 스냅샷 없이 진행 중이면 그 결과를 가로채지 않는다.
+
+    스냅샷은 업스트림 목록 조회가 실패할 때만 비는데, 고아가 생기는 상황이 정확히 그때다.
+    스냅샷이 없다고 경쟁자 후보에서 빼면 "모른다" 를 "경쟁자가 없다" 로 읽게 된다.
+    """
+    _attempt(db, sample_member.member_id, snapshot=[1, 2], request_id="req-a")
+    _attempt(db, admin_member.member_id, snapshot=None, state=AttemptState.PENDING,
+             started_at=T0 + timedelta(minutes=5), request_id="req-b")
+
+    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
+        assert client.get(KB_LIST).json()["total"] == 0
+
+    assert db.query(KnowledgeBase).filter(
+        KnowledgeBase.surro_knowledge_id == 407
+    ).first() is None, "A 의 매핑이 생기면 안 된다"
+
+
+def test_snapshotless_attempt_outside_window_does_not_block_recovery(db, sample_member, admin_member):
+    """스냅샷이 없어도 시간 창 밖이면 경쟁자가 아니다 — 보호 범위가 무한정 넓어지지 않는다.
+
+    스냅샷 없는 시도를 전부 경쟁자로 세면 업스트림이 한 번 흔들린 뒤로 아무도 복구되지 않는다.
+    """
+    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2], request_id="req-a")
+    # KB 가 생긴 뒤에 시작한 시도는 그 KB 를 만들었을 수 없다.
+    _attempt(db, admin_member.member_id, snapshot=None, state=AttemptState.PENDING,
+             started_at=T0 + timedelta(minutes=30), request_id="req-b")
+
+    with _client(db, sample_member, [_brief(407, created_at=T0 + timedelta(minutes=10))],
+                 detail=_detail(407)) as client:
+        assert client.get(KB_LIST).json()["total"] == 1
+
+    db.refresh(attempt)
+    assert attempt.state == AttemptState.RECOVERED
+
+
+def test_empty_snapshot_is_not_treated_as_missing(db, sample_member, admin_member):
+    """빈 스냅샷은 "업스트림에 KB 가 0개" 라는 정상 판정이다 — 조회 실패(None)와 다르다.
+
+    둘을 섞으면 첫 KB 를 만드는 사용자의 시도가 모든 복구를 막는다.
+    """
+    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2], request_id="req-a")
+    _attempt(db, admin_member.member_id, snapshot=[], state=AttemptState.PENDING,
+             started_at=T0 + timedelta(minutes=5), request_id="req-b")
+
+    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
+        # B 의 빈 스냅샷은 407 을 담고 있지 않으므로 B 는 경쟁자가 맞다 — 복구하지 않는다.
+        assert client.get(KB_LIST).json()["total"] == 0
+
+    db.refresh(attempt)
+    assert attempt.state == AttemptState.ORPHAN_SUSPECT
+
+
 def test_no_recovery_when_mapping_appeared_during_upstream_call(db, sample_member, admin_member):
     """상세 조회를 await 하는 사이 다른 요청이 먼저 복구를 끝낸 경우 — 중복 매핑 금지."""
     attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2])

@@ -140,6 +140,36 @@ def test_list_orphans_marks_pending_create_as_protected(db, admin_member, sample
     assert sample_member.member_id in item["protected_by"]
 
 
+def test_list_orphans_marks_snapshotless_pending_create_as_protected(db, admin_member, sample_member):
+    """스냅샷 없이 생성 중인 KB 도 보호 대상으로 보여야 한다.
+
+    여기서 보호되지 않으면 관리자는 "안전하게 지울 수 있는 고아" 로 읽고 남이 만드는 중인 KB 를 지운다.
+    """
+    _attempt(db, sample_member.member_id, snapshot=None, state=AttemptState.PENDING)
+
+    with _client(db, admin_member, [_external(407)]) as client:
+        body = client.get(ORPHANS).json()
+
+    assert body["data"][0]["is_protected"] is True
+    assert sample_member.member_id in body["data"][0]["protected_by"]
+
+
+def test_list_orphans_treats_missing_created_at_as_unknown(db, admin_member, sample_member):
+    """업스트림이 created_at 을 주지 않으면 시간 창 판정 자체가 불가능하다.
+
+    지금은 보호하지 않는 쪽으로 떨어진다. 이 테스트는 그 선택을 눈에 보이게 고정해, 나중에
+    바꿀 때 조용히 지나가지 않게 한다 — 되돌릴 수 없는 삭제가 걸려 있는 판정이다.
+    """
+    _attempt(db, sample_member.member_id, snapshot=None, state=AttemptState.PENDING)
+    kb = _external(407)
+    kb.created_at = None
+
+    with _client(db, admin_member, [kb]) as client:
+        body = client.get(ORPHANS).json()
+
+    assert body["data"][0]["is_protected"] is False
+
+
 def test_list_orphans_outside_recovery_window_is_not_protected(db, admin_member):
     """복구 창 밖 KB 는 살아 있는 시도가 있어도 보호되지 않는다.
 
@@ -256,6 +286,22 @@ def test_delete_rejects_while_create_is_pending(db, admin_member, sample_member)
 
     assert res.status_code == 409
     assert delete_calls == []
+
+
+def test_delete_rejects_while_snapshotless_create_is_pending(db, admin_member, sample_member):
+    """스냅샷 없이 생성이 진행 중인 KB 는 force 없이 지울 수 없다.
+
+    지워 버리면 생성 라우트는 그대로 매핑을 써서, 업스트림에 없는 KB 카드가 사용자 목록에 남는다.
+    """
+    _attempt(db, sample_member.member_id, snapshot=None, state=AttemptState.PENDING)
+    delete_calls = []
+
+    with _client(db, admin_member, upstream=[_external(407)],
+                 delete_calls=delete_calls) as client:
+        res = client.delete(f"{ORPHANS}/407")
+
+    assert res.status_code == 409
+    assert delete_calls == [], "업스트림 DELETE 가 불리면 안 된다"
 
 
 def test_delete_abandons_protectors_before_calling_upstream(db, admin_member):
