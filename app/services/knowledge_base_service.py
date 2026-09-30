@@ -34,9 +34,14 @@ def _upstream_error_detail(response: httpx.Response) -> Any:
     return detail if isinstance(detail, (str, list, dict)) else "upstream request rejected"
 
 
-def _raise_kb_timeout(action: str) -> None:
+def _raise_kb_timeout(action: str, context: Optional[Dict] = None) -> None:
     """콜드스타트 등으로 처리시간 초과 시 공통 504 변환."""
-    logger.error(f"Timeout: {action}")
+    # 504 요청은 업스트림에서 뒤늦게 완료되어 고아 KB 가 될 수 있다. 어떤 요청이 끊겼는지
+    # 남기지 않으면 시도 레코드·access.log 와 연결되지 않아 추적이 끊긴다.
+    suffix = ""
+    if context:
+        suffix = " (" + ", ".join(f"{k}={v}" for k, v in context.items() if v is not None) + ")"
+    logger.error(f"Timeout: {action}{suffix}")
     raise HTTPException(status_code=504, detail=f"{action} timed out")
 
 
@@ -232,7 +237,11 @@ class KnowledgeBaseService:
                 return ExternalKnowledgeBaseDetailResponse(**kb_data)
             raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except httpx.TimeoutException:
-            _raise_kb_timeout("Knowledge base creation")
+            _raise_kb_timeout("Knowledge base creation", {
+                "name": name,
+                "filename": getattr(file, "filename", None),
+                "member_id": (user_info or {}).get("member_id"),
+            })
         except HTTPException:
             raise
         except Exception as e:
@@ -351,7 +360,11 @@ class KnowledgeBaseService:
                 return ExternalKnowledgeBaseDetailResponse(**response.json())
             raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except httpx.TimeoutException:
-            _raise_kb_timeout("Adding file to knowledge base")
+            _raise_kb_timeout("Adding file to knowledge base", {
+                "knowledge_base_id": knowledge_base_id,
+                "filename": getattr(file, "filename", None),
+                "member_id": (user_info or {}).get("member_id"),
+            })
         except HTTPException:
             raise
         except Exception as e:
