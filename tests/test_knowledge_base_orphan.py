@@ -351,7 +351,7 @@ def test_delete_abandons_protectors_before_calling_upstream(db, admin_member):
         db.refresh(attempt)
         states_at_delete.append(attempt.state)
 
-    with _client(db, admin_member, upstream=[_external(407)]) as client:
+    with _client(db, admin_member, upstream=[_external(407, name="사내규정_2026")]) as client:
         original = knowledge_base_service.delete_knowledge_base
 
         async def spy(knowledge_base_id, user_info=None):
@@ -386,7 +386,8 @@ def test_every_live_attempt_is_cut_before_upstream_delete_starts(db, admin_membe
         db.refresh(without_snapshot)
         states_at_delete.append((with_snapshot.state, without_snapshot.state))
 
-    with _client(db, admin_member, upstream=[_external(407)], on_delete=inspect) as client:
+    with _client(db, admin_member, upstream=[_external(407, name="사내규정_2026")],
+                 on_delete=inspect) as client:
         res = client.delete(f"{ORPHANS}/407?force=true")
 
     assert res.status_code == 200
@@ -419,6 +420,44 @@ def test_attempt_started_during_upstream_delete_cannot_claim_the_kb(db, admin_me
     assert claimants_after_new_attempt == [[]], "뒤늦게 시작한 시도가 후보가 되면 선점이 무의미하다"
 
 
+def test_force_delete_keeps_attempts_that_cannot_claim_the_kb(db, admin_member, sample_member):
+    """force 삭제는 이 KB 를 가져갈 수 있는 시도만 끊는다.
+
+    이름이 다른 시도는 복구가 이 KB 를 후보로 삼지 않는다. 그런 시도까지 끊으면 종결 상태는
+    되돌릴 수 없어, 같은 시간대에 다른 KB 를 만들던 사용자의 복구 기회가 영구히 사라진다.
+    """
+    other = _attempt(db, sample_member.member_id, snapshot=[1, 2, 3])
+    upstream = [_external(407, name="다른_KB", created_at=T0 + timedelta(minutes=30))]
+
+    with _client(db, admin_member, upstream) as client:
+        res = client.delete(f"{ORPHANS}/407?force=true")
+
+    assert res.status_code == 200
+    assert res.json()["forced"] is True
+    assert res.json()["abandoned_attempts"] == 0
+    db.refresh(other)
+    assert other.state == AttemptState.ORPHAN_SUSPECT
+
+
+def test_force_delete_of_kb_without_created_at_cuts_nothing(db, admin_member, sample_member):
+    """created_at 없는 KB 는 복구 후보가 될 수 없으므로 선점할 시도도 없다.
+
+    보호 판정은 결측을 보호로 읽어 모든 살아 있는 시도를 돌려준다. 그 목록을 그대로 끊으면
+    force 삭제 한 번에 전 사용자의 진행 중 생성이 복구 불가가 된다.
+    """
+    pending = _attempt(db, sample_member.member_id, snapshot=None, state=AttemptState.PENDING)
+    kb = _external(407, name="사내규정_2026")
+    kb.created_at = None
+
+    with _client(db, admin_member, [kb]) as client:
+        res = client.delete(f"{ORPHANS}/407?force=true")
+
+    assert res.status_code == 200
+    assert res.json()["abandoned_attempts"] == 0
+    db.refresh(pending)
+    assert pending.state == AttemptState.PENDING
+
+
 def test_delete_unprotected_orphan_succeeds(db, admin_member):
     upstream = [_external(407)]
 
@@ -440,14 +479,15 @@ def test_delete_failure_leaves_kb_reclaimable(db, admin_member):
     """
     attempt = _attempt(db, admin_member.member_id, snapshot=[1, 2, 3])
 
-    with _client(db, admin_member, upstream=[_external(407)], deleted=False) as client:
+    with _client(db, admin_member, upstream=[_external(407, name="사내규정_2026")],
+                 deleted=False) as client:
         assert client.delete(f"{ORPHANS}/407?force=true").status_code == 404
 
     db.refresh(attempt)
     assert attempt.state == AttemptState.ABANDONED, "끊긴 시도는 되살리지 않는다"
 
     # 자원은 갇히지 않는다 — 여전히 고아로 보이고, 이제 force 없이 회수할 수 있다.
-    with _client(db, admin_member, upstream=[_external(407)]) as client:
+    with _client(db, admin_member, upstream=[_external(407, name="사내규정_2026")]) as client:
         item = client.get(ORPHANS).json()["data"][0]
         assert item["surro_knowledge_id"] == 407
         assert item["is_protected"] is False

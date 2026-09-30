@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from sqlalchemy import and_, text
+from sqlalchemy import and_, or_, text
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -333,15 +333,24 @@ class KnowledgeBaseCRUD:
             member_id: str,
             now: datetime,
     ) -> List[KnowledgeBaseCreateAttempt]:
-        """이 사용자의 복구 후보 시도 — orphan_suspect · TTL 이내 · 스냅샷 보유.
+        """이 사용자의 복구 후보 시도 — orphan_suspect(또는 복구 창이 닫힌 pending) · TTL 이내 · 스냅샷 보유.
 
         스냅샷이 없으면 "이 시도 이후에 생긴 KB" 를 가려낼 수 없어 후보를 특정할 방법이 없다.
         """
         cutoff = _as_aware(now) - timedelta(minutes=settings.KB_ATTEMPT_TTL_MINUTES)
+        window_closed = _as_aware(now) - timedelta(seconds=settings.KB_MAX_INGEST_SECONDS)
         rows = db.query(KnowledgeBaseCreateAttempt).filter(
             and_(
                 KnowledgeBaseCreateAttempt.member_id == member_id,
-                KnowledgeBaseCreateAttempt.state == AttemptState.ORPHAN_SUSPECT,
+                or_(
+                    KnowledgeBaseCreateAttempt.state == AttemptState.ORPHAN_SUSPECT,
+                    # 강제 종료(배포 재시작의 SIGKILL 등)로 끝난 요청은 예외 경로를 타지 못해 pending 에
+                    # 남는다. 복구 창이 닫혔으면 그 요청은 이미 끝났다 — 살아 있었더라도 소유자가 같아 무해하다.
+                    and_(
+                        KnowledgeBaseCreateAttempt.state == AttemptState.PENDING,
+                        KnowledgeBaseCreateAttempt.started_at < window_closed,
+                    ),
+                ),
                 KnowledgeBaseCreateAttempt.started_at >= cutoff,
                 KnowledgeBaseCreateAttempt.upstream_snapshot.isnot(None),
             )

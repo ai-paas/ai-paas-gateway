@@ -395,7 +395,7 @@ DELETE_ORPHAN_KNOWLEDGE_BASE_DESCRIPTION = """
 - 업스트림이 빈 목록을 반환하면 503
 - **복구 대기 상태면 409.** 안 지워서 생기는 손해는 자원 점유 며칠이고, 지워서 생기는 손해는
   사용자가 10분 넘게 기다려 만든 KB 의 소실이라 기본값을 거부로 둔다
-- `force=true` 삭제는 감사로그에 강제 삭제로 남고, 지켜보던 시도는 즉시 `abandoned` 가 된다
+- `force=true` 삭제는 감사로그에 강제 삭제로 남고, 이 KB 를 가져갈 수 있는 시도(같은 이름)는 즉시 `abandoned` 가 된다
 - `force=true` 로 끊은 시도의 업스트림 생성이 이미 성공해 응답이 돌아오는 중이었다면, 그 요청은
   삭제된 KB 를 가리키는 매핑을 남긴다. 사용자에게는 열리지 않는 카드로 보이므로 일반 삭제로
   정리해야 한다. 생성 경로는 이 판정에 참여하지 않는다
@@ -433,7 +433,8 @@ def _claim_candidate(db: Session, attempt, candidate, detail) -> bool:
     if not knowledge_base_crud.try_lock_surro_knowledge_id(db, candidate.id):
         return False     # 다른 요청이 이 KB 를 다루는 중 — 다음 목록 조회에서 다시 시도한다
     db.refresh(attempt)
-    if attempt.state != AttemptState.ORPHAN_SUSPECT:
+    # pending 은 복구 창이 닫힌 것만 여기 도달한다(get_recoverable_attempts).
+    if attempt.state not in (AttemptState.ORPHAN_SUSPECT, AttemptState.PENDING):
         return False
     if knowledge_base_crud.get_active_knowledge_base_by_surro_id(db, candidate.id):
         return False
@@ -913,7 +914,14 @@ async def delete_orphan_knowledge_base(
                 "Use ?force=true to delete anyway."
             ),
         )
-    abandoned = knowledge_base_crud.abandon_attempts(db, protectors)
+    # 선점은 복구가 실제로 이 KB 를 가져갈 수 있는 시도만 끊는다 — 복구는 이름이 같고 created_at 이
+    # 있는 KB 만 후보로 삼는다. 그 밖의 시도까지 끊으면 종결 상태는 되돌릴 수 없어, 같은 시간대에
+    # 다른 KB 를 만들던 사용자의 복구 기회가 영구히 사라진다.
+    claimants = (
+        [t for t in protectors if t.name == target.name]
+        if target.created_at is not None else []
+    )
+    abandoned = knowledge_base_crud.abandon_attempts(db, claimants)
     db.commit()
 
     deleted = False
@@ -923,8 +931,8 @@ async def delete_orphan_knowledge_base(
         )
     finally:
         if not deleted and abandoned:
-            # 업스트림 삭제 실패 — 보호 시도를 abandoned 상태로 바꾼 커밋이 이미 나갔으므로, orphan_suspect 상태로 남아
-            # 복구 시도가 계속된다. 로그를 남겨서 관리자가 확인할 수 있게 한다.
+            # 업스트림 삭제 실패 — 선점한 시도는 이미 abandoned 로 커밋되었고 되살리지 않는다(삭제가 실제로
+            # 닿았는지 알 수 없다). KB 는 고아 목록에 남아 재삭제나 정리 잡이 회수한다.
             logger.error(
                 f"Orphan delete failed after abandoning attempts: surro_id={surro_knowledge_id}, "
                 f"abandoned_attempts={abandoned}, member_id={current_user.member_id}"

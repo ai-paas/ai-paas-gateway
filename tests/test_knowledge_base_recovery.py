@@ -637,6 +637,38 @@ def test_try_lock_does_not_wait_and_reports_contention():
     assert crud.try_lock_surro_knowledge_id(_Session(False), 407) is False, "경합을 삼키면 안 된다"
 
 
+def test_recoverable_attempts_include_pending_only_after_window_closes(db, sample_member):
+    """창이 열린 pending 은 생성 요청이 아직 진행 중일 수 있어 대상이 아니다."""
+    _attempt(db, sample_member.member_id, snapshot=[1, 2], state=AttemptState.PENDING,
+             started_at=NOW - MAX_INGEST / 2)
+    stale = _attempt(db, sample_member.member_id, snapshot=[1, 2], state=AttemptState.PENDING,
+                     started_at=NOW - MAX_INGEST - timedelta(minutes=10))
+
+    ids = [a.id for a in crud.get_recoverable_attempts(db, sample_member.member_id, NOW)]
+
+    assert ids == [stale.id]
+
+
+def test_recovers_attempt_left_pending_by_a_killed_process(db, sample_member):
+    """강제 종료로 pending 에 남은 시도도 창이 닫히면 복구된다.
+
+    배포 재시작의 SIGKILL 로 끝난 요청은 예외 처리 경로를 타지 못한다. pending 을 영영
+    복구하지 않으면 그 사용자의 KB 는 보호만 받다가 고아로 남는다.
+    """
+    started = NOW - MAX_INGEST - timedelta(minutes=10)
+    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2], state=AttemptState.PENDING,
+                       started_at=started)
+    upstream = [_brief(407, created_at=started + timedelta(minutes=5))]
+
+    with _client(db, sample_member, upstream, detail=_detail(407)) as client:
+        body = client.get(KB_LIST).json()
+
+    assert body["total"] == 1
+    assert body["data"][0]["created_by"] == sample_member.member_id
+    db.refresh(attempt)
+    assert attempt.state == AttemptState.RECOVERED
+
+
 def test_recoverable_attempts_are_id_ordered(db, sample_member):
     """호출자가 이 순서로 후보 KB 락을 잡는다 — 순서가 흔들리면 동시 요청이 데드락에 빠진다."""
     ids = [
