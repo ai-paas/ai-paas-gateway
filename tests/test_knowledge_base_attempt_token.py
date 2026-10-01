@@ -225,3 +225,66 @@ def test_upstream_schemas_hide_the_token_from_description():
         assert parsed.attempt_token == make_token(3, "req-a")
         assert "attempt_token" not in parsed.model_dump()
         assert "kbt:" not in parsed.model_dump_json()
+
+
+# ---------- 생성 경로 ----------
+
+def test_create_sends_the_attempt_token_in_description(db, sample_member, upstream):
+    with _as(db, sample_member) as client:
+        _create(client, description="사내 규정")
+
+    attempt = db.query(KnowledgeBaseCreateAttempt).one()
+    assert upstream.sent_descriptions == [attach_token("사내 규정", make_token(attempt.id, attempt.request_id))]
+
+
+def test_create_without_description_still_sends_a_token(db, sample_member, upstream):
+    with _as(db, sample_member) as client:
+        _create(client)
+
+    attempt = db.query(KnowledgeBaseCreateAttempt).one()
+    assert upstream.sent_descriptions == [attach_token(None, make_token(attempt.id, attempt.request_id))]
+
+
+def test_create_does_not_list_upstream_first(db, sample_member, upstream):
+    """생성 전에 업스트림 목록을 부르지 않는다 — 그 조회가 실패하면 복구가 불가능해지던 구조를 없앤다."""
+    with _as(db, sample_member) as client:
+        _create(client)
+
+    assert upstream.list_calls == 0
+
+
+def test_too_long_description_is_rejected_before_anything_happens(db, sample_member, upstream):
+    """토큰을 붙이면 업스트림 한도를 넘는 설명은 시도 기록도, 업스트림 호출도 없이 거부한다.
+
+    업스트림까지 보내면, 그 실패가 500 으로 오는 경우 생기지도 않은 KB 를 기다리는 시도가 남는다.
+    """
+    with _as(db, sample_member) as client:
+        res = _create(client, description="가" * (MAX_USER_DESCRIPTION + 1))
+
+    assert res.status_code == 422
+    assert db.query(KnowledgeBaseCreateAttempt).count() == 0
+    assert upstream.sent_descriptions == []
+
+
+def test_description_at_the_limit_fits_the_upstream_column(db, sample_member, upstream):
+    with _as(db, sample_member) as client:
+        assert _create(client, description="가" * MAX_USER_DESCRIPTION).status_code == 504
+
+    assert len(upstream.sent_descriptions[0]) == 255
+
+
+def test_token_never_reaches_the_user(db, sample_member, upstream):
+    """업스트림에는 토큰이 붙은 채 저장돼 있어도 사용자에게 나가는 응답과 게이트웨이 DB 에는 없어야 한다."""
+    upstream.times_out = False
+    with _as(db, sample_member) as client:
+        created = _create(client, description="사내 규정")
+        listed = client.get(KB_LIST)
+        detail = client.get(f"{KB_LIST}/407")
+        renamed = client.put(f"{KB_LIST}/407", json={"name": "새 이름"})
+
+    assert "kbt:" in upstream.rows[0]["description"], "전제: 업스트림에는 토큰이 남아 있다"
+    for res in (created, listed, detail, renamed):
+        assert res.status_code in (200, 201), res.text
+        assert "kbt:" not in res.text
+    assert created.json()["description"] == "사내 규정"
+    assert db.query(KnowledgeBase).one().description == "사내 규정"

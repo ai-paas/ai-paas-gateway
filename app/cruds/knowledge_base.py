@@ -202,7 +202,6 @@ class KnowledgeBaseCRUD:
             name: str,
             filename: Optional[str],
             request_id: Optional[str],
-            upstream_snapshot: Optional[list],
     ) -> int:
         """MLOps 호출 전에 시도를 기록하고 id 를 돌려준다.
 
@@ -215,7 +214,6 @@ class KnowledgeBaseCRUD:
                 name=name,
                 filename=filename,
                 request_id=request_id,
-                upstream_snapshot=upstream_snapshot,
                 state=AttemptState.PENDING,
             )
             db.add(attempt)

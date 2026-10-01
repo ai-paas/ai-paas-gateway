@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Query, 
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_admin_user, get_current_user
+from app.common.kb_attempt_token import MAX_USER_DESCRIPTION, attach_token, make_token
 from app.common.sort import parse_sort, resolve_sort_columns
 from app.cruds.knowledge_base import knowledge_base_crud
 from app.database import get_db
@@ -121,7 +122,8 @@ Knowledge Base 생성
 
 ## Request Body (multipart/form-data)
 - **name** (str, required): Knowledge Base 이름
-- **description** (str, optional): Knowledge Base 설명
+- **description** (str, optional): Knowledge Base 설명 — **최대 232자**. 업스트림 한도(255자) 중
+  나머지는 게이트웨이가 타임아웃 뒤 자동 복구에 쓰는 식별자를 붙이는 데 쓴다
 - **language_id** (int, required): 언어 ID
     - `GET /api/v1/knowledge-bases/languages` API로 조회 가능
 - **embedding_model_id** (int, required): 임베딩 모델 ID
@@ -170,6 +172,7 @@ KB가 만들어진 뒤에야 검색 불가·임베딩 과다 청킹으로 드러
 ## Errors
 - 400: 유효하지 않은 요청 또는 필수 파라미터 누락
 - 401: 인증되지 않은 사용자
+- 422: 요청 값 검증 실패 (예: description 이 232자를 넘음)
 - 500: Knowledge Base 생성 중 서버 내부 오류
 - 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
 - 504: 처리시간 초과 (콜드스타트 등). 타임아웃 이후에도 업스트림에서 생성이 완료될 수
@@ -418,16 +421,6 @@ def _classify_failure(status_code: int) -> str:
     return AttemptState.ABANDONED
 
 
-async def _snapshot_upstream_ids(user_info: dict) -> Optional[list]:
-    """POST 직전 업스트림 KB id 집합. 실패하면 None 을 돌려주고 생성은 계속 진행한다. """
-    try:
-        external_kbs = await knowledge_base_service.get_knowledge_bases(user_info=user_info)
-        return [kb.id for kb in external_kbs]
-    except Exception:
-        logger.warning("Failed to snapshot upstream knowledge bases; attempt will not be recoverable")
-        return None
-
-
 def _claim_candidate(db: Session, attempt, candidate, detail) -> bool:
     """락 안에서 판정을 다시 하고 매핑을 만든다 — 성공하면 True."""
     if not knowledge_base_crud.try_lock_surro_knowledge_id(db, candidate.id):
@@ -607,7 +600,10 @@ async def get_search_methods(
 async def create_knowledge_base(
     request: Request,
     name: str = Form(..., description="Knowledge Base 이름"),
-    description: Optional[str] = Form(None, description="Knowledge Base 설명"),
+    description: Optional[str] = Form(
+        None, max_length=MAX_USER_DESCRIPTION,
+        description=f"Knowledge Base 설명 (최대 {MAX_USER_DESCRIPTION}자)",
+    ),
     language_id: int = Form(..., description="언어 ID"),
     embedding_model_id: int = Form(..., description="임베딩 모델 ID (배포된 임베딩 모델만 가능)", examples=[13]),
     chunk_size: int = Form(..., description="청크 크기 (권장 500, 범위 300~1000)", examples=[500]),
@@ -624,19 +620,19 @@ async def create_knowledge_base(
     user_info = _user_info(current_user)
 
     # 시도 레코드를 MLOps 호출 전에 남긴다. 응답을 받지 못해도 소유자와 복구 후보가 남는다.
-    snapshot = await _snapshot_upstream_ids(user_info)
+    request_id = getattr(request.state, "request_id", None)
     attempt_id = knowledge_base_crud.create_attempt(
         member_id=current_user.member_id,
         name=name,
         filename=file.filename,
-        request_id=getattr(request.state, "request_id", None),
-        upstream_snapshot=snapshot,
+        request_id=request_id,
     )
 
     try:
         external_kb = await knowledge_base_service.create_knowledge_base(
             name=name,
-            description=description,
+            # 응답을 못 받아도 업스트림 목록에서 이 시도의 KB 를 찾을 수 있도록 토큰을 실어 보낸다.
+            description=attach_token(description, make_token(attempt_id, request_id)),
             file=file,
             language_id=language_id,
             embedding_model_id=embedding_model_id,

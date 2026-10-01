@@ -146,12 +146,10 @@ def test_classify_failure_maps_status_to_state():
 def test_attempt_is_recorded_before_upstream_call(db, sample_member):
     """시도는 pending 으로 먼저 기록되고, 종료 시 상태·시각이 갱신된다."""
     attempt_id = crud.create_attempt(
-        member_id=sample_member.member_id, name=NAME, filename=FILENAME,
-        request_id="req-x", upstream_snapshot=[1, 2],
+        member_id=sample_member.member_id, name=NAME, filename=FILENAME, request_id="req-x",
     )
     row = db.get(KnowledgeBaseCreateAttempt, attempt_id)
     assert row.state == AttemptState.PENDING
-    assert row.upstream_snapshot == [1, 2]
 
     crud.finish_attempt(attempt_id, state=AttemptState.ORPHAN_SUSPECT, failure_kind="504")
     db.refresh(row)
@@ -175,13 +173,9 @@ def test_cancelled_create_closes_attempt_as_orphan_suspect(db, sample_member, mo
 
     from app.routes import knowledge_base as route_module
 
-    async def fake_snapshot(user_info):
-        return [1, 2]
-
     async def cancelled(**kwargs):
         raise asyncio.CancelledError()
 
-    monkeypatch.setattr(route_module, "_snapshot_upstream_ids", fake_snapshot)
     monkeypatch.setattr(knowledge_base_service, "create_knowledge_base", cancelled)
 
     with pytest.raises(asyncio.CancelledError):
