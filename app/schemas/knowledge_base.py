@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.common.kb_attempt_token import split_token
 
 
 class ChunkTypeSchema(BaseModel):
@@ -48,7 +50,21 @@ class KnowledgeBaseFileReadSchema(BaseModel):
     deleted_by: Optional[str] = Field(None, description="삭제자 member_id")
 
 
-class ExternalKnowledgeBaseDetailResponse(BaseModel):
+class _AttemptTokenMixin(BaseModel):
+    """업스트림 description 에서 게이트웨이가 붙인 토큰을 떼어 따로 둔다.
+    업스트림 응답은 모두 이 스키마로 파싱되므로 사용자에게 나가는 경로가 여기서 한 번에 정리된다."""
+
+    attempt_token: Optional[str] = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def _split_attempt_token(self):
+        description, token = split_token(self.description)
+        if token is not None:
+            self.description, self.attempt_token = description, token
+        return self
+
+
+class ExternalKnowledgeBaseDetailResponse(_AttemptTokenMixin):
     """외부 API에서 반환되는 지식베이스 상세 응답"""
 
     model_config = ConfigDict(extra="ignore")
@@ -77,7 +93,7 @@ class ExternalKnowledgeBaseDetailResponse(BaseModel):
     files: List[KnowledgeBaseFileReadSchema] = Field(default_factory=list)
 
 
-class ExternalKnowledgeBaseBriefResponse(BaseModel):
+class ExternalKnowledgeBaseBriefResponse(_AttemptTokenMixin):
     """외부 API에서 반환되는 지식베이스 목록 응답"""
 
     model_config = ConfigDict(extra="ignore")

@@ -10,6 +10,12 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from app.common.kb_attempt_token import (
+    MAX_USER_DESCRIPTION,
+    attach_token,
+    make_token,
+    split_token,
+)
 from app.auth import get_current_user
 from app.database import get_db
 from app.main import app
@@ -163,3 +169,59 @@ def test_timeout_is_recovered_even_if_the_pre_create_list_failed(db, sample_memb
 
     assert [kb["surro_knowledge_id"] for kb in body["data"]] == [407]
     assert _owner_of(db, 407) == sample_member.member_id
+
+
+# ---------- 토큰 ----------
+
+def test_token_is_deterministic_and_distinct_per_attempt():
+    assert make_token(1, "req-a") == make_token(1, "req-a")
+    assert make_token(1, "req-a") != make_token(2, "req-a")
+    assert len(make_token(1, "req-a")) == 16
+    int(make_token(1, "req-a"), 16)
+
+
+def test_reused_attempt_id_gets_a_different_token():
+    """DB 복원으로 id 가 다시 발급돼도, 요청이 다르면 토큰이 겹치지 않는다."""
+    assert make_token(101, "req-before-restore") != make_token(101, "req-after-restore")
+    assert len(make_token(101, None)) == 16
+
+
+@pytest.mark.parametrize("original", [None, "", "사내 규정 모음", "끝이 공백인 설명 "])
+def test_attach_then_split_restores_user_description(original):
+    """빈 설명은 토큰만 저장되고, 읽을 때는 None 으로 돌아온다."""
+    token = make_token(7, "req-a")
+    restored, found = split_token(attach_token(original, token))
+    assert found == token
+    assert restored == (original or None)
+
+
+def test_split_leaves_text_without_a_valid_token_untouched():
+    """형식이 정확히 맞지 않으면 사용자 텍스트다 — 잘라내면 사용자 설명이 사라진다."""
+    for text in ["설명", "설명 [kbt:xyz]", "설명 [kbt:0123456789abcdef] 뒤에 글자",
+                 "설명 [kbt:0123456789ABCDEF]", "설명[kbt:0123456789abcdef]"]:
+        assert split_token(text) == (text, None)
+
+
+def test_user_description_limit_leaves_room_for_the_token():
+    longest = attach_token("가" * MAX_USER_DESCRIPTION, make_token(1, "req-a"))
+    assert len(longest) == 255
+    assert MAX_USER_DESCRIPTION == 232
+
+
+def test_upstream_schemas_hide_the_token_from_description():
+    """업스트림 응답은 모두 이 두 스키마로 파싱된다 — 여기서 떼어내면 이후 어느 경로로도 나가지 않는다."""
+    tagged = attach_token("설명", make_token(3, "req-a"))
+    brief = ExternalKnowledgeBaseBriefResponse(
+        id=1, name="n", description=tagged, collection_name="c",
+        chunk_size=1, chunk_overlap=0, top_k=1, threshold=0.1,
+    )
+    detail = ExternalKnowledgeBaseDetailResponse(
+        id=1, name="n", description=tagged, collection_name="c", embedding_model_id=1,
+        language_id=1, chunk_size=1, chunk_overlap=0, chunk_type_id=1, search_method_id=1,
+        top_k=1, threshold=0.1,
+    )
+    for parsed in (brief, detail):
+        assert parsed.description == "설명"
+        assert parsed.attempt_token == make_token(3, "req-a")
+        assert "attempt_token" not in parsed.model_dump()
+        assert "kbt:" not in parsed.model_dump_json()
