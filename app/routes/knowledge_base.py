@@ -374,8 +374,9 @@ LIST_ORPHAN_KNOWLEDGE_BASES_DESCRIPTION = """
 캐시를 쓰지 않는다.
 
 ## Response (OrphanKnowledgeBaseListResponse)
-- **is_protected** (bool): `true` 면 **복구 대기** — 살아 있는 생성 시도가 이 KB 를 후보로
-  삼고 있어 곧 주인이 정해질 수 있다. 고아로 오인해 삭제하면 안 된다.
+- **is_protected** (bool): `true` 면 **복구 대기** — 이 KB 를 만든 생성 시도가 아직 살아 있어
+  곧 주인이 정해질 수 있다. 고아로 오인해 삭제하면 안 된다. 게이트웨이를 거치지 않고 만든 KB 나
+  이 판정이 도입되기 전에 만든 KB 는 보호되지 않는다
 - **protected_by** (str, optional): 지켜보는 시도의 요청자와 시각
 
 ## Errors
@@ -398,7 +399,7 @@ DELETE_ORPHAN_KNOWLEDGE_BASE_DESCRIPTION = """
 - 업스트림이 빈 목록을 반환하면 503
 - **복구 대기 상태면 409.** 안 지워서 생기는 손해는 자원 점유 며칠이고, 지워서 생기는 손해는
   사용자가 10분 넘게 기다려 만든 KB 의 소실이라 기본값을 거부로 둔다
-- `force=true` 삭제는 감사로그에 강제 삭제로 남고, 이 KB 를 가져갈 수 있는 시도(같은 이름)는 즉시 `abandoned` 가 된다
+- `force=true` 삭제는 감사로그에 강제 삭제로 남고, 이 KB 를 만든 생성 시도는 즉시 `abandoned` 가 된다
 - `force=true` 로 끊은 시도의 업스트림 생성이 이미 성공해 응답이 돌아오는 중이었다면, 그 요청은
   삭제된 KB 를 가리키는 매핑을 남긴다. 사용자에게는 열리지 않는 카드로 보이므로 일반 삭제로
   정리해야 한다. 생성 경로는 이 판정에 참여하지 않는다
@@ -899,14 +900,8 @@ async def delete_orphan_knowledge_base(
                 "Use ?force=true to delete anyway."
             ),
         )
-    # 선점은 복구가 실제로 이 KB 를 가져갈 수 있는 시도만 끊는다 — 복구는 이름이 같고 created_at 이
-    # 있는 KB 만 후보로 삼는다. 그 밖의 시도까지 끊으면 종결 상태는 되돌릴 수 없어, 같은 시간대에
-    # 다른 KB 를 만들던 사용자의 복구 기회가 영구히 사라진다.
-    claimants = (
-        [t for t in protectors if t.name == target.name]
-        if target.created_at is not None else []
-    )
-    abandoned = knowledge_base_crud.abandon_attempts(db, claimants)
+    # 보호 집합이 곧 이 KB 를 가져갈 수 있는 시도다(토큰의 주인) — 그대로 선점한다.
+    abandoned = knowledge_base_crud.abandon_attempts(db, protectors)
     db.commit()
 
     deleted = False

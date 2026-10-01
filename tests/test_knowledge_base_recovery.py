@@ -605,14 +605,14 @@ def test_list_survives_recovery_failure(db, sample_member, monkeypatch):
 
 def test_cleanup_targets_exclude_active_and_protected(db, sample_member):
     _mapping(db, sample_member.member_id, surro_id=100)
-    _attempt(db, sample_member.member_id, snapshot=[1, 2])
+    attempt = _attempt(db, sample_member.member_id)
 
     old = NOW - timedelta(minutes=settings.PROXY_KB_ORPHAN_TTL_MINUTES + 60)
     upstream = [
-        _brief(100, created_at=old),   # active 매핑 있음
-        _brief(407),                   # 보호 대상 (살아 있는 시도의 창 안)
-        _brief(408, created_at=old),   # 정리 대상
-        _brief(409),                   # TTL 미경과
+        _brief(100, created_at=old),                          # active 매핑 있음
+        _brief(407, created_at=old, token_for=attempt),    # 살아 있는 시도의 토큰 — 보호
+        _brief(408, created_at=old),                          # 정리 대상
+        _brief(409),                                          # TTL 미경과
     ]
 
     targets = crud.find_cleanup_targets(db, upstream, NOW)
@@ -636,23 +636,24 @@ def test_settings_reject_attempt_ttl_not_shorter_than_orphan_ttl(monkeypatch):
 
 
 def test_cleanup_target_cannot_be_claimed_by_any_live_attempt(db, sample_member):
-    """정리 잡은 락도 선점도 없이 업스트림을 지운다 — 대상이 복구 창과 겹치지 않아야 안전하다.
+    """정리 잡은 락도 선점도 없이 업스트림을 지운다 — 살아 있는 시도가 가져갈 수 있는 KB 는 대상이 될 수 없다.
 
-    그 전제를 만드는 것은 설정 검증이다(시도 TTL < 고아 TTL). 정리 대상은 고아 TTL 을 넘긴
-    KB 이고 살아 있는 시도는 시도 TTL 이내라, 시도 시작 시각이 항상 KB 생성 시각보다 뒤가
-    되어 시간 창이 겹칠 수 없다. 이 관계가 깨지면 락 없는 삭제가 곧바로 위험해진다.
+    두 겹으로 막는다. 설정 검증(시도 TTL < 고아 TTL) 때문에 살아 있는 시도의 KB 는 고아 TTL 을
+    넘길 수 없다. 그래도 업스트림 시계가 어긋나 오래된 것처럼 보이면 토큰 보호가 대상에서 뺀다.
     """
     now = datetime.now(timezone.utc)
     old = now - timedelta(minutes=settings.PROXY_KB_ORPHAN_TTL_MINUTES + 1)
-    stale_kb = _brief(407, created_at=old)
 
     # 살아 있을 수 있는 가장 이른 시도 — 시도 TTL 경계.
-    _attempt(db, sample_member.member_id, snapshot=None, state=AttemptState.PENDING,
-             started_at=now - timedelta(minutes=settings.KB_ATTEMPT_TTL_MINUTES - 1))
+    live = _attempt(db, sample_member.member_id, state=AttemptState.PENDING,
+                    started_at=now - timedelta(minutes=settings.KB_ATTEMPT_TTL_MINUTES - 1))
+    owned = _brief(407, created_at=old, token_for=live)
+    stranger = _brief(408, created_at=old)
 
-    live = crud.get_live_attempts(db, now)
-    assert crud.find_protecting_attempts(stale_kb, live) == []
-    assert [kb.id for kb in crud.find_cleanup_targets(db, [stale_kb], now)] == [407]
+    live_attempts = crud.get_live_attempts(db, now)
+    assert crud.find_protecting_attempts(owned, live_attempts) == [live]
+    assert crud.find_protecting_attempts(stranger, live_attempts) == []
+    assert [kb.id for kb in crud.find_cleanup_targets(db, [owned, stranger], now)] == [408]
 
 
 class _FakeService:

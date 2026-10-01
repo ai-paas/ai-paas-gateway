@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
+from app.common.kb_attempt_token import make_token
 from app.config import settings
 from app.database import SessionLocal
 from app.models.knowledge_base import AttemptState, KnowledgeBase, KnowledgeBaseCreateAttempt
@@ -363,26 +364,15 @@ class KnowledgeBaseCRUD:
             external_kb,
             live_attempts,
     ) -> List[KnowledgeBaseCreateAttempt]:
-        """이 업스트림 KB 를 후보로 삼을 수 있는 살아 있는 시도들.
+        """이 업스트림 KB 를 가져갈 수 있는 살아 있는 시도 — 이 KB 의 토큰을 실어 보낸 시도뿐이다.
 
-        삭제 보호와 복구 충돌 판정이 이 하나를 공유한다. 빈 반환은 "이 KB 를 가져갈 수 있는
-        시도가 없다" 로 읽히므로, 판정할 수 없는 시도를 여기서 버리면 모름이 없음으로 둔갑한다.
+        삭제 보호와 선점이 이 하나를 공유한다. 토큰 없는 KB(도입 전 시도·게이트웨이 밖 생성)는
+        어떤 시도도 복구할 수 없으므로 보호하지 않는다.
         """
-        created_at = _as_aware(getattr(external_kb, "created_at", None))
-        if created_at is None:
-            return list(live_attempts)
-        
-        max_ingest = timedelta(seconds=settings.KB_MAX_INGEST_SECONDS)
-        found = []
-        for t in live_attempts:
-            if t.upstream_snapshot is not None and external_kb.id in t.upstream_snapshot:
-                continue
-            # 스냅샷이 없는 시도의 보호 범위를 시간으로 설정한다. 
-            started_at = _as_aware(t.started_at)
-            if not (started_at <= created_at <= started_at + max_ingest):
-                continue                         # 복구 창 밖 → 보호해도 복구되지 않는다
-            found.append(t)
-        return found
+        token = getattr(external_kb, "attempt_token", None)
+        if token is None:
+            return []
+        return [t for t in live_attempts if make_token(t.id, t.request_id) == token]
 
     def is_protected(self, external_kb, live_attempts) -> bool:
         """관리자 삭제와 정리 잡이 보호해야 하는 KB 인지 판정 — 두 삭제 경로 공통."""
