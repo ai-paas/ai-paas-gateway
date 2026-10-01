@@ -477,7 +477,7 @@ def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
 
         knowledge_base_crud.mark_recovered(attempt.id, candidate.id)
 
-        # 같은 요청의 다음 시도에서 이미 복구된 KB를 다시 조회하지 않는다.
+        # 같은 요청의 다음 시도가 방금 복구한 KB 를 다시 후보로 보지 않게 한다.
         known_ids.add(candidate.id)
         recovered += 1
 
