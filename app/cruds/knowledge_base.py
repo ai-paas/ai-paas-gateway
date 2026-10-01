@@ -271,23 +271,11 @@ class KnowledgeBaseCRUD:
             db: Session,
             now: datetime,
     ) -> List[KnowledgeBaseCreateAttempt]:
-        """삭제 보호 집합 — 아직 주인이 정해질 수 있는 모든 시도. 
+        """삭제 보호 집합 — 아직 주인이 정해질 수 있는 모든 시도.
         자동 복구와 관리자 삭제가 이 집합을 공유한다. TTL 이 지나면 자동으로 제외된다.
-        이 집합은 자동 복구 대상의 상위집합이다 — 복구는 스냅샷 있는 시도만 대상으로 하고,
-        보호는 스냅샷 없는 시도까지 포함한다. 범위를 맞추려고 보호를 줄이면 과삭제가 된다."""
+        이 집합은 자동 복구 대상의 상위집합이다 — 복구는 복구 창이 열린 pending 을 빼지만,
+        보호는 그 시도까지 포함한다. 범위를 맞추려고 보호를 줄이면 생성 중인 KB 가 지워진다."""
         return self._live_attempts_query(db, now).all()
-
-    def get_conflicting_attempts(
-            self,
-            db: Session,
-            now: datetime,
-            member_id: str,
-    ) -> List[KnowledgeBaseCreateAttempt]:
-        """복구 충돌 집합 — **다른 사용자**의 살아 있는 시도.
-        자신의 시도가 있다면 후에 영영 재생성을 못 하게 되므로, 그 시도는 충돌로 보지 않는다.""" 
-        return self._live_attempts_query(db, now).filter(
-            KnowledgeBaseCreateAttempt.member_id != member_id
-        ).all()
 
     def try_lock_surro_knowledge_id(self, db: Session, surro_knowledge_id: int) -> bool:
         """업스트림 KB에 대한 트랜잭션 범위 advisory lock을 대기 없이 시도한다.
@@ -331,13 +319,10 @@ class KnowledgeBaseCRUD:
             member_id: str,
             now: datetime,
     ) -> List[KnowledgeBaseCreateAttempt]:
-        """이 사용자의 복구 후보 시도 — orphan_suspect(또는 복구 창이 닫힌 pending) · TTL 이내 · 스냅샷 보유.
-
-        스냅샷이 없으면 "이 시도 이후에 생긴 KB" 를 가려낼 수 없어 후보를 특정할 방법이 없다.
-        """
+        """이 사용자의 복구 후보 시도 — orphan_suspect(또는 복구 창이 닫힌 pending) · TTL 이내."""
         cutoff = _as_aware(now) - timedelta(minutes=settings.KB_ATTEMPT_TTL_MINUTES)
         window_closed = _as_aware(now) - timedelta(seconds=settings.KB_MAX_INGEST_SECONDS)
-        rows = db.query(KnowledgeBaseCreateAttempt).filter(
+        return db.query(KnowledgeBaseCreateAttempt).filter(
             and_(
                 KnowledgeBaseCreateAttempt.member_id == member_id,
                 or_(
@@ -350,13 +335,9 @@ class KnowledgeBaseCRUD:
                     ),
                 ),
                 KnowledgeBaseCreateAttempt.started_at >= cutoff,
-                KnowledgeBaseCreateAttempt.upstream_snapshot.isnot(None),
             )
-            # 정렬로 후보 KB 락을 잡아 락이 엇갈리는 상황(데드락)을 방지한다. 
-
+            # 정렬로 후보 KB 락을 잡아 락이 엇갈리는 상황(데드락)을 방지한다.
         ).order_by(KnowledgeBaseCreateAttempt.id).all()
-        # JSON 컬럼은 파이썬 None을 JSON의 null로 저장하기에 한번 더 필터링한다. 
-        return [r for r in rows if r.upstream_snapshot is not None]
 
     def get_known_surro_ids(self, db: Session) -> set:
         """게이트웨이가 **한 번이라도** 알았던 업스트림 KB id — soft-delete 포함.

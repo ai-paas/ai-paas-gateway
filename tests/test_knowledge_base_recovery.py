@@ -6,17 +6,14 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
+from app.common.kb_attempt_token import attach_token, make_token
 from app.auth import get_current_user
 from app.config import settings
 from app.cruds.knowledge_base import knowledge_base_crud as crud
 from app.database import get_db
 from app.main import app
 from app.models import AttemptState, AuditLog, KnowledgeBase, KnowledgeBaseCreateAttempt
-from app.schemas.knowledge_base import (
-    ExternalKnowledgeBaseBriefResponse,
-    ExternalKnowledgeBaseDetailResponse,
-    KnowledgeBaseFileReadSchema,
-)
+from app.schemas.knowledge_base import ExternalKnowledgeBaseBriefResponse
 from app.scheduler import job_cleanup_orphan_knowledge_bases
 from app.services.knowledge_base_service import knowledge_base_service
 
@@ -55,38 +52,28 @@ def _attempt_session(db, monkeypatch):
     yield
 
 
-def _brief(kb_id, name=NAME, created_at=None):
+def _brief(kb_id, name=NAME, created_at=None, token_for=None):
+    """`token_for` 에 시도를 주면, 그 시도가 생성 요청에 실어 보낸 토큰이 description 에 들어 있다."""
     return ExternalKnowledgeBaseBriefResponse(
-        id=kb_id, name=name, description=None, collection_name=f"col_{kb_id}",
+        id=kb_id, name=name,
+        description=(attach_token(None, make_token(token_for.id, token_for.request_id))
+                     if token_for is not None else None),
+        collection_name=f"col_{kb_id}",
         chunk_size=500, chunk_overlap=50, top_k=3, threshold=0.4,
         created_at=created_at if created_at is not None else T0 + timedelta(minutes=10),
     )
 
 
-def _detail(kb_id, name=NAME, filename=FILENAME):
-    files = []
-    if filename is not None:
-        files.append(KnowledgeBaseFileReadSchema(
-            id=1, knowledge_base_id=kb_id, name=filename, partition_name="p", chunk_number=3,
-        ))
-    return ExternalKnowledgeBaseDetailResponse(
-        id=kb_id, name=name, description=None, collection_name=f"col_{kb_id}",
-        embedding_model_id=13, language_id=1, chunk_size=500, chunk_overlap=50,
-        chunk_type_id=1, search_method_id=1, top_k=3, threshold=0.4, files=files,
-    )
-
-
 @contextmanager
-def _client(db, user, upstream, detail=None, on_detail=None):
-    """`on_detail` 은 파일명 대조용 상세 조회를 await 하는 동안 다른 요청이 끼어드는 상황을
-    재현한다 — 복구가 그 await 이후 락 안에서 판정을 다시 하는지 검증하는 용도다."""
+def _client(db, user, upstream, detail_calls=None):
+    """업스트림 목록을 고정한 TestClient. 상세 조회가 불리면 `detail_calls` 에 기록한다."""
     async def fake_list(*args, **kwargs):
         return upstream
 
     async def fake_detail(knowledge_base_id, user_info=None):
-        if on_detail is not None:
-            on_detail(knowledge_base_id)
-        return detail(knowledge_base_id) if callable(detail) else detail
+        if detail_calls is not None:
+            detail_calls.append(knowledge_base_id)
+        return None
 
     originals = (knowledge_base_service.get_knowledge_bases,
                  knowledge_base_service.get_knowledge_base)
@@ -107,7 +94,7 @@ def _client(db, user, upstream, detail=None, on_detail=None):
          knowledge_base_service.get_knowledge_base) = originals
 
 
-def _attempt(db, member_id, snapshot, state=AttemptState.ORPHAN_SUSPECT,
+def _attempt(db, member_id, snapshot=None, state=AttemptState.ORPHAN_SUSPECT,
              started_at=T0, name=NAME, filename=FILENAME, resolved=None, request_id="req-1"):
     a = KnowledgeBaseCreateAttempt(
         member_id=member_id, name=name, filename=filename, request_id=request_id,
@@ -198,9 +185,9 @@ def test_cancelled_create_closes_attempt_as_orphan_suspect(db, sample_member, mo
 # ---------- 자동 복구 ----------
 
 def test_recovers_single_candidate(db, sample_member):
-    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2])
+    attempt = _attempt(db, sample_member.member_id)
 
-    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
+    with _client(db, sample_member, [_brief(407, token_for=attempt)]) as client:
         body = client.get(KB_LIST).json()
 
     assert body["total"] == 1, "복구된 KB 가 같은 응답에 나타나야 한다"
@@ -212,129 +199,124 @@ def test_recovers_single_candidate(db, sample_member):
     assert attempt.recovered_at is not None
 
 
-def test_no_recovery_when_two_unknown_kbs_in_window(db, sample_member):
-    """같은 이름의 후보가 2개면 복구하지 않는다.
+def test_no_recovery_when_two_kbs_carry_the_same_token(db, sample_member):
+    """같은 토큰을 가진 KB 가 둘이면 복구하지 않는다.
 
-    게이트웨이를 거치지 않은 직접 생성이 끼면 어느 쪽이 내 것인지 알 수 없어 스스로 멈춘다.
-    이름이 다른 KB 는 애초에 후보가 아니므로, 구별 불가를 만들려면 이름이 같아야 한다.
+    토큰은 업스트림 화면에 description 으로 그대로 보이므로, 그걸 복사해 만든 KB 가 섞일 수 있다.
+    어느 쪽이 이 시도의 결과인지 알 수 없으면 멈춘다.
     """
-    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2])
-    upstream = [_brief(407), _brief(408)]
+    attempt = _attempt(db, sample_member.member_id)
+    upstream = [_brief(407, token_for=attempt), _brief(408, token_for=attempt)]
 
-    with _client(db, sample_member, upstream, detail=_detail(407)) as client:
+    with _client(db, sample_member, upstream) as client:
         assert client.get(KB_LIST).json()["total"] == 0
 
     db.refresh(attempt)
     assert attempt.state == AttemptState.ORPHAN_SUSPECT
 
 
-def test_no_recovery_when_filename_differs(db, sample_member):
-    """업로드 파일명이 다르면 그 시도의 결과가 아니다."""
-    _attempt(db, sample_member.member_id, snapshot=[1, 2])
+def test_same_name_kb_without_the_token_is_not_a_candidate(db, sample_member):
+    """이름·파일·시각이 다 맞아도 토큰이 없으면 이 시도의 결과가 아니다 — 게이트웨이를 거치지 않은 생성이다."""
+    attempt = _attempt(db, sample_member.member_id)
 
-    with _client(db, sample_member, [_brief(407)], detail=_detail(407, filename="다른.pdf")) as client:
+    with _client(db, sample_member, [_brief(407)]) as client:
         assert client.get(KB_LIST).json()["total"] == 0
 
+    db.refresh(attempt)
+    assert attempt.state == AttemptState.ORPHAN_SUSPECT
 
-def test_no_recovery_when_name_differs(db, sample_member):
-    """KB 이름이 다르면 그 시도의 결과가 아니다."""
-    _attempt(db, sample_member.member_id, snapshot=[1, 2])
 
-    with _client(db, sample_member, [_brief(407, name="다른이름")], detail=_detail(407)) as client:
+def test_kb_carrying_another_attempts_token_is_not_a_candidate(db, sample_member):
+    mine = _attempt(db, sample_member.member_id, request_id="req-mine")
+    other = _attempt(db, sample_member.member_id, state=AttemptState.ABANDONED,
+                     request_id="req-other")
+
+    with _client(db, sample_member, [_brief(407, token_for=other)]) as client:
         assert client.get(KB_LIST).json()["total"] == 0
 
+    db.refresh(mine)
+    assert mine.state == AttemptState.ORPHAN_SUSPECT
 
-def test_no_recovery_for_kb_in_snapshot(db, sample_member):
-    """시도 시점에 이미 있던 KB 는 그 시도의 결과일 수 없다 (surro_id 재사용 방어)."""
-    _attempt(db, sample_member.member_id, snapshot=[407])
 
-    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
+def test_kb_from_before_a_restore_is_not_claimed_by_a_reused_attempt_id(db, sample_member):
+    """DB 를 백업에서 복원하면 시퀀스가 되돌아가 같은 id 가 다시 발급된다.
+
+    복원 전에 그 id 로 만든 KB 는 업스트림에 남아 매핑 없는 고아가 된다. 토큰이 id 만으로
+    정해지면 새 시도가 그 KB 를 자기 것으로 가져간다 — 다른 사용자의 KB 일 수 있다.
+    """
+    attempt = _attempt(db, sample_member.member_id, request_id="req-after-restore")
+    before_restore = _brief(407)
+    before_restore.attempt_token = make_token(attempt.id, "req-before-restore")
+
+    with _client(db, sample_member, [before_restore]) as client:
         assert client.get(KB_LIST).json()["total"] == 0
 
-
-def test_no_recovery_outside_max_ingest_window(db, sample_member):
-    _attempt(db, sample_member.member_id, snapshot=[1, 2])
-    late = _brief(407, created_at=T0 + MAX_INGEST + timedelta(minutes=1))
-
-    with _client(db, sample_member, [late], detail=_detail(407)) as client:
-        assert client.get(KB_LIST).json()["total"] == 0
+    db.refresh(attempt)
+    assert attempt.state == AttemptState.ORPHAN_SUSPECT
 
 
-def test_no_recovery_without_snapshot(db, sample_member):
-    """스냅샷이 없으면 후보를 특정할 수 없어 복구 대상이 아니다."""
-    _attempt(db, sample_member.member_id, snapshot=None)
+def test_recovery_does_not_depend_on_name_or_creation_time(db, sample_member):
+    """토큰이 맞으면 복구한다 — 이름과 업스트림 생성 시각은 판정에 쓰지 않는다.
 
-    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
-        assert client.get(KB_LIST).json()["total"] == 0
+    둘 다 토큰이 없던 시절 소유자를 추정하던 근거다. 남겨 두면 업스트림 시계가 어긋나거나
+    인제스트가 길어질 때 멀쩡한 복구를 거부한다.
+    """
+    attempt = _attempt(db, sample_member.member_id)
+    late = T0 + MAX_INGEST + timedelta(minutes=1)
+    kb = _brief(407, name="다른이름", created_at=late, token_for=attempt)
+
+    with _client(db, sample_member, [kb]) as client:
+        assert client.get(KB_LIST).json()["total"] == 1
 
 
-def test_no_recovery_when_two_attempts_share_the_window(db, sample_member, admin_member):
-    """두 시도가 같은 KB 를 후보로 삼으면 — 동시 타임아웃. 오매칭 대신 양쪽 다 미복구."""
-    _attempt(db, sample_member.member_id, snapshot=[1, 2], request_id="req-a")
-    _attempt(db, admin_member.member_id, snapshot=[1, 2],
-             started_at=T0 + timedelta(minutes=5), request_id="req-b")
+def test_recovers_even_when_upstream_omits_created_at(db, sample_member):
+    attempt = _attempt(db, sample_member.member_id)
+    kb = _brief(407, token_for=attempt)
+    kb.created_at = None
 
-    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
-        assert client.get(KB_LIST).json()["total"] == 0
+    with _client(db, sample_member, [kb]) as client:
+        assert client.get(KB_LIST).json()["total"] == 1
 
 
 def test_no_recovery_when_user_already_retried_successfully(db, sample_member):
-    """같은 이름·파일로 재시도에 성공했으면 — 구분 불가능한 중복 대신, 원본은 정리 잡이 회수한다."""
-    _attempt(db, sample_member.member_id, snapshot=[1, 2])
-    _attempt(db, sample_member.member_id, snapshot=[1, 2], state=AttemptState.SUCCEEDED,
+    """같은 이름·파일로 재시도에 성공했으면 원본은 복구하지 않는다 — 사용자는 이미 원하는 KB 를 가졌다.
+
+    토큰은 원본의 주인을 알려 줄 뿐, 사용자가 둘 다 원하는지는 알려 주지 않는다. 원본은 정리 잡이 회수한다.
+    """
+    original = _attempt(db, sample_member.member_id)
+    _attempt(db, sample_member.member_id, state=AttemptState.SUCCEEDED,
              started_at=T0 + timedelta(minutes=5), resolved=500, request_id="req-retry")
     _mapping(db, sample_member.member_id, surro_id=500)
 
-    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
+    with _client(db, sample_member, [_brief(407, token_for=original)]) as client:
         body = client.get(KB_LIST).json()
 
     assert body["total"] == 1, "재시도본만 보여야 한다"
     assert body["data"][0]["surro_knowledge_id"] == 500
 
 
-def test_unrelated_concurrent_timeout_does_not_block_recovery(db, sample_member, admin_member):
-    """이름·파일이 다른 동시 타임아웃은 서로의 복구를 막지 않는다.
+def test_other_users_concurrent_timeout_does_not_block_recovery(db, sample_member, admin_member):
+    """다른 사용자의 동시 타임아웃은 이름이 같아도 서로의 복구를 막지 않는다 — 각 KB 에 주인의 토큰이 있다."""
+    mine = _attempt(db, sample_member.member_id, request_id="req-a")
+    theirs = _attempt(db, admin_member.member_id, started_at=T0 + timedelta(minutes=5),
+                      request_id="req-b")
+    upstream = [_brief(407, token_for=mine), _brief(408, token_for=theirs)]
 
-    후보 선정이 시간 창만 보면 무관한 KB 까지 후보로 세어져, 생성이 몰리는 시간대에는
-    아무도 복구되지 않는다. 이름은 목록 응답에 있으므로 거르는 데 비용이 들지 않는다.
-    """
-    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2], request_id="req-a")
-    _attempt(db, admin_member.member_id, snapshot=[1, 2],
-             started_at=T0 + timedelta(minutes=5),
-             name="남의문서", filename="남의.pdf", request_id="req-b")
-    upstream = [_brief(407), _brief(408, name="남의문서")]
-
-    with _client(db, sample_member, upstream, detail=_detail(407)) as client:
+    with _client(db, sample_member, upstream) as client:
         body = client.get(KB_LIST).json()
 
-    assert body["total"] == 1, "무관한 타임아웃이 끼어도 자기 KB 는 복구돼야 한다"
-    assert body["data"][0]["surro_knowledge_id"] == 407
-    db.refresh(attempt)
-    assert attempt.state == AttemptState.RECOVERED
-
-
-def test_own_second_timeout_does_not_block_recovery(db, sample_member):
-    """같은 사용자가 두 번 타임아웃해도 복구된다 — 어느 시도의 결과든 소유자가 같다."""
-    a1 = _attempt(db, sample_member.member_id, snapshot=[1, 2], request_id="req-1")
-    a2 = _attempt(db, sample_member.member_id, snapshot=[1, 2],
-                  started_at=T0 + timedelta(minutes=5), request_id="req-2")
-
-    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
-        body = client.get(KB_LIST).json()
-
-    assert body["total"] == 1
-    assert body["data"][0]["created_by"] == sample_member.member_id
-    db.refresh(a1)
-    db.refresh(a2)
-    assert a1.state == AttemptState.RECOVERED, "먼저 시작한 시도에 붙인다"
-    assert a2.state == AttemptState.ORPHAN_SUSPECT, "나머지는 다음 조회를 기다린다"
+    assert [kb["surro_knowledge_id"] for kb in body["data"]] == [407]
+    db.refresh(mine)
+    db.refresh(theirs)
+    assert mine.state == AttemptState.RECOVERED
+    assert theirs.state == AttemptState.ORPHAN_SUSPECT, "남의 KB 는 그 주인이 목록을 열 때 복구된다"
 
 
 def test_recovery_writes_audit_log(db, sample_member):
     """복구는 소유권을 부여하는 유일한 자동 경로이므로 감사 기록이 남아야 한다."""
-    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2], request_id="req-orig")
+    attempt = _attempt(db, sample_member.member_id, request_id="req-orig")
 
-    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
+    with _client(db, sample_member, [_brief(407, token_for=attempt)]) as client:
         assert client.get(KB_LIST).json()["total"] == 1
 
     log = db.query(AuditLog).filter(AuditLog.resource_id == "407").one()
@@ -346,48 +328,35 @@ def test_recovery_writes_audit_log(db, sample_member):
     assert log.request_id == "req-orig", "원래 생성 요청과 연결돼야 추적할 수 있다"
 
 
-def test_no_recovery_while_another_users_create_is_pending(db, sample_member, admin_member):
+def test_no_recovery_of_a_kb_another_user_is_still_creating(db, sample_member, admin_member):
     """다른 사용자가 같은 이름·파일로 생성 중이면 그 결과를 가로채지 않는다.
 
-    B 의 시도는 pending 이라 아직 매핑이 없다. 여기서 A 가 복구해 버리면 created_by 가
-    A 로 굳고, 이후 B 의 후처리는 기존 매핑을 갱신만 하므로 소유권이 되돌아오지 않는다.
+    B 의 시도는 pending 이라 아직 매핑이 없다. 여기서 A 가 가져가면 created_by 가 A 로 굳고,
+    B 의 후처리는 기존 매핑을 갱신만 하므로 소유권이 되돌아오지 않는다.
     """
-    _attempt(db, sample_member.member_id, snapshot=[1, 2], request_id="req-a")
-    _attempt(db, admin_member.member_id, snapshot=[1, 2], state=AttemptState.PENDING,
-             started_at=T0 + timedelta(minutes=5), request_id="req-b")
+    _attempt(db, sample_member.member_id, request_id="req-a")
+    # 복구 창이 열려 있어야 "아직 생성 중" 이다 — 닫힌 pending 은 그 주인의 복구 대상이 된다.
+    theirs = _attempt(db, admin_member.member_id, state=AttemptState.PENDING,
+                      started_at=NOW - MAX_INGEST / 2, request_id="req-b")
 
-    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
+    with _client(db, sample_member, [_brief(407, token_for=theirs)]) as client:
         assert client.get(KB_LIST).json()["total"] == 0
 
     assert db.query(KnowledgeBase).filter(
         KnowledgeBase.surro_knowledge_id == 407
     ).first() is None, "A 의 매핑이 생기면 안 된다"
 
-    # B 의 생성이 정상 완료되면 소유자는 B 여야 한다.
-    kb = crud.create_knowledge_base(
-        db=db, name=NAME, description=None, created_by=admin_member.member_id,
-        surro_knowledge_id=407, collection_name="col_407",
-    )
-    assert kb.created_by == admin_member.member_id
 
+def test_recovery_makes_no_per_candidate_upstream_call(db, sample_member):
+    """판정에 필요한 값(토큰·이름·설명·컬렉션)은 목록 응답에 다 있다 — 후보마다 상세를 부르면 N+1 이다."""
+    attempts = [_attempt(db, sample_member.member_id, request_id=f"req-{i}") for i in range(3)]
+    upstream = [_brief(407 + i, token_for=a) for i, a in enumerate(attempts)]
+    detail_calls = []
 
-def test_own_pending_retry_does_not_block_recovery(db, sample_member):
-    """같은 사용자의 재시도는 충돌로 보지 않는다 — 어느 시도의 결과든 소유자가 같다.
+    with _client(db, sample_member, upstream, detail_calls=detail_calls) as client:
+        assert client.get(KB_LIST).json()["total"] == 3
 
-    타임아웃을 본 사용자는 대개 곧바로 재시도한다. 이것까지 막으면 가장 흔한 경로에서
-    자동 복구가 동작하지 않는다.
-    """
-    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2], request_id="req-1st")
-    _attempt(db, sample_member.member_id, snapshot=[1, 2], state=AttemptState.PENDING,
-             started_at=T0 + timedelta(minutes=5), request_id="req-retry")
-
-    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
-        body = client.get(KB_LIST).json()
-
-    assert body["total"] == 1
-    assert body["data"][0]["created_by"] == sample_member.member_id
-    db.refresh(attempt)
-    assert attempt.state == AttemptState.RECOVERED
+    assert detail_calls == []
 
 
 def test_finish_attempt_does_not_revive_a_terminal_attempt(db, sample_member):
@@ -395,95 +364,43 @@ def test_finish_attempt_does_not_revive_a_terminal_attempt(db, sample_member):
 
     관리자가 force 삭제로 시도를 끊은 직후, 진행 중이던 그 생성 요청이 타임아웃으로 돌아와
     상태를 orphan_suspect 로 덮어쓰면 시도가 다시 살아난다. 붙을 대상은 이미 업스트림에서
-    지워졌는데 시도 TTL 동안 남아, 같은 시간 창에 생긴 무관한 KB 를 계속 보호하고 다른
-    사용자의 자동 복구와 정리 잡까지 막는다.
+    지워졌는데 시도 TTL 동안 남아 다른 판정을 흐린다.
     """
     for terminal in (AttemptState.ABANDONED, AttemptState.RECOVERED, AttemptState.SUCCEEDED):
-        attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2],
-                           state=terminal, request_id=f"req-{terminal}")
+        attempt = _attempt(db, sample_member.member_id, state=terminal,
+                           request_id=f"req-{terminal}")
         crud.finish_attempt(attempt.id, state=AttemptState.ORPHAN_SUSPECT,
                             failure_kind="504")
         db.refresh(attempt)
         assert attempt.state == terminal, f"{terminal} 이 되살아났다"
 
 
-def test_recoverable_attempts_exclude_missing_snapshot(db, sample_member):
-    """스냅샷 없는 시도는 복구 후보 조회에서 빠져야 한다.
-
-    JSON 컬럼에 None 을 넣으면 SQL NULL 이 아니라 JSON null 로 저장되어 `IS NOT NULL` 에
-    그대로 걸린다. SQL 조건만 믿으면 스냅샷 없는 시도가 후보로 새어 나가고, 그러면 "이 시도
-    이후에 생긴 KB" 를 가려낼 수 없어 원래부터 있던 KB 를 자기 것으로 가져간다.
-    """
-    _attempt(db, sample_member.member_id, snapshot=None, request_id="req-none")
-    kept = _attempt(db, sample_member.member_id, snapshot=[1, 2], request_id="req-snap")
+def test_recoverable_attempts_do_not_require_a_snapshot(db, sample_member):
+    """스냅샷은 더 이상 기록하지 않는다 — 스냅샷 유무로 거르면 새 시도가 전부 복구 대상에서 빠진다."""
+    ids = [
+        _attempt(db, sample_member.member_id, snapshot=s, request_id=f"req-{i}").id
+        for i, s in enumerate([None, [1, 2]])
+    ]
 
     rows = crud.get_recoverable_attempts(db, sample_member.member_id, NOW)
 
-    assert [r.id for r in rows] == [kept.id]
+    assert [r.id for r in rows] == ids
 
 
-def test_no_recovery_while_another_users_snapshotless_create_is_pending(db, sample_member, admin_member):
-    """다른 사용자의 생성이 스냅샷 없이 진행 중이면 그 결과를 가로채지 않는다.
+def test_no_recovery_when_another_request_mapped_the_kb_first(db, sample_member, admin_member,
+                                                              monkeypatch):
+    """목록을 읽은 뒤 락을 잡기 전에 다른 요청이 먼저 복구를 끝낸 경우 — 중복 매핑 금지.
 
-    스냅샷은 업스트림 목록 조회가 실패할 때만 비는데, 고아가 생기는 상황이 정확히 그때다.
-    스냅샷이 없다고 경쟁자 후보에서 빼면 "모른다" 를 "경쟁자가 없다" 로 읽게 된다.
+    판정은 락 밖에서 읽은 목록으로 하므로, 락 안에서 다시 확인하지 않으면 이 틈을 막을 수 없다.
     """
-    _attempt(db, sample_member.member_id, snapshot=[1, 2], request_id="req-a")
-    _attempt(db, admin_member.member_id, snapshot=None, state=AttemptState.PENDING,
-             started_at=T0 + timedelta(minutes=5), request_id="req-b")
+    attempt = _attempt(db, sample_member.member_id)
 
-    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
-        assert client.get(KB_LIST).json()["total"] == 0
+    def other_request_wins_then_lock(_db, surro_id):
+        _mapping(db, admin_member.member_id, surro_id=surro_id)
+        return True
+    monkeypatch.setattr(crud, "try_lock_surro_knowledge_id", other_request_wins_then_lock)
 
-    assert db.query(KnowledgeBase).filter(
-        KnowledgeBase.surro_knowledge_id == 407
-    ).first() is None, "A 의 매핑이 생기면 안 된다"
-
-
-def test_snapshotless_attempt_outside_window_does_not_block_recovery(db, sample_member, admin_member):
-    """스냅샷이 없어도 시간 창 밖이면 경쟁자가 아니다 — 보호 범위가 무한정 넓어지지 않는다.
-
-    스냅샷 없는 시도를 전부 경쟁자로 세면 업스트림이 한 번 흔들린 뒤로 아무도 복구되지 않는다.
-    """
-    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2], request_id="req-a")
-    # KB 가 생긴 뒤에 시작한 시도는 그 KB 를 만들었을 수 없다.
-    _attempt(db, admin_member.member_id, snapshot=None, state=AttemptState.PENDING,
-             started_at=T0 + timedelta(minutes=30), request_id="req-b")
-
-    with _client(db, sample_member, [_brief(407, created_at=T0 + timedelta(minutes=10))],
-                 detail=_detail(407)) as client:
-        assert client.get(KB_LIST).json()["total"] == 1
-
-    db.refresh(attempt)
-    assert attempt.state == AttemptState.RECOVERED
-
-
-def test_empty_snapshot_is_not_treated_as_missing(db, sample_member, admin_member):
-    """빈 스냅샷은 "업스트림에 KB 가 0개" 라는 정상 판정이다 — 조회 실패(None)와 다르다.
-
-    둘을 섞으면 첫 KB 를 만드는 사용자의 시도가 모든 복구를 막는다.
-    """
-    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2], request_id="req-a")
-    _attempt(db, admin_member.member_id, snapshot=[], state=AttemptState.PENDING,
-             started_at=T0 + timedelta(minutes=5), request_id="req-b")
-
-    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
-        # B 의 빈 스냅샷은 407 을 담고 있지 않으므로 B 는 경쟁자가 맞다 — 복구하지 않는다.
-        assert client.get(KB_LIST).json()["total"] == 0
-
-    db.refresh(attempt)
-    assert attempt.state == AttemptState.ORPHAN_SUSPECT
-
-
-def test_no_recovery_when_mapping_appeared_during_upstream_call(db, sample_member, admin_member):
-    """상세 조회를 await 하는 사이 다른 요청이 먼저 복구를 끝낸 경우 — 중복 매핑 금지."""
-    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2])
-
-    def other_request_recovers_first(_kb_id):
-        _mapping(db, admin_member.member_id, surro_id=407)
-
-    with _client(db, sample_member, [_brief(407)], detail=_detail(407),
-                 on_detail=other_request_recovers_first) as client:
+    with _client(db, sample_member, [_brief(407, token_for=attempt)]) as client:
         assert client.get(KB_LIST).status_code == 200
 
     db.refresh(attempt)
@@ -493,19 +410,20 @@ def test_no_recovery_when_mapping_appeared_during_upstream_call(db, sample_membe
     ).count() == 1, "매핑이 두 개가 되면 안 된다"
 
 
-def test_no_recovery_when_attempt_was_abandoned_during_upstream_call(db, sample_member):
-    """상세 조회를 await 하는 사이 관리자가 force 삭제로 시도를 끊은 경우.
+def test_no_recovery_when_the_attempt_was_abandoned_first(db, sample_member, monkeypatch):
+    """목록을 읽은 뒤 락을 잡기 전에 관리자가 force 삭제로 시도를 끊은 경우.
 
     그대로 복구하면 업스트림에서 사라진 KB 를 가리키는 매핑이 생긴다.
     """
-    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2])
+    attempt = _attempt(db, sample_member.member_id)
 
-    def admin_force_deletes(_kb_id):
+    def admin_force_deletes_then_lock(_db, _surro_id):
         attempt.state = AttemptState.ABANDONED
         db.flush()
+        return True
+    monkeypatch.setattr(crud, "try_lock_surro_knowledge_id", admin_force_deletes_then_lock)
 
-    with _client(db, sample_member, [_brief(407)], detail=_detail(407),
-                 on_detail=admin_force_deletes) as client:
+    with _client(db, sample_member, [_brief(407, token_for=attempt)]) as client:
         assert client.get(KB_LIST).json()["total"] == 0
 
     assert db.query(KnowledgeBase).filter(
@@ -513,18 +431,17 @@ def test_no_recovery_when_attempt_was_abandoned_during_upstream_call(db, sample_
     ).first() is None
 
 
-def test_lock_is_released_before_the_next_candidate_upstream_call(db, sample_member, monkeypatch):
-    """후보 하나를 락 안에서 건너뛰었으면, 다음 후보의 업스트림 조회 전에 트랜잭션을 닫아야 한다.
+def test_skipped_claim_ends_the_transaction_before_the_next_lock(db, sample_member, monkeypatch):
+    """후보 하나를 락 안에서 건너뛰었으면, 다음 후보의 락을 잡기 전에 트랜잭션을 닫아야 한다.
 
-    트랜잭션 범위 락은 commit/rollback 으로만 풀린다. 쥔 채로 await 하면, 같은 KB 를 다루는
-    다른 요청이 그 락을 기다리며 이벤트 루프를 멈춰 서로를 기다린다.
+    트랜잭션 범위 락은 commit/rollback 으로만 풀린다. 닫지 않으면 건너뛴 KB 의 락이 요청이
+    끝날 때까지 남아, 그동안 그 KB 에 대한 관리자 삭제가 409 로 막힌다.
     트랜잭션이 닫혔는지는 세션의 commit 호출로 관찰한다.
     """
     events = []
-    a1 = _attempt(db, sample_member.member_id, snapshot=[1, 2], name="첫번째",
-                  request_id="req-1")
-    a2 = _attempt(db, sample_member.member_id, snapshot=[1, 2], name="두번째",
-                  started_at=T0 + timedelta(minutes=1), request_id="req-2")
+    a1 = _attempt(db, sample_member.member_id, request_id="req-1")
+    a2 = _attempt(db, sample_member.member_id, started_at=T0 + timedelta(minutes=1),
+                  request_id="req-2")
 
     def fake_try_lock(_db, surro_id):
         events.append(f"lock:{surro_id}")
@@ -538,15 +455,13 @@ def test_lock_is_released_before_the_next_candidate_upstream_call(db, sample_mem
         real_commit()
     monkeypatch.setattr(db, "commit", spy_commit)
 
-    upstream = [_brief(407, name="첫번째"), _brief(408, name="두번째")]
+    upstream = [_brief(407, token_for=a1), _brief(408, token_for=a2)]
 
-    with _client(db, sample_member, upstream,
-                 detail=lambda kb_id: _detail(kb_id, name=f"kb{kb_id}"),
-                 on_detail=lambda kb_id: events.append(f"detail:{kb_id}")) as client:
+    with _client(db, sample_member, upstream) as client:
         assert client.get(KB_LIST).status_code == 200
 
-    assert events[:4] == ["detail:407", "lock:407", "commit", "detail:408"], (
-        f"락을 쥔 채 다음 후보를 await 했다: {events}"
+    assert events[:3] == ["lock:407", "commit", "lock:408"], (
+        f"락을 쥔 채 다음 후보로 넘어갔다: {events}"
     )
     db.refresh(a1)
     db.refresh(a2)
@@ -557,13 +472,12 @@ def test_lock_is_released_before_the_next_candidate_upstream_call(db, sample_mem
 def test_recovery_defers_when_lock_is_contended(db, sample_member, monkeypatch):
     """락 경합 시 복구를 보류한다 — 기다리지 않는다.
 
-    복구는 지금 당장 해야 하는 일이 아니다. 기다리면 그동안 이벤트 루프가 멈춰, 락을 쥔
-    요청의 업스트림 응답을 이어받을 주체가 사라진다.
+    복구는 지금 당장 해야 하는 일이 아니다. 기다리면 그동안 이벤트 루프가 멈춘다.
     """
-    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2])
+    attempt = _attempt(db, sample_member.member_id)
     monkeypatch.setattr(crud, "try_lock_surro_knowledge_id", lambda *a, **k: False)
 
-    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
+    with _client(db, sample_member, [_brief(407, token_for=attempt)]) as client:
         assert client.get(KB_LIST).json()["total"] == 0
 
     db.refresh(attempt)
@@ -575,14 +489,15 @@ def test_recovery_defers_when_lock_is_contended(db, sample_member, monkeypatch):
 
 def test_recovery_completes_on_the_next_call_after_contention(db, sample_member, monkeypatch):
     """보류된 복구는 다음 목록 조회에서 완료된다 — 경합이 영구 지연이 되면 안 된다."""
-    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2])
+    attempt = _attempt(db, sample_member.member_id)
+    upstream = [_brief(407, token_for=attempt)]
 
     with monkeypatch.context() as m:
         m.setattr(crud, "try_lock_surro_knowledge_id", lambda *a, **k: False)
-        with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
+        with _client(db, sample_member, upstream) as client:
             assert client.get(KB_LIST).json()["total"] == 0
 
-    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
+    with _client(db, sample_member, upstream) as client:
         assert client.get(KB_LIST).json()["total"] == 1
 
     db.refresh(attempt)
@@ -631,12 +546,23 @@ def test_try_lock_does_not_wait_and_reports_contention():
     assert crud.try_lock_surro_knowledge_id(_Session(False), 407) is False, "경합을 삼키면 안 된다"
 
 
+def test_recoverable_attempts_are_id_ordered(db, sample_member):
+    """호출자가 이 순서로 후보 KB 락을 잡는다 — 순서가 흔들리면 동시 요청이 데드락에 빠진다."""
+    ids = [
+        _attempt(db, sample_member.member_id, snapshot=[1], request_id=f"req-{i}").id
+        for i in range(3)
+    ]
+
+    rows = crud.get_recoverable_attempts(db, sample_member.member_id, NOW)
+    assert [r.id for r in rows] == sorted(ids)
+
+
 def test_recoverable_attempts_include_pending_only_after_window_closes(db, sample_member):
     """창이 열린 pending 은 생성 요청이 아직 진행 중일 수 있어 대상이 아니다."""
-    _attempt(db, sample_member.member_id, snapshot=[1, 2], state=AttemptState.PENDING,
-             started_at=NOW - MAX_INGEST / 2)
-    stale = _attempt(db, sample_member.member_id, snapshot=[1, 2], state=AttemptState.PENDING,
-                     started_at=NOW - MAX_INGEST - timedelta(minutes=10))
+    _attempt(db, sample_member.member_id, state=AttemptState.PENDING,
+             started_at=NOW - MAX_INGEST / 2, request_id="req-open")
+    stale = _attempt(db, sample_member.member_id, state=AttemptState.PENDING,
+                     started_at=NOW - MAX_INGEST - timedelta(minutes=10), request_id="req-stale")
 
     ids = [a.id for a in crud.get_recoverable_attempts(db, sample_member.member_id, NOW)]
 
@@ -650,11 +576,11 @@ def test_recovers_attempt_left_pending_by_a_killed_process(db, sample_member):
     복구하지 않으면 그 사용자의 KB 는 보호만 받다가 고아로 남는다.
     """
     started = NOW - MAX_INGEST - timedelta(minutes=10)
-    attempt = _attempt(db, sample_member.member_id, snapshot=[1, 2], state=AttemptState.PENDING,
+    attempt = _attempt(db, sample_member.member_id, state=AttemptState.PENDING,
                        started_at=started)
-    upstream = [_brief(407, created_at=started + timedelta(minutes=5))]
+    upstream = [_brief(407, created_at=started + timedelta(minutes=5), token_for=attempt)]
 
-    with _client(db, sample_member, upstream, detail=_detail(407)) as client:
+    with _client(db, sample_member, upstream) as client:
         body = client.get(KB_LIST).json()
 
     assert body["total"] == 1
@@ -663,26 +589,15 @@ def test_recovers_attempt_left_pending_by_a_killed_process(db, sample_member):
     assert attempt.state == AttemptState.RECOVERED
 
 
-def test_recoverable_attempts_are_id_ordered(db, sample_member):
-    """호출자가 이 순서로 후보 KB 락을 잡는다 — 순서가 흔들리면 동시 요청이 데드락에 빠진다."""
-    ids = [
-        _attempt(db, sample_member.member_id, snapshot=[1], request_id=f"req-{i}").id
-        for i in range(3)
-    ]
-
-    rows = crud.get_recoverable_attempts(db, sample_member.member_id, NOW)
-    assert [r.id for r in rows] == sorted(ids)
-
-
 def test_list_survives_recovery_failure(db, sample_member, monkeypatch):
     """부가 기능이 주 기능을 깨면 안 된다."""
-    _attempt(db, sample_member.member_id, snapshot=[1, 2])
+    _attempt(db, sample_member.member_id)
     monkeypatch.setattr(
         crud, "get_recoverable_attempts",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 
-    with _client(db, sample_member, [_brief(407)], detail=_detail(407)) as client:
+    with _client(db, sample_member, [_brief(407)]) as client:
         assert client.get(KB_LIST).status_code == 200
 
 

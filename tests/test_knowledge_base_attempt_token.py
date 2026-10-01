@@ -130,7 +130,6 @@ def _owner_of(db, surro_id):
 
 # ---------- 시나리오 ----------
 
-@pytest.mark.xfail(strict=True, reason="기존 설계: 같은 이름의 동시 타임아웃은 양쪽 모두 복구를 포기한다")
 def test_same_name_concurrent_timeouts_each_recover_to_their_owner(
         db, sample_member, admin_member, upstream):
     """alice 와 bob 이 같은 이름·파일로 연달아 생성했고 둘 다 타임아웃이 났다.
@@ -153,7 +152,6 @@ def test_same_name_concurrent_timeouts_each_recover_to_their_owner(
     assert _owner_of(db, 408) == bob.member_id
 
 
-@pytest.mark.xfail(strict=True, reason="기존 설계: 생성 직전 목록 조회가 실패하면 그 시도는 복구 대상에서 빠진다")
 def test_timeout_is_recovered_even_if_the_pre_create_list_failed(db, sample_member, upstream):
     """업스트림 목록 조회가 실패하던 때 생성이 타임아웃 났고, 업스트림은 KB 를 끝까지 만들었다.
 

@@ -421,7 +421,7 @@ def _classify_failure(status_code: int) -> str:
     return AttemptState.ABANDONED
 
 
-def _claim_candidate(db: Session, attempt, candidate, detail) -> bool:
+def _claim_candidate(db: Session, attempt, candidate) -> bool:
     """락 안에서 판정을 다시 하고 매핑을 만든다 — 성공하면 True."""
     if not knowledge_base_crud.try_lock_surro_knowledge_id(db, candidate.id):
         return False     # 다른 요청이 이 KB 를 다루는 중 — 다음 목록 조회에서 다시 시도한다
@@ -434,59 +434,48 @@ def _claim_candidate(db: Session, attempt, candidate, detail) -> bool:
 
     knowledge_base_crud.create_knowledge_base(
         db=db,
-        name=detail.name,
-        description=detail.description,
+        name=candidate.name,
+        description=candidate.description,
         created_by=attempt.member_id,
         surro_knowledge_id=candidate.id,
-        collection_name=detail.collection_name,
+        collection_name=candidate.collection_name,
     )
     return True
 
 
-async def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
-    """호출자의 고아 KB 복구 시도. 복구한 건수 반환. 
-    소유권을 확실히 판정할 수 없는 경우에는 복구하지 않는다. """
+def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
+    """호출자의 고아 KB 복구 시도. 복구한 건수 반환.
+    시도가 실어 보낸 토큰을 가진 KB 가 정확히 하나일 때만 복구한다. """
     now = datetime.now(timezone.utc)
     attempts = knowledge_base_crud.get_recoverable_attempts(db, current_user.member_id, now)
     if not attempts:
         return 0
 
     known_ids = knowledge_base_crud.get_known_surro_ids(db)
-    conflicting = knowledge_base_crud.get_conflicting_attempts(db, now, current_user.member_id)
     recovered = 0
 
     for attempt in attempts:
+        token = make_token(attempt.id, attempt.request_id)
         candidates = [
             kb for kb in external_kbs
-            if kb.id not in known_ids
-            and kb.name == attempt.name
-            and getattr(kb, "created_at", None) is not None
-            and knowledge_base_crud.find_protecting_attempts(kb, [attempt])
+            if kb.id not in known_ids and kb.attempt_token == token
         ]
-        # 후보가 없으면 아직 생성되지 않은 것이고, 여러 개면 소유권을 특정할 수 없다.
+        # 토큰은 업스트림 화면에 그대로 보여 description 을 복사한 KB 가 섞일 수 있다.
         if len(candidates) != 1:
-            continue     
+            continue
         candidate = candidates[0]
 
-        # 다른 사용자의 시도가 같은 KB를 가리키면 오배정 위험이 있음으로 복구하지 않는다. 
-        rivals = [t for t in conflicting if t.name == attempt.name]
-        if knowledge_base_crud.find_protecting_attempts(candidate, rivals):
-            continue  
+        # 같은 이름·파일로 재시도에 성공했으면 원본은 복구하지 않고 정리 잡에 맡긴다.
         if knowledge_base_crud.find_duplicate_success(db, attempt) is not None:
-            continue   
-
-        # 후보가 하나로 좁혀진 뒤에 상세 조회를 하여 업로드 파일명을 확인한다(N+1 회피).
-        detail = await knowledge_base_service.get_knowledge_base(candidate.id, _user_info(current_user))
-        if detail is None or not any(f.name == attempt.filename for f in detail.files):
             continue
 
-        if not _claim_candidate(db, attempt, candidate, detail):
+        if not _claim_candidate(db, attempt, candidate):
             # claim 실패 후 트랜잭션을 종료해 락을 다음 후보까지 유지하지 않는다.
             db.commit()
             continue
 
         knowledge_base_crud.mark_recovered(attempt.id, candidate.id)
-        
+
         # 같은 요청의 다음 시도에서 이미 복구된 KB를 다시 조회하지 않는다.
         known_ids.add(candidate.id)
         recovered += 1
@@ -499,7 +488,7 @@ async def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
             resource_id=str(candidate.id),
             target_member_id=attempt.member_id,
             request_id=attempt.request_id,
-            metadata={"recovered": True, "attempt_id": attempt.id, "name": detail.name},
+            metadata={"recovered": True, "attempt_id": attempt.id, "name": candidate.name},
         )
         logger.info(
             "Recovered orphan knowledge base: surro_id=%s, member_id=%s, attempt_id=%s",
@@ -781,7 +770,7 @@ async def get_knowledge_bases(
 
     # 부가 기능이 주 기능을 깨면 사용자가 목록 자체를 못 본다.
     try:
-        if await _try_recover_orphans(db, current_user, external_kbs):
+        if _try_recover_orphans(db, current_user, external_kbs):
             knowledge_bases, total = _load_page()
     except Exception:
         # 일부만 복구하고 실패했을 수 있다. 그 커밋이 위에서 읽어둔 객체를 만료시켰으므로,
