@@ -4,7 +4,7 @@
 재현한다. 업스트림 대역은 받은 description 을 가공 없이 저장한다는 전제만 흉내 낸다.
 """
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import HTTPException
@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from app.common.kb_attempt_token import (
     MAX_USER_DESCRIPTION,
     attach_token,
+    attempt_token,
     make_token,
     split_token,
 )
@@ -171,23 +172,37 @@ def test_timeout_is_recovered_even_if_the_pre_create_list_failed(db, sample_memb
 
 # ---------- 토큰 ----------
 
+_T = datetime(2026, 9, 30, 3, 0, 0, 123456, tzinfo=timezone.utc)
+
+
 def test_token_is_deterministic_and_distinct_per_attempt():
-    assert make_token(1, "req-a") == make_token(1, "req-a")
-    assert make_token(1, "req-a") != make_token(2, "req-a")
-    assert len(make_token(1, "req-a")) == 16
-    int(make_token(1, "req-a"), 16)
+    assert make_token(1, "req-a", _T) == make_token(1, "req-a", _T)
+    assert make_token(1, "req-a", _T) != make_token(2, "req-a", _T)
+    assert len(make_token(1, "req-a", _T)) == 16
+    int(make_token(1, "req-a", _T), 16)
 
 
 def test_reused_attempt_id_gets_a_different_token():
-    """DB 복원으로 id 가 다시 발급돼도, 요청이 다르면 토큰이 겹치지 않는다."""
-    assert make_token(101, "req-before-restore") != make_token(101, "req-after-restore")
-    assert len(make_token(101, None)) == 16
+    """DB 복원으로 id 가 다시 발급돼도, 요청이나 시작 시각이 다르면 토큰이 겹치지 않는다.
+
+    클라이언트가 X-Request-ID 를 고정해 보내면 request_id 만으로는 구분되지 않는다.
+    """
+    assert make_token(101, "req-before", _T) != make_token(101, "req-after", _T)
+    assert make_token(101, "fixed", _T) != make_token(101, "fixed", _T + timedelta(days=3))
+    assert len(make_token(101, None, _T)) == 16
+
+
+def test_token_does_not_depend_on_how_the_db_returns_the_time():
+    """SQLite 는 naive, PostgreSQL 은 aware(세션 타임존)로 돌려준다 — 같은 시각이면 같은 토큰이다."""
+    kst = timezone(timedelta(hours=9))
+    naive_utc = _T.replace(tzinfo=None)
+    assert make_token(1, "r", _T) == make_token(1, "r", naive_utc) == make_token(1, "r", _T.astimezone(kst))
 
 
 @pytest.mark.parametrize("original", [None, "", "사내 규정 모음", "끝이 공백인 설명 "])
 def test_attach_then_split_restores_user_description(original):
     """빈 설명은 토큰만 저장되고, 읽을 때는 None 으로 돌아온다."""
-    token = make_token(7, "req-a")
+    token = make_token(7, "req-a", _T)
     restored, found = split_token(attach_token(original, token))
     assert found == token
     assert restored == (original or None)
@@ -196,19 +211,20 @@ def test_attach_then_split_restores_user_description(original):
 def test_split_leaves_text_without_a_valid_token_untouched():
     """형식이 정확히 맞지 않으면 사용자 텍스트다 — 잘라내면 사용자 설명이 사라진다."""
     for text in ["설명", "설명 [kbt:xyz]", "설명 [kbt:0123456789abcdef] 뒤에 글자",
-                 "설명 [kbt:0123456789ABCDEF]", "설명[kbt:0123456789abcdef]"]:
+                 "설명 [kbt:0123456789ABCDEF]", "설명[kbt:0123456789abcdef]",
+                 "설명 [kbt:0123456789abcdef]\n"]:
         assert split_token(text) == (text, None)
 
 
 def test_user_description_limit_leaves_room_for_the_token():
-    longest = attach_token("가" * MAX_USER_DESCRIPTION, make_token(1, "req-a"))
+    longest = attach_token("가" * MAX_USER_DESCRIPTION, make_token(1, "req-a", _T))
     assert len(longest) == 255
     assert MAX_USER_DESCRIPTION == 232
 
 
 def test_upstream_schemas_hide_the_token_from_description():
     """업스트림 응답은 모두 이 두 스키마로 파싱된다 — 여기서 떼어내면 이후 어느 경로로도 나가지 않는다."""
-    tagged = attach_token("설명", make_token(3, "req-a"))
+    tagged = attach_token("설명", make_token(3, "req-a", _T))
     brief = ExternalKnowledgeBaseBriefResponse(
         id=1, name="n", description=tagged, collection_name="c",
         chunk_size=1, chunk_overlap=0, top_k=1, threshold=0.1,
@@ -220,7 +236,7 @@ def test_upstream_schemas_hide_the_token_from_description():
     )
     for parsed in (brief, detail):
         assert parsed.description == "설명"
-        assert parsed.attempt_token == make_token(3, "req-a")
+        assert parsed.attempt_token == make_token(3, "req-a", _T)
         assert "attempt_token" not in parsed.model_dump()
         assert "kbt:" not in parsed.model_dump_json()
 
@@ -232,7 +248,7 @@ def test_create_sends_the_attempt_token_in_description(db, sample_member, upstre
         _create(client, description="사내 규정")
 
     attempt = db.query(KnowledgeBaseCreateAttempt).one()
-    assert upstream.sent_descriptions == [attach_token("사내 규정", make_token(attempt.id, attempt.request_id))]
+    assert upstream.sent_descriptions == [attach_token("사내 규정", attempt_token(attempt))]
 
 
 def test_create_without_description_still_sends_a_token(db, sample_member, upstream):
@@ -240,7 +256,7 @@ def test_create_without_description_still_sends_a_token(db, sample_member, upstr
         _create(client)
 
     attempt = db.query(KnowledgeBaseCreateAttempt).one()
-    assert upstream.sent_descriptions == [attach_token(None, make_token(attempt.id, attempt.request_id))]
+    assert upstream.sent_descriptions == [attach_token(None, attempt_token(attempt))]
 
 
 def test_create_does_not_list_upstream_first(db, sample_member, upstream):

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-from app.common.kb_attempt_token import attach_token, make_token
+from app.common.kb_attempt_token import attach_token, attempt_token, make_token
 from app.auth import get_current_user
 from app.config import settings
 from app.cruds.knowledge_base import knowledge_base_crud as crud
@@ -56,7 +56,7 @@ def _brief(kb_id, name=NAME, created_at=None, token_for=None):
     """`token_for` 에 시도를 주면, 그 시도가 생성 요청에 실어 보낸 토큰이 description 에 들어 있다."""
     return ExternalKnowledgeBaseBriefResponse(
         id=kb_id, name=name,
-        description=(attach_token(None, make_token(token_for.id, token_for.request_id))
+        description=(attach_token(None, attempt_token(token_for))
                      if token_for is not None else None),
         collection_name=f"col_{kb_id}",
         chunk_size=500, chunk_overlap=50, top_k=3, threshold=0.4,
@@ -132,11 +132,12 @@ def test_classify_failure_maps_status_to_state():
 
 def test_attempt_is_recorded_before_upstream_call(db, sample_member):
     """시도는 pending 으로 먼저 기록되고, 종료 시 상태·시각이 갱신된다."""
-    attempt_id = crud.create_attempt(
+    attempt_id, token = crud.create_attempt(
         member_id=sample_member.member_id, name=NAME, filename=FILENAME, request_id="req-x",
     )
     row = db.get(KnowledgeBaseCreateAttempt, attempt_id)
     assert row.state == AttemptState.PENDING
+    assert token == attempt_token(row), "생성 요청에 실은 토큰을 저장된 행으로 다시 만들 수 있어야 한다"
 
     crud.finish_attempt(attempt_id, state=AttemptState.ORPHAN_SUSPECT, failure_kind="504")
     db.refresh(row)
@@ -244,9 +245,12 @@ def test_kb_from_before_a_restore_is_not_claimed_by_a_reused_attempt_id(db, samp
     복원 전에 그 id 로 만든 KB 는 업스트림에 남아 매핑 없는 고아가 된다. 토큰이 id 만으로
     정해지면 새 시도가 그 KB 를 자기 것으로 가져간다 — 다른 사용자의 KB 일 수 있다.
     """
-    attempt = _attempt(db, sample_member.member_id, request_id="req-after-restore")
+    # 클라이언트가 X-Request-ID 를 고정해 보내 request_id 까지 같은 최악의 경우다.
+    attempt = _attempt(db, sample_member.member_id, request_id="fixed-header")
     before_restore = _brief(407)
-    before_restore.attempt_token = make_token(attempt.id, "req-before-restore")
+    before_restore.attempt_token = make_token(
+        attempt.id, "fixed-header", attempt.started_at - timedelta(days=3)
+    )
 
     with _client(db, sample_member, [before_restore]) as client:
         assert client.get(KB_LIST).json()["total"] == 0

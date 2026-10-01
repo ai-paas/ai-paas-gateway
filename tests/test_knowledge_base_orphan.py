@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-from app.common.kb_attempt_token import attach_token, make_token
+from app.common.kb_attempt_token import attach_token, attempt_token
 from app.auth import get_current_admin_user, get_current_user
 from app.config import settings
 from app.database import get_db
@@ -28,7 +28,7 @@ def _external(kb_id, name="kb", created_at=None, token_for=None):
     return ExternalKnowledgeBaseBriefResponse(
         id=kb_id,
         name=name,
-        description=(attach_token(None, make_token(token_for.id, token_for.request_id))
+        description=(attach_token(None, attempt_token(token_for))
                      if token_for is not None else None),
         collection_name=f"kb_col_{kb_id}",
         chunk_size=500,

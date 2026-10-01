@@ -1,13 +1,13 @@
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from sqlalchemy import and_, or_, text
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
-from app.common.kb_attempt_token import make_token
+from app.common.kb_attempt_token import attempt_token
 from app.config import settings
 from app.database import SessionLocal
 from app.models.knowledge_base import AttemptState, KnowledgeBase, KnowledgeBaseCreateAttempt
@@ -203,10 +203,12 @@ class KnowledgeBaseCRUD:
             name: str,
             filename: Optional[str],
             request_id: Optional[str],
-    ) -> int:
-        """MLOps 호출 전에 시도를 기록하고 id 를 돌려준다.
+    ) -> Tuple[int, str]:
+        """MLOps 호출 전에 시도를 기록하고 (id, 상관 토큰) 을 돌려준다.
 
         이 쓰기가 실패하면 호출자는 MLOps 를 부르지 않고 종료해 외부 부작용 없이 실패한다.
+        토큰은 커밋 뒤 DB 에서 다시 읽은 started_at 으로 만든다 — 복구·보호 판정이 읽을 값과
+        같아야 하므로, 파이썬 쪽 시각으로 만들면 안 된다.
         """
         db = SessionLocal()
         try:
@@ -219,7 +221,8 @@ class KnowledgeBaseCRUD:
             )
             db.add(attempt)
             db.commit()
-            return attempt.id
+            db.refresh(attempt)
+            return attempt.id, attempt_token(attempt)
         finally:
             db.close()
 
@@ -372,7 +375,7 @@ class KnowledgeBaseCRUD:
         token = getattr(external_kb, "attempt_token", None)
         if token is None:
             return []
-        return [t for t in live_attempts if make_token(t.id, t.request_id) == token]
+        return [t for t in live_attempts if attempt_token(t) == token]
 
     def is_protected(self, external_kb, live_attempts) -> bool:
         """관리자 삭제와 정리 잡이 보호해야 하는 KB 인지 판정 — 두 삭제 경로 공통."""

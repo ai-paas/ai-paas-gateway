@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Query, 
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_admin_user, get_current_user
-from app.common.kb_attempt_token import MAX_USER_DESCRIPTION, attach_token, make_token
+from app.common.kb_attempt_token import MAX_USER_DESCRIPTION, attach_token, attempt_token
 from app.common.sort import parse_sort, resolve_sort_columns
 from app.cruds.knowledge_base import knowledge_base_crud
 from app.database import get_db
@@ -456,7 +456,7 @@ def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
     recovered = 0
 
     for attempt in attempts:
-        token = make_token(attempt.id, attempt.request_id)
+        token = attempt_token(attempt)
         candidates = [
             kb for kb in external_kbs
             if kb.id not in known_ids and kb.attempt_token == token
@@ -610,19 +610,18 @@ async def create_knowledge_base(
     user_info = _user_info(current_user)
 
     # 시도 레코드를 MLOps 호출 전에 남긴다. 응답을 받지 못해도 소유자와 복구 후보가 남는다.
-    request_id = getattr(request.state, "request_id", None)
-    attempt_id = knowledge_base_crud.create_attempt(
+    attempt_id, token = knowledge_base_crud.create_attempt(
         member_id=current_user.member_id,
         name=name,
         filename=file.filename,
-        request_id=request_id,
+        request_id=getattr(request.state, "request_id", None),
     )
 
     try:
         external_kb = await knowledge_base_service.create_knowledge_base(
             name=name,
             # 응답을 못 받아도 업스트림 목록에서 이 시도의 KB 를 찾을 수 있도록 토큰을 실어 보낸다.
-            description=attach_token(description, make_token(attempt_id, request_id)),
+            description=attach_token(description, token),
             file=file,
             language_id=language_id,
             embedding_model_id=embedding_model_id,

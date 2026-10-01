@@ -201,7 +201,7 @@ class OrphanKnowledgeBaseItem(BaseModel):
     created_at: Optional[datetime] = Field(None, description="업스트림 생성 시간")
     is_protected: bool = Field(
         ...,
-        description="복구 대기 — 살아 있는 생성 시도가 이 KB 를 후보로 삼고 있어 곧 주인이 정해질 수 있다",
+        description="복구 대기 — 이 KB 를 만든 생성 시도가 아직 살아 있어 곧 주인이 정해질 수 있다",
     )
     protected_by: Optional[str] = Field(
         None, description="이 KB 를 지켜보는 시도의 요청자와 시각 (is_protected 인 경우)"
