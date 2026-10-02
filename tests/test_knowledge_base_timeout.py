@@ -81,10 +81,15 @@ def test_add_file_uses_dedicated_timeout(monkeypatch):
 
 
 def test_create_knowledge_base_timeout_returns_504_with_message(monkeypatch):
-    async def fake_request(method, url, user_info=None, **kwargs):
+    monkeypatch.setattr(knowledge_base_service, "access_token", "tok")
+    monkeypatch.setattr(
+        knowledge_base_service, "token_expires_at", datetime.now() + timedelta(hours=1)
+    )
+
+    async def fake_post(url, **kwargs):
         raise httpx.ReadTimeout("")
 
-    monkeypatch.setattr(knowledge_base_service, "_make_authenticated_request", fake_request)
+    monkeypatch.setattr(knowledge_base_service.client, "post", fake_post)
 
     with pytest.raises(Exception) as exc_info:
         asyncio.run(knowledge_base_service.create_knowledge_base(
@@ -209,3 +214,84 @@ def test_delete_knowledge_base_route_passes_through_503(monkeypatch, db, sample_
         response = client.delete("/api/v1/knowledge-bases/777")
 
     assert response.status_code == 503
+
+
+def _preset_token(monkeypatch):
+    monkeypatch.setattr(knowledge_base_service, "access_token", "tok")
+    monkeypatch.setattr(
+        knowledge_base_service, "token_expires_at", datetime.now() + timedelta(hours=1)
+    )
+
+
+@pytest.mark.parametrize("timeout_exc", [httpx.ReadTimeout, httpx.PoolTimeout, httpx.ConnectTimeout])
+def test_make_authenticated_request_timeout_returns_504(monkeypatch, timeout_exc):
+    # ConnectTimeout 은 ConnectError(503) 가 아니라 TimeoutException 계열이라 504 여야 함
+    _preset_token(monkeypatch)
+
+    async def fake_get(url, **kwargs):
+        raise timeout_exc("")
+
+    monkeypatch.setattr(knowledge_base_service.client, "get", fake_get)
+
+    with pytest.raises(Exception) as exc_info:
+        asyncio.run(
+            knowledge_base_service._make_authenticated_request("GET", "http://x/kb")
+        )
+
+    err = exc_info.value
+    assert getattr(err, "status_code", None) == 504
+    assert getattr(err, "detail", "") == "Knowledge base request timed out"
+
+
+def test_add_file_timeout_returns_504_with_message(monkeypatch):
+    _preset_token(monkeypatch)
+
+    async def fake_post(url, **kwargs):
+        raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(knowledge_base_service.client, "post", fake_post)
+
+    with pytest.raises(Exception) as exc_info:
+        asyncio.run(knowledge_base_service.add_file(1, _make_upload()))
+
+    err = exc_info.value
+    assert getattr(err, "status_code", None) == 504
+    assert getattr(err, "detail", "") == "Adding file to knowledge base timed out"
+
+
+def test_authenticate_timeout_returns_504(monkeypatch):
+    async def fake_post(url, **kwargs):
+        raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(knowledge_base_service.client, "post", fake_post)
+
+    with pytest.raises(Exception) as exc_info:
+        asyncio.run(knowledge_base_service._authenticate())
+
+    err = exc_info.value
+    assert getattr(err, "status_code", None) == 504
+    assert getattr(err, "detail", "") == "Authentication service timed out"
+
+
+def test_search_route_timeout_returns_504(monkeypatch, db, sample_member):
+    # 콜드스타트 검색이 500 {"detail": ""} 로 응답되던 문제의 재현
+    knowledge_base_crud.create_knowledge_base(
+        db=db,
+        name="kb-for-search-timeout",
+        description=None,
+        created_by=sample_member.member_id,
+        surro_knowledge_id=778,
+        collection_name="col_778",
+    )
+    _preset_token(monkeypatch)
+
+    async def fake_post(url, **kwargs):
+        raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(knowledge_base_service.client, "post", fake_post)
+
+    with _client_with_overrides(db, sample_member) as client:
+        response = client.post("/api/v1/knowledge-bases/778/search", json={"text": "q"})
+
+    assert response.status_code == 504
+    assert response.json()["detail"] == "Knowledge base request timed out"
