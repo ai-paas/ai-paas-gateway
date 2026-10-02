@@ -68,6 +68,7 @@ CHUNK_TYPES_DESCRIPTION = """
 - 401: 인증되지 않은 사용자
 - 500: 서버 내부 오류
 - 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 LANGUAGES_DESCRIPTION = """
@@ -88,6 +89,7 @@ LANGUAGES_DESCRIPTION = """
 - 401: 인증되지 않은 사용자
 - 500: 서버 내부 오류
 - 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 SEARCH_METHODS_DESCRIPTION = """
@@ -108,6 +110,7 @@ SEARCH_METHODS_DESCRIPTION = """
 - 401: 인증되지 않은 사용자
 - 500: 서버 내부 오류
 - 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 CREATE_KNOWLEDGE_BASE_DESCRIPTION = """
@@ -207,6 +210,7 @@ Knowledge Base 목록 조회
 - 401: 인증되지 않은 사용자
 - 500: 서버 내부 오류
 - 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 GET_KNOWLEDGE_BASE_DESCRIPTION = """
@@ -225,6 +229,7 @@ Knowledge Base 상세 조회
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 서버 내부 오류
 - 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 UPDATE_KNOWLEDGE_BASE_DESCRIPTION = """
@@ -248,6 +253,7 @@ Knowledge Base의 이름과 설명만 수정할 수 있습니다.
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 수정 중 서버 내부 오류
 - 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 DELETE_KNOWLEDGE_BASE_DESCRIPTION = """
@@ -264,6 +270,7 @@ DB에서 Knowledge Base 정보를 삭제하고, Milvus에서 Collection을 삭�
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 삭제 중 서버 내부 오류
 - 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 ADD_FILE_DESCRIPTION = """
@@ -309,6 +316,7 @@ DB에서 파일 정보를 삭제하고, Milvus에서 해당 Partition을 삭제�
 - 404: Knowledge Base 또는 파일을 찾을 수 없음
 - 500: 파일 삭제 중 서버 내부 오류
 - 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 SEARCH_KNOWLEDGE_BASE_DESCRIPTION = """
@@ -337,6 +345,7 @@ Knowledge Base의 설정된 검색 방법(search_method), top_k, threshold를 �
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 검색 중 서버 내부 오류
 - 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 SEARCH_RECORDS_DESCRIPTION = """
@@ -359,6 +368,7 @@ Knowledge Base 검색 기록 조회
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 서버 내부 오류
 - 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 
@@ -381,6 +391,7 @@ LIST_ORPHAN_KNOWLEDGE_BASES_DESCRIPTION = """
 - 401: 인증되지 않은 사용자
 - 403: 관리자 권한 없음
 - 503: 업스트림이 빈 목록을 반환 — 전부 고아로 해석하지 않고 거부한다
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 DELETE_ORPHAN_KNOWLEDGE_BASE_DESCRIPTION = """
@@ -410,6 +421,7 @@ DELETE_ORPHAN_KNOWLEDGE_BASE_DESCRIPTION = """
 - 409: 고아가 아니거나(active 매핑 존재), 복구 대기 상태인데 `force` 가 없거나, 다른 작업이
   같은 KB 를 처리 중
 - 503: 업스트림이 빈 목록을 반환
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 
