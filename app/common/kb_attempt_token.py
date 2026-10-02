@@ -25,11 +25,9 @@ def make_token(attempt_id: int, request_id: Optional[str], started_at: datetime)
     """비밀키 없이는 다른 시도의 토큰을 만들 수 없다.
     JWT 키를 교체하면 그 시점에 살아 있는 시도의 자동 복구가 멈춘다(시도 TTL 동안).
 
-    id 외에 request_id 와 started_at 을 넣는 이유는 id 재사용이다. DB 를 백업에서 복원하면
-    시퀀스가 되돌아가 같은 id 가 다시 발급되는데, 복원 전에 그 id 로 만든 KB 가 업스트림에 남아
-    있으면 id 만으로는 새 시도의 토큰이 남의 KB 와 겹친다. request_id 는 클라이언트가 고정해
-    보낼 수 있어 started_at 까지 넣는다. 시각은 DB 가 돌려주는 형태(naive/aware, 세션 타임존)와
-    무관하게 같은 문자열이 되도록 UTC 마이크로초로 고정한다."""
+    attempt_id·request_id·started_at 으로 토큰을 만든다.
+    DB 복원으로 id 가 재발급되고 X-Request-ID 가 고정돼 있어도 started_at 으로 구분된다.
+    시각은 DB 가 naive/aware 어느 쪽으로 돌려줘도 같도록 UTC 로 고정한다."""
     if started_at.tzinfo is None:
         started_at = started_at.replace(tzinfo=timezone.utc)
     instant = started_at.astimezone(timezone.utc).isoformat(timespec="microseconds")
