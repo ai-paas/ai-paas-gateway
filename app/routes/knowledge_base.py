@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Query, 
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_admin_user, get_current_user
+from app.common.kb_attempt_token import attach_token, attempt_token
 from app.common.sort import parse_sort, resolve_sort_columns
 from app.cruds.knowledge_base import knowledge_base_crud
 from app.database import get_db
@@ -371,8 +372,9 @@ LIST_ORPHAN_KNOWLEDGE_BASES_DESCRIPTION = """
 캐시를 쓰지 않는다.
 
 ## Response (OrphanKnowledgeBaseListResponse)
-- **is_protected** (bool): `true` 면 **복구 대기** — 살아 있는 생성 시도가 이 KB 를 후보로
-  삼고 있어 곧 주인이 정해질 수 있다. 고아로 오인해 삭제하면 안 된다.
+- **is_protected** (bool): `true` 면 **복구 대기** — 이 KB 를 만든 생성 시도가 아직 살아 있어
+  곧 주인이 정해질 수 있다. 고아로 오인해 삭제하면 안 된다. 게이트웨이를 거치지 않고 만든 KB 나
+  이 판정이 도입되기 전에 만든 KB 는 보호되지 않는다
 - **protected_by** (str, optional): 지켜보는 시도의 요청자와 시각
 
 ## Errors
@@ -395,7 +397,7 @@ DELETE_ORPHAN_KNOWLEDGE_BASE_DESCRIPTION = """
 - 업스트림이 빈 목록을 반환하면 503
 - **복구 대기 상태면 409.** 안 지워서 생기는 손해는 자원 점유 며칠이고, 지워서 생기는 손해는
   사용자가 10분 넘게 기다려 만든 KB 의 소실이라 기본값을 거부로 둔다
-- `force=true` 삭제는 감사로그에 강제 삭제로 남고, 이 KB 를 가져갈 수 있는 시도(같은 이름)는 즉시 `abandoned` 가 된다
+- `force=true` 삭제는 감사로그에 강제 삭제로 남고, 이 KB 를 만든 생성 시도는 즉시 `abandoned` 가 된다
 - `force=true` 로 끊은 시도의 업스트림 생성이 이미 성공해 응답이 돌아오는 중이었다면, 그 요청은
   삭제된 KB 를 가리키는 매핑을 남긴다. 사용자에게는 열리지 않는 카드로 보이므로 일반 삭제로
   정리해야 한다. 생성 경로는 이 판정에 참여하지 않는다
@@ -418,17 +420,7 @@ def _classify_failure(status_code: int) -> str:
     return AttemptState.ABANDONED
 
 
-async def _snapshot_upstream_ids(user_info: dict) -> Optional[list]:
-    """POST 직전 업스트림 KB id 집합. 실패하면 None 을 돌려주고 생성은 계속 진행한다. """
-    try:
-        external_kbs = await knowledge_base_service.get_knowledge_bases(user_info=user_info)
-        return [kb.id for kb in external_kbs]
-    except Exception:
-        logger.warning("Failed to snapshot upstream knowledge bases; attempt will not be recoverable")
-        return None
-
-
-def _claim_candidate(db: Session, attempt, candidate, detail) -> bool:
+def _claim_candidate(db: Session, attempt, candidate) -> bool:
     """락 안에서 판정을 다시 하고 매핑을 만든다 — 성공하면 True."""
     if not knowledge_base_crud.try_lock_surro_knowledge_id(db, candidate.id):
         return False     # 다른 요청이 이 KB 를 다루는 중 — 다음 목록 조회에서 다시 시도한다
@@ -441,60 +433,48 @@ def _claim_candidate(db: Session, attempt, candidate, detail) -> bool:
 
     knowledge_base_crud.create_knowledge_base(
         db=db,
-        name=detail.name,
-        description=detail.description,
+        name=candidate.name,
+        description=candidate.description,
         created_by=attempt.member_id,
         surro_knowledge_id=candidate.id,
-        collection_name=detail.collection_name,
+        collection_name=candidate.collection_name,
     )
     return True
 
 
-async def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
-    """호출자의 고아 KB 복구 시도. 복구한 건수 반환. 
-    소유권을 확실히 판정할 수 없는 경우에는 복구하지 않는다. """
+def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
+    """호출자의 고아 KB 복구 시도. 복구한 건수 반환.
+    시도가 실어 보낸 토큰을 가진 KB 가 정확히 하나이고 이름이 같을 때만 복구한다. """
     now = datetime.now(timezone.utc)
     attempts = knowledge_base_crud.get_recoverable_attempts(db, current_user.member_id, now)
     if not attempts:
         return 0
 
     known_ids = knowledge_base_crud.get_known_surro_ids(db)
-    conflicting = knowledge_base_crud.get_conflicting_attempts(db, now, current_user.member_id)
     recovered = 0
 
     for attempt in attempts:
-        candidates = [
-            kb for kb in external_kbs
-            if kb.id not in known_ids
-            and kb.name == attempt.name
-            and getattr(kb, "created_at", None) is not None
-            and knowledge_base_crud.find_protecting_attempts(kb, [attempt])
-        ]
-        # 후보가 없으면 아직 생성되지 않은 것이고, 여러 개면 소유권을 특정할 수 없다.
-        if len(candidates) != 1:
-            continue     
-        candidate = candidates[0]
+        token = attempt_token(attempt)
+        # 토큰은 업스트림 화면에 그대로 보여 description 을 복사한 KB 가 섞일 수 있다.
+        # 알려진 KB 를 빼고 세면 원본이 매핑·삭제된 뒤 복사본이 유일 후보가 되므로 전체에서 센다.
+        # 게이트웨이는 이름을 바꾸지 않고 보내므로 이름이 다르면 이 시도의 KB 가 아니다.
+        holders = [kb for kb in external_kbs if kb.attempt_token == token]
+        if len(holders) != 1 or holders[0].id in known_ids or holders[0].name != attempt.name:
+            continue
+        candidate = holders[0]
 
-        # 다른 사용자의 시도가 같은 KB를 가리키면 오배정 위험이 있음으로 복구하지 않는다. 
-        rivals = [t for t in conflicting if t.name == attempt.name]
-        if knowledge_base_crud.find_protecting_attempts(candidate, rivals):
-            continue  
+        # 같은 이름·파일로 재시도에 성공했으면 원본은 복구하지 않고 정리 잡에 맡긴다.
         if knowledge_base_crud.find_duplicate_success(db, attempt) is not None:
-            continue   
-
-        # 후보가 하나로 좁혀진 뒤에 상세 조회를 하여 업로드 파일명을 확인한다(N+1 회피).
-        detail = await knowledge_base_service.get_knowledge_base(candidate.id, _user_info(current_user))
-        if detail is None or not any(f.name == attempt.filename for f in detail.files):
             continue
 
-        if not _claim_candidate(db, attempt, candidate, detail):
+        if not _claim_candidate(db, attempt, candidate):
             # claim 실패 후 트랜잭션을 종료해 락을 다음 후보까지 유지하지 않는다.
             db.commit()
             continue
 
         knowledge_base_crud.mark_recovered(attempt.id, candidate.id)
-        
-        # 같은 요청의 다음 시도에서 이미 복구된 KB를 다시 조회하지 않는다.
+
+        # 같은 요청의 다음 시도가 방금 복구한 KB 를 다시 후보로 보지 않게 한다.
         known_ids.add(candidate.id)
         recovered += 1
 
@@ -506,7 +486,7 @@ async def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
             resource_id=str(candidate.id),
             target_member_id=attempt.member_id,
             request_id=attempt.request_id,
-            metadata={"recovered": True, "attempt_id": attempt.id, "name": detail.name},
+            metadata={"recovered": True, "attempt_id": attempt.id, "name": candidate.name},
         )
         logger.info(
             "Recovered orphan knowledge base: surro_id=%s, member_id=%s, attempt_id=%s",
@@ -624,19 +604,18 @@ async def create_knowledge_base(
     user_info = _user_info(current_user)
 
     # 시도 레코드를 MLOps 호출 전에 남긴다. 응답을 받지 못해도 소유자와 복구 후보가 남는다.
-    snapshot = await _snapshot_upstream_ids(user_info)
-    attempt_id = knowledge_base_crud.create_attempt(
+    attempt_id, token = knowledge_base_crud.create_attempt(
         member_id=current_user.member_id,
         name=name,
         filename=file.filename,
         request_id=getattr(request.state, "request_id", None),
-        upstream_snapshot=snapshot,
     )
 
     try:
         external_kb = await knowledge_base_service.create_knowledge_base(
             name=name,
-            description=description,
+            # 응답을 못 받아도 업스트림 목록에서 이 시도의 KB 를 찾을 수 있도록 토큰을 실어 보낸다.
+            description=attach_token(description, token),
             file=file,
             language_id=language_id,
             embedding_model_id=embedding_model_id,
@@ -785,7 +764,7 @@ async def get_knowledge_bases(
 
     # 부가 기능이 주 기능을 깨면 사용자가 목록 자체를 못 본다.
     try:
-        if await _try_recover_orphans(db, current_user, external_kbs):
+        if _try_recover_orphans(db, current_user, external_kbs):
             knowledge_bases, total = _load_page()
     except Exception:
         # 일부만 복구하고 실패했을 수 있다. 그 커밋이 위에서 읽어둔 객체를 만료시켰으므로,
@@ -914,14 +893,8 @@ async def delete_orphan_knowledge_base(
                 "Use ?force=true to delete anyway."
             ),
         )
-    # 선점은 복구가 실제로 이 KB 를 가져갈 수 있는 시도만 끊는다 — 복구는 이름이 같고 created_at 이
-    # 있는 KB 만 후보로 삼는다. 그 밖의 시도까지 끊으면 종결 상태는 되돌릴 수 없어, 같은 시간대에
-    # 다른 KB 를 만들던 사용자의 복구 기회가 영구히 사라진다.
-    claimants = (
-        [t for t in protectors if t.name == target.name]
-        if target.created_at is not None else []
-    )
-    abandoned = knowledge_base_crud.abandon_attempts(db, claimants)
+    # 보호 집합이 곧 이 KB 를 가져갈 수 있는 시도다(토큰의 주인) — 그대로 선점한다.
+    abandoned = knowledge_base_crud.abandon_attempts(db, protectors)
     db.commit()
 
     deleted = False

@@ -357,10 +357,10 @@ def test_event_loop_stays_responsive_while_another_transaction_holds_the_lock(me
 def test_skipped_candidate_keeps_the_lock_until_the_caller_ends_the_transaction(member):
     """락을 잡은 뒤 건너뛰는 분기도 결국 락을 풀어야 한다.
 
-    상세 조회를 기다리는 사이 다른 요청이 먼저 복구를 끝내면, 락을 잡은 뒤 상태를 다시 읽고
+    목록을 읽은 뒤 락을 잡기 전에 다른 요청이 먼저 복구를 끝내면, 락을 잡은 뒤 상태를 다시 읽고
     물러난다. `_claim_candidate` 자체는 트랜잭션을 닫지 않으므로 그 시점까지 락이 남아 있고,
-    닫는 책임은 호출자에게 있다. 호출자가 닫지 않으면 락이 요청 끝까지 유지되어, 다음 후보의
-    업스트림 조회를 락을 쥔 채 기다리게 된다.
+    닫는 책임은 호출자에게 있다. 호출자가 닫지 않으면 락이 요청 끝까지 유지되어 그동안 같은
+    KB 에 대한 관리자 삭제가 막힌다.
     """
     now = datetime.now(timezone.utc)
     setup = Session(bind=_engine)
@@ -377,16 +377,15 @@ def test_skipped_candidate_keeps_the_lock_until_the_caller_ends_the_transaction(
     finally:
         setup.close()
 
-    candidate = SimpleNamespace(id=SURRO)
-    detail = SimpleNamespace(
-        name="락 테스트 KB", description=None, collection_name=f"col_{SURRO}"
+    candidate = SimpleNamespace(
+        id=SURRO, name="락 테스트 KB", description=None, collection_name=f"col_{SURRO}"
     )
 
     worker = Session(bind=_engine)
     probe = Session(bind=_engine)
     try:
         claimed = _claim_candidate(
-            worker, worker.get(KnowledgeBaseCreateAttempt, attempt_id), candidate, detail
+            worker, worker.get(KnowledgeBaseCreateAttempt, attempt_id), candidate
         )
         assert claimed is False, "복구가 끝난 시도로 매핑을 만들면 안 된다"
 
@@ -432,9 +431,8 @@ def test_only_one_of_two_racing_claims_creates_a_mapping(member):
     finally:
         setup.close()
 
-    candidate = SimpleNamespace(id=SURRO)
-    detail = SimpleNamespace(
-        name="락 테스트 KB", description=None, collection_name=f"col_{SURRO}"
+    candidate = SimpleNamespace(
+        id=SURRO, name="락 테스트 KB", description=None, collection_name=f"col_{SURRO}"
     )
     start = threading.Barrier(2, timeout=SYNC_TIMEOUT)
     claimed = []
@@ -445,7 +443,7 @@ def test_only_one_of_two_racing_claims_creates_a_mapping(member):
             try:
                 attempt = session.get(KnowledgeBaseCreateAttempt, attempt_id)
                 start.wait()
-                claimed.append(_claim_candidate(session, attempt, candidate, detail))
+                claimed.append(_claim_candidate(session, attempt, candidate))
             finally:
                 session.rollback()
                 session.close()

@@ -1,12 +1,13 @@
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from sqlalchemy import and_, or_, text
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
+from app.common.kb_attempt_token import attempt_token
 from app.config import settings
 from app.database import SessionLocal
 from app.models.knowledge_base import AttemptState, KnowledgeBase, KnowledgeBaseCreateAttempt
@@ -202,11 +203,12 @@ class KnowledgeBaseCRUD:
             name: str,
             filename: Optional[str],
             request_id: Optional[str],
-            upstream_snapshot: Optional[list],
-    ) -> int:
-        """MLOps 호출 전에 시도를 기록하고 id 를 돌려준다.
+    ) -> Tuple[int, str]:
+        """MLOps 호출 전에 시도를 기록하고 (id, 상관 토큰) 을 돌려준다.
 
         이 쓰기가 실패하면 호출자는 MLOps 를 부르지 않고 종료해 외부 부작용 없이 실패한다.
+        토큰은 커밋 뒤 DB 에서 다시 읽은 started_at 으로 만든다 — 복구·보호 판정이 읽을 값과
+        같아야 하므로, 파이썬 쪽 시각으로 만들면 안 된다.
         """
         db = SessionLocal()
         try:
@@ -215,12 +217,12 @@ class KnowledgeBaseCRUD:
                 name=name,
                 filename=filename,
                 request_id=request_id,
-                upstream_snapshot=upstream_snapshot,
                 state=AttemptState.PENDING,
             )
             db.add(attempt)
             db.commit()
-            return attempt.id
+            db.refresh(attempt)
+            return attempt.id, attempt_token(attempt)
         finally:
             db.close()
 
@@ -273,23 +275,11 @@ class KnowledgeBaseCRUD:
             db: Session,
             now: datetime,
     ) -> List[KnowledgeBaseCreateAttempt]:
-        """삭제 보호 집합 — 아직 주인이 정해질 수 있는 모든 시도. 
+        """삭제 보호 집합 — 아직 주인이 정해질 수 있는 모든 시도.
         자동 복구와 관리자 삭제가 이 집합을 공유한다. TTL 이 지나면 자동으로 제외된다.
-        이 집합은 자동 복구 대상의 상위집합이다 — 복구는 스냅샷 있는 시도만 대상으로 하고,
-        보호는 스냅샷 없는 시도까지 포함한다. 범위를 맞추려고 보호를 줄이면 과삭제가 된다."""
+        이 집합은 자동 복구 대상의 상위집합이다 — 복구는 복구 창이 열린 pending 을 빼지만,
+        보호는 그 시도까지 포함한다. 범위를 맞추려고 보호를 줄이면 생성 중인 KB 가 지워진다."""
         return self._live_attempts_query(db, now).all()
-
-    def get_conflicting_attempts(
-            self,
-            db: Session,
-            now: datetime,
-            member_id: str,
-    ) -> List[KnowledgeBaseCreateAttempt]:
-        """복구 충돌 집합 — **다른 사용자**의 살아 있는 시도.
-        자신의 시도가 있다면 후에 영영 재생성을 못 하게 되므로, 그 시도는 충돌로 보지 않는다.""" 
-        return self._live_attempts_query(db, now).filter(
-            KnowledgeBaseCreateAttempt.member_id != member_id
-        ).all()
 
     def try_lock_surro_knowledge_id(self, db: Session, surro_knowledge_id: int) -> bool:
         """업스트림 KB에 대한 트랜잭션 범위 advisory lock을 대기 없이 시도한다.
@@ -333,13 +323,10 @@ class KnowledgeBaseCRUD:
             member_id: str,
             now: datetime,
     ) -> List[KnowledgeBaseCreateAttempt]:
-        """이 사용자의 복구 후보 시도 — orphan_suspect(또는 복구 창이 닫힌 pending) · TTL 이내 · 스냅샷 보유.
-
-        스냅샷이 없으면 "이 시도 이후에 생긴 KB" 를 가려낼 수 없어 후보를 특정할 방법이 없다.
-        """
+        """이 사용자의 복구 후보 시도 — orphan_suspect(또는 복구 창이 닫힌 pending) · TTL 이내."""
         cutoff = _as_aware(now) - timedelta(minutes=settings.KB_ATTEMPT_TTL_MINUTES)
         window_closed = _as_aware(now) - timedelta(seconds=settings.KB_MAX_INGEST_SECONDS)
-        rows = db.query(KnowledgeBaseCreateAttempt).filter(
+        return db.query(KnowledgeBaseCreateAttempt).filter(
             and_(
                 KnowledgeBaseCreateAttempt.member_id == member_id,
                 or_(
@@ -352,13 +339,9 @@ class KnowledgeBaseCRUD:
                     ),
                 ),
                 KnowledgeBaseCreateAttempt.started_at >= cutoff,
-                KnowledgeBaseCreateAttempt.upstream_snapshot.isnot(None),
             )
-            # 정렬로 후보 KB 락을 잡아 락이 엇갈리는 상황(데드락)을 방지한다. 
-
+            # 정렬로 후보 KB 락을 잡아 락이 엇갈리는 상황(데드락)을 방지한다.
         ).order_by(KnowledgeBaseCreateAttempt.id).all()
-        # JSON 컬럼은 파이썬 None을 JSON의 null로 저장하기에 한번 더 필터링한다. 
-        return [r for r in rows if r.upstream_snapshot is not None]
 
     def get_known_surro_ids(self, db: Session) -> set:
         """게이트웨이가 **한 번이라도** 알았던 업스트림 KB id — soft-delete 포함.
@@ -384,26 +367,15 @@ class KnowledgeBaseCRUD:
             external_kb,
             live_attempts,
     ) -> List[KnowledgeBaseCreateAttempt]:
-        """이 업스트림 KB 를 후보로 삼을 수 있는 살아 있는 시도들.
+        """이 업스트림 KB 를 가져갈 수 있는 살아 있는 시도 — 이 KB 의 토큰을 실어 보낸 시도뿐이다.
 
-        삭제 보호와 복구 충돌 판정이 이 하나를 공유한다. 빈 반환은 "이 KB 를 가져갈 수 있는
-        시도가 없다" 로 읽히므로, 판정할 수 없는 시도를 여기서 버리면 모름이 없음으로 둔갑한다.
+        삭제 보호와 선점이 이 하나를 공유한다. 토큰 없는 KB(도입 전 시도·게이트웨이 밖 생성)는
+        어떤 시도도 복구할 수 없으므로 보호하지 않는다.
         """
-        created_at = _as_aware(getattr(external_kb, "created_at", None))
-        if created_at is None:
-            return list(live_attempts)
-        
-        max_ingest = timedelta(seconds=settings.KB_MAX_INGEST_SECONDS)
-        found = []
-        for t in live_attempts:
-            if t.upstream_snapshot is not None and external_kb.id in t.upstream_snapshot:
-                continue
-            # 스냅샷이 없는 시도의 보호 범위를 시간으로 설정한다. 
-            started_at = _as_aware(t.started_at)
-            if not (started_at <= created_at <= started_at + max_ingest):
-                continue                         # 복구 창 밖 → 보호해도 복구되지 않는다
-            found.append(t)
-        return found
+        token = getattr(external_kb, "attempt_token", None)
+        if token is None:
+            return []
+        return [t for t in live_attempts if attempt_token(t) == token]
 
     def is_protected(self, external_kb, live_attempts) -> bool:
         """관리자 삭제와 정리 잡이 보호해야 하는 KB 인지 판정 — 두 삭제 경로 공통."""

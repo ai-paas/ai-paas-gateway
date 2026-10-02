@@ -104,9 +104,9 @@ class Settings:
     # 고아 KB 대응 — 타임아웃 등으로 매핑이 저장되지 못한 KB 의 복구·회수 파라미터
     # ATTEMPT_TTL: orphan_suspect 시도를 지켜보는 기간 — 사용자가 목록을 다시 열 때까지의 여유.
     # ORPHAN_TTL : 복구되지 않은 고아를 업스트림에서 회수하기까지의 유예.
-    # MAX_INGEST : 업스트림이 타임아웃 이후에도 처리를 마칠 수 있는 최대 시간(복구 창 상한).
-    #              PROXY_KB_INGEST_TIMEOUT(600s)에 여유를 더한 값. 콜드스타트 실측치가 없어
-    #              잠정값이며, 넓을수록 복구 창에 무관한 KB가 낄 확률이 올라간다.
+    # MAX_INGEST : 생성 요청이 아직 진행 중일 수 있는 최대 시간. 이 시간이 지난 pending 시도는
+    #              프로세스 강제 종료로 남은 것으로 보고 복구 대상에 넣는다.
+    #              PROXY_KB_INGEST_TIMEOUT(600s)에 여유를 더한 값이며, 콜드스타트 실측치가 없어 잠정값이다.
     KB_ATTEMPT_TTL_MINUTES: int = int(os.getenv("KB_ATTEMPT_TTL_MINUTES", "1440"))
     PROXY_KB_ORPHAN_TTL_MINUTES: int = int(os.getenv("PROXY_KB_ORPHAN_TTL_MINUTES", "10080"))
     KB_MAX_INGEST_SECONDS: int = int(os.getenv("KB_MAX_INGEST_SECONDS", "3600"))
@@ -196,8 +196,8 @@ class Settings:
                 "KB_ATTEMPT_TTL_MINUTES must be less than PROXY_KB_ORPHAN_TTL_MINUTES"
             )
 
-        # 복구 창이 게이트웨이 타임아웃보다 짧으면, 정작 타임아웃 난 건이 창 밖에서 커밋되어
-        # 영원히 복구되지 않는다.
+        # 창이 게이트웨이 타임아웃보다 짧으면, 아직 응답을 기다리는 생성 요청의 pending 시도가
+        # 복구 대상이 되어 생성 경로와 같은 KB 의 매핑을 두고 경합한다.
         if self.KB_MAX_INGEST_SECONDS < self.PROXY_KB_INGEST_TIMEOUT:
             raise ValueError(
                 "KB_MAX_INGEST_SECONDS must be >= PROXY_KB_INGEST_TIMEOUT"

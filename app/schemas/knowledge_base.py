@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.common.kb_attempt_token import split_token
 
 
 class ChunkTypeSchema(BaseModel):
@@ -48,7 +50,21 @@ class KnowledgeBaseFileReadSchema(BaseModel):
     deleted_by: Optional[str] = Field(None, description="삭제자 member_id")
 
 
-class ExternalKnowledgeBaseDetailResponse(BaseModel):
+class _AttemptTokenMixin(BaseModel):
+    """업스트림 description 에서 게이트웨이가 붙인 토큰을 떼어 따로 둔다.
+    업스트림 응답은 모두 이 스키마로 파싱되므로 사용자에게 나가는 경로가 여기서 한 번에 정리된다."""
+
+    attempt_token: Optional[str] = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def _split_attempt_token(self):
+        description, token = split_token(self.description)
+        if token is not None:
+            self.description, self.attempt_token = description, token
+        return self
+
+
+class ExternalKnowledgeBaseDetailResponse(_AttemptTokenMixin):
     """외부 API에서 반환되는 지식베이스 상세 응답"""
 
     model_config = ConfigDict(extra="ignore")
@@ -77,7 +93,7 @@ class ExternalKnowledgeBaseDetailResponse(BaseModel):
     files: List[KnowledgeBaseFileReadSchema] = Field(default_factory=list)
 
 
-class ExternalKnowledgeBaseBriefResponse(BaseModel):
+class ExternalKnowledgeBaseBriefResponse(_AttemptTokenMixin):
     """외부 API에서 반환되는 지식베이스 목록 응답"""
 
     model_config = ConfigDict(extra="ignore")
@@ -185,7 +201,7 @@ class OrphanKnowledgeBaseItem(BaseModel):
     created_at: Optional[datetime] = Field(None, description="업스트림 생성 시간")
     is_protected: bool = Field(
         ...,
-        description="복구 대기 — 살아 있는 생성 시도가 이 KB 를 후보로 삼고 있어 곧 주인이 정해질 수 있다",
+        description="복구 대기 — 이 KB 를 만든 생성 시도가 아직 살아 있어 곧 주인이 정해질 수 있다",
     )
     protected_by: Optional[str] = Field(
         None, description="이 KB 를 지켜보는 시도의 요청자와 시각 (is_protected 인 경우)"
