@@ -216,6 +216,40 @@ def test_no_recovery_when_two_kbs_carry_the_same_token(db, sample_member):
     assert attempt.state == AttemptState.ORPHAN_SUSPECT
 
 
+def test_copy_is_not_recovered_when_the_original_is_already_mapped(db, sample_member):
+    """원본이 이미 매핑돼 있으면 같은 토큰의 복사본은 후보가 아니다.
+
+    매핑 뒤 성공 기록이 유실되면 시도가 pending 으로 남고 복구 창이 닫힌 뒤 다시 복구 대상이 된다.
+    알려진 원본을 먼저 빼고 세면 복사본이 유일 후보가 되어 이 사용자에게 넘어간다.
+    """
+    attempt = _attempt(db, sample_member.member_id, state=AttemptState.PENDING,
+                       started_at=NOW - MAX_INGEST - timedelta(minutes=1))
+    _mapping(db, sample_member.member_id, 407)
+    upstream = [_brief(407, token_for=attempt), _brief(500, token_for=attempt)]
+
+    with _client(db, sample_member, upstream) as client:
+        client.get(KB_LIST)
+
+    assert crud.get_knowledge_base_by_surro_id(db, 500) is None
+    db.refresh(attempt)
+    assert attempt.state == AttemptState.PENDING
+
+
+def test_differently_named_copy_is_not_recovered_after_the_original_is_gone(db, sample_member):
+    """원본이 업스트림에서 직접 삭제되고 이름이 다른 복사본만 남으면 복구하지 않는다.
+
+    게이트웨이는 이름을 바꾸지 않고 보내므로, 이름이 다르면 이 시도가 만든 KB 가 아니다.
+    이름까지 같은 복사본은 구별할 수 없어 복구된다.
+    """
+    attempt = _attempt(db, sample_member.member_id)
+
+    with _client(db, sample_member, [_brief(500, name="복사본", token_for=attempt)]) as client:
+        assert client.get(KB_LIST).json()["total"] == 0
+
+    db.refresh(attempt)
+    assert attempt.state == AttemptState.ORPHAN_SUSPECT
+
+
 def test_same_name_kb_without_the_token_is_not_a_candidate(db, sample_member):
     """이름·파일·시각이 다 맞아도 토큰이 없으면 이 시도의 결과가 아니다 — 게이트웨이를 거치지 않은 생성이다."""
     attempt = _attempt(db, sample_member.member_id)
@@ -259,15 +293,14 @@ def test_kb_from_before_a_restore_is_not_claimed_by_a_reused_attempt_id(db, samp
     assert attempt.state == AttemptState.ORPHAN_SUSPECT
 
 
-def test_recovery_does_not_depend_on_name_or_creation_time(db, sample_member):
-    """토큰이 맞으면 복구한다 — 이름과 업스트림 생성 시각은 판정에 쓰지 않는다.
+def test_recovery_does_not_depend_on_creation_time(db, sample_member):
+    """토큰과 이름이 맞으면 복구한다 — 업스트림 생성 시각은 판정에 쓰지 않는다.
 
-    둘 다 토큰이 없던 시절 소유자를 추정하던 근거다. 남겨 두면 업스트림 시계가 어긋나거나
-    인제스트가 길어질 때 멀쩡한 복구를 거부한다.
+    남겨 두면 업스트림 시계가 어긋나거나 인제스트가 길어질 때 멀쩡한 복구를 거부한다.
     """
     attempt = _attempt(db, sample_member.member_id)
     late = T0 + MAX_INGEST + timedelta(minutes=1)
-    kb = _brief(407, name="다른이름", created_at=late, token_for=attempt)
+    kb = _brief(407, created_at=late, token_for=attempt)
 
     with _client(db, sample_member, [kb]) as client:
         assert client.get(KB_LIST).json()["total"] == 1

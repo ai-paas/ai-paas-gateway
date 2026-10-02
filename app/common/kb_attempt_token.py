@@ -12,18 +12,15 @@ from typing import Optional, Tuple
 
 from app.config import settings
 
-# 업스트림 description 컬럼 한도. 토큰 길이만큼 사용자 입력 한도가 줄어든다.
-UPSTREAM_DESCRIPTION_LIMIT = 255
-
 _TOKEN_HEX_LEN = 16
 # $ 는 끝의 줄바꿈 앞에서도 맞으므로 문자열 끝은 \Z 로 잡는다.
 _TOKEN_RE = re.compile(r"(?:^| )\[kbt:([0-9a-f]{16})\]\Z")
-MAX_USER_DESCRIPTION = UPSTREAM_DESCRIPTION_LIMIT - len(" [kbt:]") - _TOKEN_HEX_LEN
 
 
 def make_token(attempt_id: int, request_id: Optional[str], started_at: datetime) -> str:
     """비밀키 없이는 다른 시도의 토큰을 만들 수 없다.
-    JWT 키를 교체하면 그 시점에 살아 있는 시도의 자동 복구가 멈춘다(시도 TTL 동안).
+    JWT 키를 교체하면 그 시점에 살아 있는 시도의 자동 복구와 삭제 보호가 함께 꺼진다(시도 TTL 동안).
+    판정 시점에 토큰을 다시 계산하기 때문이다. 교체 뒤 그 기간에는 고아 삭제를 보류해야 한다.
 
     attempt_id·request_id·started_at 으로 토큰을 만든다.
     DB 복원으로 id 가 재발급되고 X-Request-ID 가 고정돼 있어도 started_at 으로 구분된다.

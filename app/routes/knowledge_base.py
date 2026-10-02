@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Query, 
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_admin_user, get_current_user
-from app.common.kb_attempt_token import MAX_USER_DESCRIPTION, attach_token, attempt_token
+from app.common.kb_attempt_token import attach_token, attempt_token
 from app.common.sort import parse_sort, resolve_sort_columns
 from app.cruds.knowledge_base import knowledge_base_crud
 from app.database import get_db
@@ -122,8 +122,7 @@ Knowledge Base 생성
 
 ## Request Body (multipart/form-data)
 - **name** (str, required): Knowledge Base 이름
-- **description** (str, optional): Knowledge Base 설명 — **최대 232자**. 업스트림 한도(255자) 중
-  나머지는 게이트웨이가 타임아웃 뒤 자동 복구에 쓰는 식별자를 붙이는 데 쓴다
+- **description** (str, optional): Knowledge Base 설명
 - **language_id** (int, required): 언어 ID
     - `GET /api/v1/knowledge-bases/languages` API로 조회 가능
 - **embedding_model_id** (int, required): 임베딩 모델 ID
@@ -172,7 +171,6 @@ KB가 만들어진 뒤에야 검색 불가·임베딩 과다 청킹으로 드러
 ## Errors
 - 400: 유효하지 않은 요청 또는 필수 파라미터 누락
 - 401: 인증되지 않은 사용자
-- 422: 요청 값 검증 실패 (예: description 이 232자를 넘음)
 - 500: Knowledge Base 생성 중 서버 내부 오류
 - 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
 - 504: 처리시간 초과 (콜드스타트 등). 타임아웃 이후에도 업스트림에서 생성이 완료될 수
@@ -446,7 +444,7 @@ def _claim_candidate(db: Session, attempt, candidate) -> bool:
 
 def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
     """호출자의 고아 KB 복구 시도. 복구한 건수 반환.
-    시도가 실어 보낸 토큰을 가진 KB 가 정확히 하나일 때만 복구한다. """
+    시도가 실어 보낸 토큰을 가진 KB 가 정확히 하나이고 이름이 같을 때만 복구한다. """
     now = datetime.now(timezone.utc)
     attempts = knowledge_base_crud.get_recoverable_attempts(db, current_user.member_id, now)
     if not attempts:
@@ -457,14 +455,13 @@ def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
 
     for attempt in attempts:
         token = attempt_token(attempt)
-        candidates = [
-            kb for kb in external_kbs
-            if kb.id not in known_ids and kb.attempt_token == token
-        ]
         # 토큰은 업스트림 화면에 그대로 보여 description 을 복사한 KB 가 섞일 수 있다.
-        if len(candidates) != 1:
+        # 알려진 KB 를 빼고 세면 원본이 매핑·삭제된 뒤 복사본이 유일 후보가 되므로 전체에서 센다.
+        # 게이트웨이는 이름을 바꾸지 않고 보내므로 이름이 다르면 이 시도의 KB 가 아니다.
+        holders = [kb for kb in external_kbs if kb.attempt_token == token]
+        if len(holders) != 1 or holders[0].id in known_ids or holders[0].name != attempt.name:
             continue
-        candidate = candidates[0]
+        candidate = holders[0]
 
         # 같은 이름·파일로 재시도에 성공했으면 원본은 복구하지 않고 정리 잡에 맡긴다.
         if knowledge_base_crud.find_duplicate_success(db, attempt) is not None:
@@ -590,10 +587,7 @@ async def get_search_methods(
 async def create_knowledge_base(
     request: Request,
     name: str = Form(..., description="Knowledge Base 이름"),
-    description: Optional[str] = Form(
-        None, max_length=MAX_USER_DESCRIPTION,
-        description=f"Knowledge Base 설명 (최대 {MAX_USER_DESCRIPTION}자)",
-    ),
+    description: Optional[str] = Form(None, description="Knowledge Base 설명"),
     language_id: int = Form(..., description="언어 ID"),
     embedding_model_id: int = Form(..., description="임베딩 모델 ID (배포된 임베딩 모델만 가능)", examples=[13]),
     chunk_size: int = Form(..., description="청크 크기 (권장 500, 범위 300~1000)", examples=[500]),

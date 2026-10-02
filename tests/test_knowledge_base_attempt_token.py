@@ -11,7 +11,6 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.common.kb_attempt_token import (
-    MAX_USER_DESCRIPTION,
     attach_token,
     attempt_token,
     make_token,
@@ -216,12 +215,6 @@ def test_split_leaves_text_without_a_valid_token_untouched():
         assert split_token(text) == (text, None)
 
 
-def test_user_description_limit_leaves_room_for_the_token():
-    longest = attach_token("가" * MAX_USER_DESCRIPTION, make_token(1, "req-a", _T))
-    assert len(longest) == 255
-    assert MAX_USER_DESCRIPTION == 232
-
-
 def test_upstream_schemas_hide_the_token_from_description():
     """업스트림 응답은 모두 이 두 스키마로 파싱된다 — 여기서 떼어내면 이후 어느 경로로도 나가지 않는다."""
     tagged = attach_token("설명", make_token(3, "req-a", _T))
@@ -267,24 +260,14 @@ def test_create_does_not_list_upstream_first(db, sample_member, upstream):
     assert upstream.list_calls == 0
 
 
-def test_too_long_description_is_rejected_before_anything_happens(db, sample_member, upstream):
-    """토큰을 붙이면 업스트림 한도를 넘는 설명은 시도 기록도, 업스트림 호출도 없이 거부한다.
-
-    업스트림까지 보내면, 그 실패가 500 으로 오는 경우 생기지도 않은 KB 를 기다리는 시도가 남는다.
-    """
+def test_long_description_is_sent_whole_with_the_token(db, sample_member, upstream):
+    """업스트림 description 컬럼에는 길이 제한이 없다 — 게이트웨이도 길이로 거부하지 않는다."""
+    long_text = "가" * 1000
     with _as(db, sample_member) as client:
-        res = _create(client, description="가" * (MAX_USER_DESCRIPTION + 1))
+        assert _create(client, description=long_text).status_code == 504
 
-    assert res.status_code == 422
-    assert db.query(KnowledgeBaseCreateAttempt).count() == 0
-    assert upstream.sent_descriptions == []
-
-
-def test_description_at_the_limit_fits_the_upstream_column(db, sample_member, upstream):
-    with _as(db, sample_member) as client:
-        assert _create(client, description="가" * MAX_USER_DESCRIPTION).status_code == 504
-
-    assert len(upstream.sent_descriptions[0]) == 255
+    attempt = db.query(KnowledgeBaseCreateAttempt).one()
+    assert upstream.sent_descriptions == [attach_token(long_text, attempt_token(attempt))]
 
 
 def test_token_never_reaches_the_user(db, sample_member, upstream):
