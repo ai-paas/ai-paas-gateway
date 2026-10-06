@@ -163,7 +163,7 @@ class KnowledgeBaseService:
         except httpx.TimeoutException:
             _raise_kb_timeout(timeout_action, timeout_context or request_context)
         except httpx.RequestError as e:
-            _raise_kb_upstream_error("Knowledge base service", e, request_context)
+            _raise_kb_upstream_error("Knowledge base service", e, timeout_context or request_context)
 
         return response
 
