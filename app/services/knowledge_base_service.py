@@ -51,6 +51,12 @@ def _raise_kb_unavailable(action: str) -> None:
     raise HTTPException(status_code=503, detail=f"{action} unavailable")
 
 
+def _raise_kb_upstream_error(action: str, exc: Exception) -> None:
+    """업스트림 통신 중 오류(요청 도중 연결 끊김, 프로토콜 오류 등) 시 공통 502 변환."""
+    logger.error(f"Upstream error: {action}: {exc!r}")
+    raise HTTPException(status_code=502, detail=f"{action} error")
+
+
 class KnowledgeBaseService:
     """지식베이스 관련 외부 API 서비스"""
 
@@ -98,6 +104,8 @@ class KnowledgeBaseService:
             _raise_kb_unavailable("Authentication service")
         except httpx.TimeoutException:
             _raise_kb_timeout("Authentication service")
+        except httpx.RequestError as e:
+            _raise_kb_upstream_error("Authentication service", e)
         except Exception as e:
             logger.error(f"Authentication error: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Authentication failed: {str(e)}")
@@ -149,6 +157,8 @@ class KnowledgeBaseService:
                 "url": url,
                 "member_id": (user_info or {}).get("member_id"),
             })
+        except httpx.RequestError as e:
+            _raise_kb_upstream_error("Knowledge base service", e)
 
         return response
 

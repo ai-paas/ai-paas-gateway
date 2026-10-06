@@ -347,3 +347,35 @@ def test_make_authenticated_request_retry_timeout_returns_504(monkeypatch):
 
     assert calls == ["request", "auth", "request"], "401 후 토큰 갱신과 재시도까지 거쳐야 함"
     assert getattr(exc_info.value, "status_code", None) == 504
+
+
+@pytest.mark.parametrize("transport_exc", [httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError])
+def test_make_authenticated_request_transport_error_returns_502(monkeypatch, transport_exc):
+    # 업스트림이 요청 도중 연결을 끊으면 httpx 는 메시지가 빈 ReadError 등을 던진다
+    _preset_token(monkeypatch)
+
+    async def fake_get(url, **kwargs):
+        raise transport_exc("")
+
+    monkeypatch.setattr(knowledge_base_service.client, "get", fake_get)
+
+    with pytest.raises(Exception) as exc_info:
+        asyncio.run(knowledge_base_service._make_authenticated_request("GET", "http://x/kb"))
+
+    err = exc_info.value
+    assert getattr(err, "status_code", None) == 502
+    assert getattr(err, "detail", "") == "Knowledge base service error"
+
+
+def test_authenticate_transport_error_returns_502(monkeypatch):
+    async def fake_post(url, **kwargs):
+        raise httpx.ReadError("")
+
+    monkeypatch.setattr(knowledge_base_service.client, "post", fake_post)
+
+    with pytest.raises(Exception) as exc_info:
+        asyncio.run(knowledge_base_service._authenticate())
+
+    err = exc_info.value
+    assert getattr(err, "status_code", None) == 502
+    assert getattr(err, "detail", "") == "Authentication service error"
