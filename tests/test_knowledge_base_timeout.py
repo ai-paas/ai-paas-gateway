@@ -223,7 +223,13 @@ def _preset_token(monkeypatch):
     )
 
 
-@pytest.mark.parametrize("timeout_exc", [httpx.ReadTimeout, httpx.PoolTimeout, httpx.ConnectTimeout])
+def _mock_client(monkeypatch, handler):
+    monkeypatch.setattr(
+        knowledge_base_service, "client", httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+
+
+@pytest.mark.parametrize("timeout_exc", [httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, httpx.ConnectTimeout])
 def test_make_authenticated_request_timeout_returns_504(monkeypatch, timeout_exc):
     # ConnectTimeout 은 ConnectError(503) 가 아니라 TimeoutException 계열이라 504 여야 함
     _preset_token(monkeypatch)
@@ -295,3 +301,49 @@ def test_search_route_timeout_returns_504(monkeypatch, db, sample_member):
 
     assert response.status_code == 504
     assert response.json()["detail"] == "Knowledge base request timed out"
+
+
+def test_create_knowledge_base_succeeds_with_real_client(monkeypatch):
+    # 공통 함수 전용 인자 이름에 오타가 나면 httpx 까지 넘어가 정상 생성도 500 이 된다
+    _preset_token(monkeypatch)
+
+    def handler(request):
+        return httpx.Response(200, json={
+            "id": 1, "name": "kb", "description": None, "collection_name": "col",
+            "embedding_model_id": 13, "language_id": 1, "chunk_size": 500,
+            "chunk_overlap": 50, "chunk_type_id": 1, "search_method_id": 1,
+            "top_k": 3, "threshold": 0.4, "files": [],
+        })
+
+    _mock_client(monkeypatch, handler)
+
+    result = asyncio.run(knowledge_base_service.create_knowledge_base(
+        name="kb", file=_make_upload(), language_id=1, embedding_model_id=13,
+        chunk_size=500, chunk_overlap=50, chunk_type_id=1, search_method_id=1,
+        top_k=3, threshold=0.4,
+    ))
+
+    assert result.id == 1
+
+
+def test_make_authenticated_request_retry_timeout_returns_504(monkeypatch):
+    # 401 → 토큰 갱신 → 재시도 요청에서 난 타임아웃도 504 여야 한다
+    _preset_token(monkeypatch)
+    calls = []
+
+    def handler(request):
+        if request.url.path.endswith("/authentications/token"):
+            calls.append("auth")
+            return httpx.Response(200, json={"access_token": "new-tok", "expires_in": 1800})
+        calls.append("request")
+        if calls.count("request") == 1:
+            return httpx.Response(401, json={"detail": "expired"})
+        raise httpx.ReadTimeout("", request=request)
+
+    _mock_client(monkeypatch, handler)
+
+    with pytest.raises(Exception) as exc_info:
+        asyncio.run(knowledge_base_service._make_authenticated_request("GET", "http://kb/x"))
+
+    assert calls == ["request", "auth", "request"], "401 후 토큰 갱신과 재시도까지 거쳐야 함"
+    assert getattr(exc_info.value, "status_code", None) == 504
