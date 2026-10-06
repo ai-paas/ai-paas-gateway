@@ -34,14 +34,17 @@ def _upstream_error_detail(response: httpx.Response) -> Any:
     return detail if isinstance(detail, (str, list, dict)) else "upstream request rejected"
 
 
+def _format_context(context: Optional[Dict]) -> str:
+    if not context:
+        return ""
+    return " (" + ", ".join(f"{k}={v}" for k, v in context.items() if v is not None) + ")"
+
+
 def _raise_kb_timeout(action: str, context: Optional[Dict] = None) -> None:
     """콜드스타트 등으로 처리시간 초과 시 공통 504 변환."""
     # 504 요청은 업스트림에서 뒤늦게 완료되어 고아 KB 가 될 수 있다. 어떤 요청이 끊겼는지
     # 남기지 않으면 시도 레코드·access.log 와 연결되지 않아 추적이 끊긴다.
-    suffix = ""
-    if context:
-        suffix = " (" + ", ".join(f"{k}={v}" for k, v in context.items() if v is not None) + ")"
-    logger.error(f"Timeout: {action}{suffix}")
+    logger.error(f"Timeout: {action}{_format_context(context)}")
     raise HTTPException(status_code=504, detail=f"{action} timed out")
 
 
@@ -51,9 +54,9 @@ def _raise_kb_unavailable(action: str) -> None:
     raise HTTPException(status_code=503, detail=f"{action} unavailable")
 
 
-def _raise_kb_upstream_error(action: str, exc: Exception) -> None:
+def _raise_kb_upstream_error(action: str, exc: Exception, context: Optional[Dict] = None) -> None:
     """업스트림 통신 중 오류(요청 도중 연결 끊김, 프로토콜 오류 등) 시 공통 502 변환."""
-    logger.error(f"Upstream error: {action}: {exc!r}")
+    logger.error(f"Upstream error: {action}{_format_context(context)}: {exc!r}")
     raise HTTPException(status_code=502, detail=f"{action} error")
 
 
@@ -141,6 +144,12 @@ class KnowledgeBaseService:
         else:
             kwargs['headers'] = headers
 
+        request_context = {
+            "method": method,
+            "url": url,
+            "member_id": (user_info or {}).get("member_id"),
+        }
+
         try:
             response = await getattr(self.client, method.lower())(url, **kwargs)
 
@@ -152,13 +161,9 @@ class KnowledgeBaseService:
         except httpx.ConnectError:
             _raise_kb_unavailable("Knowledge base service")
         except httpx.TimeoutException:
-            _raise_kb_timeout(timeout_action, timeout_context or {
-                "method": method,
-                "url": url,
-                "member_id": (user_info or {}).get("member_id"),
-            })
+            _raise_kb_timeout(timeout_action, timeout_context or request_context)
         except httpx.RequestError as e:
-            _raise_kb_upstream_error("Knowledge base service", e)
+            _raise_kb_upstream_error("Knowledge base service", e, request_context)
 
         return response
 

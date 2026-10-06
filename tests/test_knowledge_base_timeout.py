@@ -349,7 +349,7 @@ def test_make_authenticated_request_retry_timeout_returns_504(monkeypatch):
     assert getattr(exc_info.value, "status_code", None) == 504
 
 
-@pytest.mark.parametrize("transport_exc", [httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError])
+@pytest.mark.parametrize("transport_exc", [httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError, httpx.RequestError])
 def test_make_authenticated_request_transport_error_returns_502(monkeypatch, transport_exc):
     # 업스트림이 요청 도중 연결을 끊으면 httpx 는 메시지가 빈 ReadError 등을 던진다
     _preset_token(monkeypatch)
