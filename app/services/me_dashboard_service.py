@@ -209,6 +209,8 @@ def _upsert_snapshots(db: Session, fetched: List[Dict[str, Any]]) -> int:
     """카드/메트릭 스냅샷 upsert. PG는 ON CONFLICT, 그 외는 delete+insert."""
     if not fetched:
         return 0
+    # 라우트 live refresh 와 스케줄러가 같은 행을 다른 순서로 잠가 교착되지 않도록 키 순서로 쓴다.
+    fetched = sorted(fetched, key=lambda f: f["surro_service_id"])
     now = datetime.utcnow()
     dialect = db.bind.dialect.name
 
@@ -508,6 +510,7 @@ async def get_my_cards(db: Session, current_user: Any) -> MyServiceCardsResponse
             await refresh_member_services_live(db, current_user)
             source = "live"
         except Exception:
+            db.rollback()
             logger.exception("get_my_cards: live refresh failed; serving cached/partial data")
     return build_cards_response(db, member_id, source=source)
 
@@ -527,6 +530,7 @@ async def get_my_monitoring(
             await refresh_member_services_live(db, current_user)
             source = "live"
         except Exception:
+            db.rollback()
             logger.exception("get_my_monitoring: live refresh failed; serving cached/partial data")
     return build_monitoring_response(db, member_id, top_n=top_n, source=source)
 
