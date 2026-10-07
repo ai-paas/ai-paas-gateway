@@ -455,7 +455,6 @@ def test_build_cards_response_excludes_deleted_service(db, sample_member):
 def test_route_uses_cache_when_member_has_deleted_service(db, sample_member, monkeypatch):
     """삭제된 서비스가 있어도 신선한 캐시가 있으면 업스트림을 부르지 않는다."""
     monkeypatch.setattr("app.config.settings.DASHBOARD_CACHE_TTL_MINUTES", 10, raising=False)
-    monkeypatch.setattr(db, "commit", lambda: None)
     _make_service(db, sample_member.member_id, "s-live", "live")
     _seed_card(db, "s-live", workflow_count=3, age_minutes=1)
     gone = _make_service(db, sample_member.member_id, "s-gone", "gone")
@@ -481,7 +480,6 @@ def test_route_uses_cache_when_member_has_deleted_service(db, sample_member, mon
 
 
 def test_refresh_all_services_sync_skips_deleted_service(db, sample_member, monkeypatch):
-    monkeypatch.setattr(db, "commit", lambda: None)
     _make_service(db, sample_member.member_id, "s-live", "live")
     gone = _make_service(db, sample_member.member_id, "s-gone", "gone")
     _soft_delete(gone)
