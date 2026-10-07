@@ -204,6 +204,33 @@ class TestPromptSyncRoutes:
         assert stale.deleted_at is not None
         assert stale.deleted_by == admin_member.member_id
 
+    def test_admin_list_keeps_mappings_when_external_list_is_empty(
+        self, db, sample_member, admin_member, monkeypatch
+    ):
+        """업스트림이 일시적으로 빈 목록을 줘도 기존 매핑을 지우지 않는다."""
+        prompt_crud.create_mapping_from_external(
+            db=db,
+            surro_prompt_id=7,
+            member_id=sample_member.member_id,
+            name="owned-by-user",
+            description="d",
+            content="c",
+        )
+
+        async def fake_get_prompts(page=None, page_size=None, user_info=None):
+            return []
+
+        monkeypatch.setattr("app.routes.prompt.prompt_service.get_prompts", fake_get_prompts)
+
+        with _client_with_overrides(db, admin_member) as client:
+            response = client.get("/api/v1/prompts")
+
+        assert response.status_code == 200
+        kept = prompt_crud.get_prompt_by_surro_id(db, 7, include_deleted=True)
+        assert kept.is_active is True
+        assert kept.deleted_at is None
+        assert kept.created_by == sample_member.member_id
+
     def test_list_non_admin_does_not_soft_delete_hidden_prompt(self, db, sample_member, admin_member, monkeypatch):
         prompt_crud.create_mapping_from_external(
             db=db,

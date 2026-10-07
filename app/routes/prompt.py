@@ -143,11 +143,16 @@ async def _sync_prompt_cache(db: Session, current_user: Member) -> List[External
     _sync_external_prompts_to_db(db, owner, visible_external_list)
 
     if current_user.role == "admin":
-        prompt_crud.soft_delete_missing_mappings(
-            db=db,
-            active_surro_prompt_ids=[ext.id for ext in visible_external_list if ext.id is not None],
-            deleted_by=current_user.member_id,
-        )
+        if not visible_external_list:
+            # 빈 목록은 "전부 삭제됨"과 "업스트림이 일시적으로 비어 보임"을 구분할 수 없다.
+            # 일괄 soft-delete 하면 다음 동기화에서 admin 소유로 재생성되어 작성자 정보가 사라진다.
+            logger.warning("External prompt list is empty; skipping stale mapping cleanup")
+        else:
+            prompt_crud.soft_delete_missing_mappings(
+                db=db,
+                active_surro_prompt_ids=[ext.id for ext in visible_external_list if ext.id is not None],
+                deleted_by=current_user.member_id,
+            )
 
     return visible_external_list
 
