@@ -179,6 +179,9 @@ class WorkflowCRUD:
         멀쩡한 매핑을 지울 수 있어 이 작업을 하지 않는다. 호출자는 필터 없는
         전체 목록을 넘겨야 한다.
         """
+        # 빈 목록은 "전부 삭제됨"과 "업스트림 일시 장애"를 구분할 수 없다.
+        if not active_surro_workflow_ids:
+            return 0
         active_id_set = set(active_surro_workflow_ids)
         targets = db.query(Workflow).filter(
             Workflow.deleted_at.is_(None),

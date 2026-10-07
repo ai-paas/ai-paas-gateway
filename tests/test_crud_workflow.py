@@ -189,7 +189,19 @@ class TestWorkflowCRUD:
         assert workflow_crud.delete_workflow_by_surro_id(db, "wf-gone")
 
         n = workflow_crud.soft_delete_missing_mappings(
+            db=db, active_surro_workflow_ids=["wf-other"],
+        )
+
+        assert n == 0
+
+    def test_soft_delete_missing_mappings_keeps_all_on_empty_list(self, db, sample_member):
+        """빈 외부 목록이면 아무것도 지우지 않는다"""
+        keep = self._create_wf(db, sample_member.member_id, surro_id="wf-empty", name="keep")
+
+        n = workflow_crud.soft_delete_missing_mappings(
             db=db, active_surro_workflow_ids=[],
         )
 
         assert n == 0
+        db.refresh(keep)
+        assert keep.is_active is True and keep.deleted_at is None

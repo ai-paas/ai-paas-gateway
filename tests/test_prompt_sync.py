@@ -360,3 +360,22 @@ class TestPromptSyncRoutes:
         assert deleted.is_active is False
         assert deleted.deleted_at is not None
         assert deleted.deleted_by == sample_member.member_id
+
+
+def test_soft_delete_missing_mappings_keeps_all_on_empty_list(db, sample_member):
+    """빈 외부 목록이면 아무것도 지우지 않는다 — 호출자 가드와 무관하게 CRUD 에서 막는다"""
+    prompt_crud.create_mapping_from_external(
+        db=db,
+        surro_prompt_id=301,
+        member_id=sample_member.member_id,
+        name="kept-prompt",
+        description=None,
+        content="content",
+    )
+
+    n = prompt_crud.soft_delete_missing_mappings(db=db, active_surro_prompt_ids=[])
+
+    assert n == 0
+    kept = prompt_crud.get_prompt_by_surro_id(db, 301)
+    assert kept is not None
+    assert kept.created_by == sample_member.member_id

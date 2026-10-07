@@ -209,6 +209,9 @@ class PromptCRUD:
             deleted_by: str = "admin",
     ) -> int:
         """외부에서 사라진 활성 매핑을 soft delete 처리."""
+        # 빈 목록은 "전부 삭제됨"과 "업스트림 일시 장애"를 구분할 수 없다.
+        if not active_surro_prompt_ids:
+            return 0
         active_id_set = set(active_surro_prompt_ids)
         targets = db.query(Prompt).filter(
             and_(Prompt.deleted_at.is_(None), Prompt.is_active == True)

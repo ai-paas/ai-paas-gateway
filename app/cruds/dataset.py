@@ -259,6 +259,9 @@ class DatasetCRUD:
             deleted_by: Optional[str] = None
     ) -> int:
         """외부 목록에 없는 활성 매핑을 소프트 삭제한다."""
+        # 빈 목록은 "전부 삭제됨"과 "업스트림 일시 장애"를 구분할 수 없다.
+        if not active_surro_dataset_ids:
+            return 0
         active_id_set = set(active_surro_dataset_ids)
         targets = db.query(Dataset).filter(
             and_(
