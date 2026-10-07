@@ -66,7 +66,7 @@ def get_my_dashboard_summary(
     - `deleted`  = `deleted_at IS NOT NULL`
     - `total` = `active + inactive + deleted`
 
-    > `service`, `workflow`는 soft-delete가 없어 항상 `inactive=0, deleted=0`.
+    > 8개 도메인 모두 soft-delete(`deleted_at`)가 있어 위 3분할로 집계된다.
     """
     return dashboard_service.build_summary_for_member(db, current_user.member_id)
 
@@ -85,7 +85,7 @@ async def get_my_service_cards(
     db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
-    """본인이 만든 서비스별 현황 카드.
+    """본인이 만든 서비스별 현황 카드. soft-delete 된 서비스는 제외한다.
 
     ## 응답 `services[]` 항목
     | 필드 | 출처 | 설명 |
@@ -121,6 +121,7 @@ async def get_my_service_monitoring(
     current_user: Member = Depends(get_current_user),
 ):
     """본인 서비스의 기간별(1h/1d/1w) 모니터링 메트릭 + 메트릭별 Top N 순위.
+    soft-delete 된 서비스는 제외한다.
 
     ## 응답 구성
     - `services[]` — 서비스별 전체 기간 메트릭

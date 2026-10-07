@@ -87,7 +87,7 @@ def get_dashboard_summary(
     - `inactive` = `deleted_at IS NULL AND is_active IS FALSE` (없는 도메인은 0)
     - `deleted`  = `deleted_at IS NOT NULL` (없는 도메인은 0)
 
-    > `service`, `workflow`는 soft-delete 컬럼이 없어 항상 `inactive=0, deleted=0`.
+    > 8개 도메인 모두 soft-delete 컬럼(`deleted_at`)이 있어 위 3분할로 집계된다.
 
     ## 비고
     - 실시간 raw 집계 (캐시 없음). 응답 시간은 도메인 행 수에 비례하나 일반적으로 100ms 미만.
