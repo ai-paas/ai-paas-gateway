@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 from app.common.kb_attempt_token import attempt_token
 from app.config import settings
-from app.database import SessionLocal
+from app.database import SessionLocal, commit_or_rollback
 from app.models.knowledge_base import AttemptState, KnowledgeBase, KnowledgeBaseCreateAttempt
 
 
@@ -173,7 +173,7 @@ class KnowledgeBaseCRUD:
             if updated_by is not None:
                 db_kb.updated_by = updated_by
             db_kb.updated_at = datetime.utcnow()
-            db.commit()
+            commit_or_rollback(db)
             db.refresh(db_kb)
         return db_kb
 
@@ -189,7 +189,7 @@ class KnowledgeBaseCRUD:
             db_kb.deleted_at = datetime.utcnow()
             db_kb.deleted_by = deleted_by
             db_kb.is_active = False
-            db.commit()
+            commit_or_rollback(db)
             return True
         return False
 

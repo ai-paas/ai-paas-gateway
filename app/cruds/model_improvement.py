@@ -3,6 +3,7 @@ from typing import Optional, List
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
+from app.database import commit_or_rollback
 from app.models.model_improvement import ModelImprovement
 
 
@@ -37,7 +38,7 @@ class ModelImprovementCRUD:
             created_by=member_id
         )
         db.add(db_mi)
-        db.commit()
+        commit_or_rollback(db)
         db.refresh(db_mi)
         return db_mi
 

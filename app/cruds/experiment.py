@@ -4,6 +4,7 @@ from typing import Optional, List, Tuple
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
+from app.database import commit_or_rollback
 from app.models.experiment import Experiment
 
 
@@ -92,7 +93,7 @@ class ExperimentCRUD:
             dataset_id=dataset_id
         )
         db.add(db_experiment)
-        db.commit()
+        commit_or_rollback(db)
         db.refresh(db_experiment)
         return db_experiment
 
