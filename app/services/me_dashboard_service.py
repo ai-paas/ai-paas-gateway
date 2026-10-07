@@ -68,7 +68,11 @@ def _user_info(member_id: str, role: Optional[str] = None, name: Optional[str] =
 def _member_services(db: Session, member_id: str) -> List[Service]:
     return (
         db.query(Service)
-        .filter(Service.created_by == member_id)
+        .filter(
+            Service.created_by == member_id,
+            Service.deleted_at.is_(None),
+            Service.is_active.is_(True),
+        )
         .order_by(Service.created_at.desc())
         .all()
     )
@@ -314,7 +318,10 @@ def refresh_all_services_sync(db: Session, *, include_model_count: Optional[bool
     if include_model_count is None:
         include_model_count = settings.DASHBOARD_INCLUDE_MODEL_COUNT
 
-    services = db.query(Service).all()
+    services = db.query(Service).filter(
+        Service.deleted_at.is_(None),
+        Service.is_active.is_(True),
+    ).all()
     if not services:
         return 0
     items = [(s.surro_service_id, _user_info(s.created_by)) for s in services]
