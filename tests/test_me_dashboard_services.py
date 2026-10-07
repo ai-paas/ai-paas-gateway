@@ -430,3 +430,71 @@ def test_route_activities(db, sample_member):
     assert item["action"] == "create"
     assert item["resource_type"] == "service"
     assert item["metadata"] == {"name": "svc"}  # serialization_alias
+
+
+# ============================================================
+# soft-delete 된 서비스 제외
+# ============================================================
+
+def _soft_delete(service):
+    service.deleted_at = datetime.utcnow()
+    service.is_active = False
+
+
+def test_build_cards_response_excludes_deleted_service(db, sample_member):
+    _make_service(db, sample_member.member_id, "s-live", "live")
+    gone = _make_service(db, sample_member.member_id, "s-gone", "gone")
+    _soft_delete(gone)
+    db.flush()
+
+    resp = me_dashboard_service.build_cards_response(db, sample_member.member_id)
+
+    assert [c.surro_service_id for c in resp.services] == ["s-live"]
+
+
+def test_route_uses_cache_when_member_has_deleted_service(db, sample_member, monkeypatch):
+    """삭제된 서비스가 있어도 신선한 캐시가 있으면 업스트림을 부르지 않는다."""
+    monkeypatch.setattr("app.config.settings.DASHBOARD_CACHE_TTL_MINUTES", 10, raising=False)
+    monkeypatch.setattr(db, "commit", lambda: None)
+    _make_service(db, sample_member.member_id, "s-live", "live")
+    _seed_card(db, "s-live", workflow_count=3, age_minutes=1)
+    gone = _make_service(db, sample_member.member_id, "s-gone", "gone")
+    _soft_delete(gone)
+    db.flush()
+
+    calls = []
+
+    async def counting_get_service(surro_id, user_info):
+        calls.append(surro_id)
+        return None
+
+    monkeypatch.setattr(
+        "app.services.service_service.service_service.get_service", counting_get_service
+    )
+
+    with _client(db, sample_member) as client:
+        r = client.get("/api/v1/me/dashboard/services")
+
+    assert r.status_code == 200
+    assert r.json()["source"] == "cache"
+    assert calls == []
+
+
+def test_refresh_all_services_sync_skips_deleted_service(db, sample_member, monkeypatch):
+    monkeypatch.setattr(db, "commit", lambda: None)
+    _make_service(db, sample_member.member_id, "s-live", "live")
+    gone = _make_service(db, sample_member.member_id, "s-gone", "gone")
+    _soft_delete(gone)
+    db.flush()
+
+    requested = []
+
+    async def fake_refresh(items, include_model_count, svc_client, wf_client):
+        requested.extend(surro_id for surro_id, _ in items)
+        return []
+
+    monkeypatch.setattr(me_dashboard_service, "_refresh_async", fake_refresh)
+
+    me_dashboard_service.refresh_all_services_sync(db, include_model_count=False)
+
+    assert requested == ["s-live"]

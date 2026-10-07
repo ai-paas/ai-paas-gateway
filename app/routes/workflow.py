@@ -479,6 +479,7 @@ async def get_workflows(
                         f"({admin.member_id}): surro_id={m.id}"
                     )
                 except Exception as e:
+                    db.rollback()
                     logger.warning(
                         f"Failed to auto-register workflow {m.id}: {e}"
                     )
