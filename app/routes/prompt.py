@@ -137,6 +137,7 @@ async def _sync_prompt_cache(db: Session, current_user: Member) -> List[External
 
     - 일반 사용자: 본인이 볼 수 있는 external prompt만 DB에 보정
     - admin 사용자: admin이 볼 수 있는 전체 external prompt 기준으로 보정 + stale soft-delete
+      (external 목록이 비어 있으면 stale 정리를 건너뜀)
     """
     visible_external_list = await _fetch_external_prompts(current_user)
     owner = _get_default_mapping_owner(db, current_user)
@@ -335,6 +336,7 @@ async def get_prompts(
     ## Notes
     - page와 size를 모두 생략하면 전체 데이터를 조회합니다.
     - admin 호출 시 external 전체 목록 기준으로 stale 로컬 매핑을 soft-delete 처리합니다.
+      MLOps 목록이 비어 있으면 일시적 장애와 구분할 수 없어 stale 정리를 건너뜁니다.
     - 로컬에 없는 external prompt는 기본적으로 active admin 소유로 매핑됩니다.
 
     ## Errors
