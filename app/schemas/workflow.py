@@ -180,7 +180,7 @@ class WorkflowDefinition(BaseModel):
 
 class WorkflowCreateRequest(BaseModel):
     """워크플로우 생성 요청"""
-    name: str = Field(..., description="워크플로우 이름")
+    name: str = Field(..., max_length=255, description="워크플로우 이름")
     description: Optional[str] = Field(None, description="워크플로우 설명")
     category: Optional[str] = Field(None, description="카테고리")
     service_id: Optional[str] = Field(None, description="서비스 ID")
@@ -189,7 +189,7 @@ class WorkflowCreateRequest(BaseModel):
 
 class WorkflowUpdateRequest(BaseModel):
     """워크플로우 수정 요청"""
-    name: Optional[str] = Field(None, description="수정할 이름")
+    name: Optional[str] = Field(None, max_length=255, description="수정할 이름")
     description: Optional[str] = Field(None, description="수정할 설명")
     category: Optional[str] = Field(None, description="수정할 카테고리")
     status: Optional[Literal["DRAFT", "ACTIVE", "ERROR"]] = Field(None, description="수정할 상태")

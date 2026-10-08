@@ -264,6 +264,7 @@ async def create_workflow(
     - **401**: 인증되지 않은 사용자
     - **403**: service_id가 다른 사용자 소유의 service일 때 (admin 제외)
     - **404**: service_id가 게이트웨이 DB에 존재하지 않을 때
+    - **422**: name 이 255자를 넘을 때 (MLOps 호출 전에 거절)
     - **500**: 서버 내부 오류 (MLOps에는 생성됐으나 게이트웨이 DB 저장 실패 포함)
     """
     user_info = {
@@ -957,7 +958,7 @@ async def delete_template(
 @router.post("/templates/{template_id}/clone")
 async def clone_template(
         template_id: str,
-        workflow_name: str = Query(..., description="새로 생성할 워크플로우 이름"),
+        workflow_name: str = Query(..., max_length=255, description="새로 생성할 워크플로우 이름"),
         service_id: Optional[int] = Query(
             None,
             description="연결할 서비스 ID. 서비스 목록/상세 조회 응답의 id 값을 사용합니다.",
@@ -1010,6 +1011,7 @@ async def clone_template(
     - **401**: 인증되지 않은 사용자
     - **403**: service_id가 다른 사용자 소유의 service일 때 (admin 제외)
     - **404**: 템플릿 또는 service_id를 찾을 수 없음
+    - **422**: workflow_name 이 255자를 넘을 때 (MLOps 호출 전에 거절)
     - **500**: 서버 내부 오류
     """
     user_info = {
@@ -1289,6 +1291,7 @@ async def update_workflow(
     - **401**: 인증되지 않은 사용자
     - **403**: 권한 없음 (워크플로우가 본인 소유가 아니며 admin도 아님 / service_id가 다른 사용자 service일 때)
     - **404**: 워크플로우 또는 service_id를 찾을 수 없음
+    - **422**: name 이 255자를 넘을 때 (MLOps 호출 전에 거절)
     - **500**: 서버 내부 오류
     """
     # 우리 DB에서 기존 워크플로우 조회 (권한 확인용)
