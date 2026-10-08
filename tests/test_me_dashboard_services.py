@@ -15,7 +15,6 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.database import get_db
@@ -25,7 +24,7 @@ from app.models.audit_log import AuditLog
 from app.models.dashboard_cache import ServiceCardSnapshot, ServiceMetricSnapshot
 from app.models.service import Service
 from app.services import me_dashboard_service
-from tests.conftest import _engine
+from tests.conftest import _engine, committed_session, make_member
 
 
 # ============================================================
@@ -523,31 +522,18 @@ def _purge_rb(session):
     session.query(Member).filter(
         Member.member_id.in_([RB_MEMBER, RB_POISON])
     ).delete(synchronize_session=False)
-    session.commit()
 
 
 @pytest.fixture
 def rb_db():
-    """rollback 이 준비 데이터를 되돌리지 않는 세션. 공용 `db` 는 rollback_only 로 참여한다."""
-    connection = _engine.connect()
-    session = Session(bind=connection, autoflush=False)
-    _purge_rb(session)
-    member = Member(
-        name="dash rb", member_id=RB_MEMBER, email=f"{RB_MEMBER}@example.com",
-        password_hash="$2b$12$dummyhashvalue1234567890abcdefghijklmnopqrstuv",
-        role="user", is_active=True,
-    )
-    session.add(member)
-    session.add(Service(name="svc", created_by=RB_MEMBER, surro_service_id="rb-svc"))
-    session.commit()
-    session.refresh(member)
-    try:
+    """커밋된 회원과 서비스. 라우트처럼 rollback 해도 준비 데이터가 남아야 한다."""
+    with committed_session(_purge_rb, autoflush=False) as session:
+        member = make_member(RB_MEMBER, name="dash rb")
+        session.add(member)
+        session.add(Service(name="svc", created_by=RB_MEMBER, surro_service_id="rb-svc"))
+        session.commit()
+        session.refresh(member)
         yield session, member
-    finally:
-        session.rollback()
-        _purge_rb(session)
-        session.close()
-        connection.close()
 
 
 def _failing_live_refresh(monkeypatch):

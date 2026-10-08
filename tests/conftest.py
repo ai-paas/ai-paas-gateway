@@ -6,6 +6,7 @@ DB 전략:
 - 선택: TEST_DATABASE_URL 환경변수로 PostgreSQL 전환 가능
 """
 import os
+from contextlib import contextmanager
 
 import pytest
 from sqlalchemy import create_engine, event
@@ -44,6 +45,43 @@ def get_test_engine():
 # 모듈 레벨 엔진 (세션 전체에서 재사용)
 _engine = get_test_engine()
 
+DUMMY_PASSWORD_HASH = "$2b$12$dummyhashvalue1234567890abcdefghijklmnopqrstuv"
+
+
+def make_member(member_id: str, *, role: str = "user", name: str = None) -> Member:
+    """테스트용 활성 회원."""
+    return Member(
+        name=name or member_id,
+        member_id=member_id,
+        email=f"{member_id}@example.com",
+        password_hash=DUMMY_PASSWORD_HASH,
+        role=role,
+        is_active=True,
+    )
+
+
+@contextmanager
+def committed_session(purge, *, autoflush: bool = True):
+    """준비 데이터를 실제로 commit 하는 세션. 라우트의 rollback 경로를 검증할 때 쓴다.
+
+    공용 `db` fixture 는 외부 트랜잭션에 rollback_only 로 참여해, 라우트가 rollback 하면
+    준비 데이터까지 되돌아간다. 이 세션은 실제로 commit 하므로 purge(session) 가 시작과 끝에
+    남은 행을 지운다(commit 은 여기서 한다).
+    커넥션에 고정해야 TestClient 스레드도 같은 SQLite in-memory DB 를 본다.
+    """
+    connection = _engine.connect()
+    session = Session(bind=connection, autoflush=autoflush)
+    purge(session)
+    session.commit()
+    try:
+        yield session
+    finally:
+        session.rollback()
+        purge(session)
+        session.commit()
+        session.close()
+        connection.close()
+
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_database():
@@ -70,8 +108,7 @@ def db():
     7. connection.close()
 
     주의: 이 세션은 외부 트랜잭션에 rollback_only 로 참여한다. 라우트가
-    session.rollback() 을 호출하는 경로를 검증할 때는 이 fixture 대신 엔진에
-    직접 바인딩한 세션을 써야 한다 (tests/test_prompt_sync.py 참고).
+    session.rollback() 을 호출하는 경로를 검증할 때는 `committed_session` 을 쓴다.
     """
     connection = _engine.connect()
     transaction = connection.begin()

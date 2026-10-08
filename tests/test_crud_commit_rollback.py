@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.cruds.dataset import dataset_crud
@@ -23,7 +22,7 @@ from app.models.dataset import Dataset
 from app.models.experiment import Experiment
 from app.models.knowledge_base import KnowledgeBase
 from app.models.model_improvement import ModelImprovement
-from tests.conftest import _engine
+from tests.conftest import committed_session, make_member
 
 MEMBER_ID = "rb-user"
 POISON_ID = "rb-poison"
@@ -40,32 +39,16 @@ def _purge(session):
     session.query(Member).filter(
         Member.member_id.in_([MEMBER_ID, POISON_ID])
     ).delete(synchronize_session=False)
-    session.commit()
 
 
 @pytest.fixture
 def real_db():
-    """CRUD 의 rollback 이 실제로 동작하는 세션. 운영 SessionLocal 과 같이 autoflush 를 끈다.
-
-    공용 `db` fixture 는 외부 트랜잭션에 rollback_only 로 참여해 rollback 이 준비 데이터까지 되돌린다.
-    """
-    connection = _engine.connect()
-    session = Session(bind=connection, autoflush=False)
-    _purge(session)
-    member = Member(
-        name="rb user", member_id=MEMBER_ID, email=f"{MEMBER_ID}@example.com",
-        password_hash="$2b$12$dummyhashvalue1234567890abcdefghijklmnopqrstuv",
-        role="user", is_active=True,
-    )
-    session.add(member)
-    session.commit()
-    try:
+    """커밋된 회원. 운영 SessionLocal 과 같이 autoflush 를 끈다."""
+    with committed_session(_purge, autoflush=False) as session:
+        member = make_member(MEMBER_ID, name="rb user")
+        session.add(member)
+        session.commit()
         yield session, member
-    finally:
-        session.rollback()
-        _purge(session)
-        session.close()
-        connection.close()
 
 
 def _poison(db):

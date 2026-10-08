@@ -15,7 +15,7 @@ from app.main import app
 from app.models import Member
 from app.models.workflow import Workflow
 from app.schemas.workflow import ExternalWorkflowBriefResponse
-from tests.conftest import _engine
+from tests.conftest import _engine, committed_session, make_member
 from tests.test_knowledge_base_lock_concurrency import _run
 
 USER_ID = "wf-reg-user"
@@ -33,38 +33,17 @@ def _purge(session):
     session.query(Member).filter(
         Member.member_id.in_([USER_ID, ADMIN_ID, ADMIN2_ID])
     ).delete(synchronize_session=False)
-    session.commit()
 
 
 @pytest.fixture
 def real_db():
-    """실제 commit/rollback 이 동작하는 세션 + 커밋된 사용자·관리자.
-
-    공용 `db` fixture 는 외부 트랜잭션에 rollback_only 로 참여하므로, 라우트의
-    `db.rollback()` 이 테스트 준비 데이터까지 되돌려 버린다.
-    """
-    connection = _engine.connect()
-    session = Session(bind=connection)
-    _purge(session)
-    user = Member(
-        name="wf reg user", member_id=USER_ID, email=f"{USER_ID}@example.com",
-        password_hash="$2b$12$dummyhashvalue1234567890abcdefghijklmnopqrstuv",
-        role="user", is_active=True,
-    )
-    admin = Member(
-        name="wf reg admin", member_id=ADMIN_ID, email=f"{ADMIN_ID}@example.com",
-        password_hash="$2b$12$dummyhashvalue1234567890abcdefghijklmnopqrstuv",
-        role="admin", is_active=True,
-    )
-    session.add_all([user, admin])
-    session.commit()
-    try:
+    """커밋된 사용자·관리자. 라우트의 rollback 이 준비 데이터를 되돌리지 않아야 한다."""
+    with committed_session(_purge) as session:
+        user = make_member(USER_ID, name="wf reg user")
+        admin = make_member(ADMIN_ID, role="admin", name="wf reg admin")
+        session.add_all([user, admin])
+        session.commit()
         yield session, user, admin
-    finally:
-        session.rollback()
-        _purge(session)
-        session.close()
-        connection.close()
 
 
 def _brief(surro_id: str) -> ExternalWorkflowBriefResponse:
@@ -270,11 +249,7 @@ def test_auto_register_owner_is_lowest_id_admin(real_db, monkeypatch):
     갱신하는 것만으로 조회 순서가 바뀐다.
     """
     db, user, admin = real_db
-    db.add(Member(
-        name="wf reg admin2", member_id=ADMIN2_ID, email=f"{ADMIN2_ID}@example.com",
-        password_hash="$2b$12$dummyhashvalue1234567890abcdefghijklmnopqrstuv",
-        role="admin", is_active=True,
-    ))
+    db.add(make_member(ADMIN2_ID, role="admin", name="wf reg admin2"))
     db.commit()
     admin.name = "wf reg admin (updated)"
     db.commit()

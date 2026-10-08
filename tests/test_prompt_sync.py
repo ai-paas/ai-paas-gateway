@@ -12,44 +12,25 @@ from app.main import app
 from app.cruds.prompt import prompt_crud
 from app.models.prompt import Prompt
 from app.schemas.prompt import ExternalPromptResponse, PromptVariableReadSchema
-from tests.conftest import _engine
+from tests.conftest import _engine, committed_session, make_member
+
+
+def _purge(session):
+    session.query(Prompt).delete()
+    session.query(Member).filter(
+        Member.member_id.in_(["rb-user", "rb-admin"])
+    ).delete(synchronize_session=False)
 
 
 @pytest.fixture
 def real_db():
-    """엔진에 직접 바인딩한 세션 + commit 된 member 2명.
-
-    전역 `db` fixture 는 외부 트랜잭션에 rollback_only 로 참여하므로, 라우트가
-    호출하는 `session.rollback()` 이 테스트 준비 데이터까지 되돌려 버린다.
-    rollback 경로를 검증하려면 실제 commit/rollback 이 동작하는 세션이 필요하다.
-    커넥션을 직접 고정해야 TestClient 스레드에서도 같은 in-memory DB 를 본다.
-    """
-    connection = _engine.connect()
-    session = Session(bind=connection)
-    members = [
-        Member(
-            name="rollback tester", member_id="rb-user", email="rb-user@example.com",
-            password_hash="$2b$12$dummyhashvalue1234567890abcdefghijklmnopqrstuv",
-            role="user", is_active=True,
-        ),
-        Member(
-            name="rollback admin", member_id="rb-admin", email="rb-admin@example.com",
-            password_hash="$2b$12$dummyhashvalue1234567890abcdefghijklmnopqrstuv",
-            role="admin", is_active=True,
-        ),
-    ]
-    session.add_all(members)
-    session.commit()
-    try:
-        yield session, members[0], members[1]
-    finally:
-        session.rollback()
-        session.query(Prompt).delete()
-        for member in members:
-            session.query(Member).filter(Member.member_id == member.member_id).delete()
+    """커밋된 일반 사용자·관리자. 라우트의 rollback 이 준비 데이터를 되돌리지 않아야 한다."""
+    with committed_session(_purge) as session:
+        user = make_member("rb-user", name="rollback tester")
+        admin = make_member("rb-admin", role="admin", name="rollback admin")
+        session.add_all([user, admin])
         session.commit()
-        session.close()
-        connection.close()
+        yield session, user, admin
 
 
 def _external_prompt(prompt_id: int, name: str, content: str, description: str | None = None, variables=None):
