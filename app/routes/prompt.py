@@ -1,5 +1,6 @@
 import logging
-from typing import List, Optional
+from datetime import datetime
+from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
@@ -113,6 +114,7 @@ def _sync_external_prompts_to_db(
         db: Session,
         owner: Member,
         external_list: List[ExternalPromptResponse],
+        fetched_at: datetime,
 ) -> None:
     """보이는 external prompt 중 미매핑/soft-deleted 항목을 로컬 DB에 반영한다."""
     for ext in external_list:
@@ -125,6 +127,8 @@ def _sync_external_prompts_to_db(
                 description=ext.description,
                 content=ext.content,
                 prompt_variable=ext.prompt_variable,
+                fetched_at=fetched_at,
+                ignore_conflict=True,
             )
         except Exception as sync_error:
             # 실패한 flush 가 세션을 오염시키면 이후 항목과 본 조회까지 전부 실패한다.
@@ -132,16 +136,21 @@ def _sync_external_prompts_to_db(
             logger.warning("Failed to sync external prompt %s: %s", ext.id, sync_error)
 
 
-async def _sync_prompt_cache(db: Session, current_user: Member) -> List[ExternalPromptResponse]:
+async def _sync_prompt_cache(
+        db: Session, current_user: Member,
+) -> Tuple[List[ExternalPromptResponse], datetime]:
     """prompt 캐시 sync.
 
     - 일반 사용자: 본인이 볼 수 있는 external prompt만 DB에 보정
     - admin 사용자: admin이 볼 수 있는 전체 external prompt 기준으로 보정 + stale soft-delete
       (external 목록이 비어 있으면 stale 정리를 건너뜀)
     """
+    # 목록 요청 전 시각. 그 뒤에 만들어지거나 바뀐 매핑은 이 목록으로 판단하지 않는다.
+    # 저장값(datetime.utcnow)과 같은 naive UTC 로 잡는다.
+    fetched_at = datetime.utcnow()
     visible_external_list = await _fetch_external_prompts(current_user)
     owner = _get_default_mapping_owner(db, current_user)
-    _sync_external_prompts_to_db(db, owner, visible_external_list)
+    _sync_external_prompts_to_db(db, owner, visible_external_list, fetched_at)
 
     if current_user.role == "admin":
         if not visible_external_list:
@@ -153,9 +162,10 @@ async def _sync_prompt_cache(db: Session, current_user: Member) -> List[External
                 db=db,
                 active_surro_prompt_ids=[ext.id for ext in visible_external_list if ext.id is not None],
                 deleted_by=current_user.member_id,
+                fetched_at=fetched_at,
             )
 
-    return visible_external_list
+    return visible_external_list, fetched_at
 
 
 def _ensure_prompt_mapping(
@@ -173,6 +183,7 @@ def _ensure_prompt_mapping(
         description=external.description,
         content=external.content,
         prompt_variable=external.prompt_variable,
+        ignore_conflict=True,
     )
     prompt_crud.backfill_cache_if_changed(
         db=db,
@@ -351,7 +362,7 @@ async def get_prompts(
             skip = (page - 1) * size
             limit = size
 
-        visible_external_list = await _sync_prompt_cache(db, current_user)
+        visible_external_list, fetched_at = await _sync_prompt_cache(db, current_user)
         detail_by_external_id = {
             ext.id: ext for ext in visible_external_list if ext.id is not None
         }
@@ -387,6 +398,7 @@ async def get_prompts(
                 description=ext.description,
                 content=ext.content,
                 prompt_variable=ext.prompt_variable,
+                fetched_at=fetched_at,
             )
             response_data.append(_to_prompt_response(db_prompt, ext))
 

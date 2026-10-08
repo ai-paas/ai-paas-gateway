@@ -2,6 +2,8 @@ from datetime import datetime
 from typing import Any, List, Optional, Tuple
 
 from sqlalchemy import and_, or_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.models.prompt import Prompt
@@ -132,10 +134,19 @@ class PromptCRUD:
             description: Optional[str],
             content: str,
             prompt_variable=None,
+            fetched_at: Optional[datetime] = None,
+            ignore_conflict: bool = False,
     ) -> Prompt:
-        """external prompt 기준 활성 매핑을 갱신하거나 새 이력 행을 생성한다."""
+        """external prompt 기준 활성 매핑을 갱신하거나 새 이력 행을 생성한다.
+
+        fetched_at: 외부 응답을 요청한 시각(naive UTC). 매핑이 그 뒤에 바뀌었으면 응답이 더
+            오래된 것이므로 매핑을 건드리지 않는다.
+        ignore_conflict: 동시 요청이 먼저 만든 활성 매핑이 있으면 INSERT 실패 대신 그 행을 돌려준다.
+        """
         existing = self.get_prompt_by_surro_id(db, surro_prompt_id)
         if existing:
+            if fetched_at is not None and self._updated_since(db, existing, fetched_at):
+                return existing
             if existing.name != name:
                 # 숫자 ID 재사용 가능성이 있으므로 기존 소유권을 새 리소스에 넘기지 않는다.
                 now = datetime.utcnow()
@@ -145,15 +156,25 @@ class PromptCRUD:
                 existing.updated_at = now
                 db.flush()
             else:
-                existing.description = description
-                existing.content = content
-                existing.prompt_variable = _variables_to_dicts(prompt_variable)
-                existing.updated_at = datetime.utcnow()
-                db.commit()
-                db.refresh(existing)
+                # 조회마다 쓰지 않도록 값이 바뀐 경우에만 갱신한다
+                new_vars = _variables_to_dicts(prompt_variable)
+                changed = False
+                if existing.description != description:
+                    existing.description = description
+                    changed = True
+                if existing.content != content:
+                    existing.content = content
+                    changed = True
+                if existing.prompt_variable != new_vars:
+                    existing.prompt_variable = new_vars
+                    changed = True
+                if changed:
+                    existing.updated_at = datetime.utcnow()
+                    db.commit()
+                    db.refresh(existing)
                 return existing
 
-        db_prompt = Prompt(
+        values = dict(
             name=name,
             description=description,
             content=content,
@@ -162,10 +183,32 @@ class PromptCRUD:
             surro_prompt_id=surro_prompt_id,
             is_active=True,
         )
+        dialect = db.bind.dialect.name
+        if ignore_conflict and dialect in ("postgresql", "sqlite"):
+            insert = pg_insert if dialect == "postgresql" else sqlite_insert
+            stmt = insert(Prompt).values(**values).on_conflict_do_nothing(
+                index_elements=[Prompt.surro_prompt_id],
+                index_where=Prompt.deleted_at.is_(None),
+            )
+            db.execute(stmt)
+            db.commit()
+            return db.query(Prompt).filter(
+                Prompt.surro_prompt_id == surro_prompt_id,
+                Prompt.deleted_at.is_(None),
+            ).order_by(Prompt.id.desc()).first()
+
+        db_prompt = Prompt(**values)
         db.add(db_prompt)
         db.commit()
         db.refresh(db_prompt)
         return db_prompt
+
+    def _updated_since(self, db: Session, prompt: Prompt, since: datetime) -> bool:
+        """매핑이 since 이후에 갱신됐는지. 저장값과 같은 기준으로 해석되도록 DB 에서 비교한다."""
+        return db.query(Prompt.id).filter(
+            Prompt.id == prompt.id,
+            Prompt.updated_at >= since,
+        ).first() is not None
 
     def backfill_cache_if_changed(
             self,
@@ -175,10 +218,17 @@ class PromptCRUD:
             description: Any = _MISSING,
             content: Any = _MISSING,
             prompt_variable: Any = _MISSING,
+            fetched_at: Optional[datetime] = None,
     ) -> bool:
-        """활성 매핑의 외부 응답 캐시를 갱신한다."""
+        """활성 매핑의 외부 응답 캐시를 갱신한다.
+
+        fetched_at 이후에 바뀐 매핑은 건드리지 않는다. 오래된 응답의 이름을 되돌려 쓰면 다음
+        동기화가 이름 차이를 ID 재사용으로 판단한다.
+        """
         mapping = self.get_prompt_by_surro_id(db, surro_prompt_id)
         if not mapping:
+            return False
+        if fetched_at is not None and self._updated_since(db, mapping, fetched_at):
             return False
 
         changed = False
@@ -207,15 +257,23 @@ class PromptCRUD:
             db: Session,
             active_surro_prompt_ids: List[int],
             deleted_by: str = "admin",
+            fetched_at: Optional[datetime] = None,
     ) -> int:
-        """외부에서 사라진 활성 매핑을 soft delete 처리."""
+        """외부에서 사라진 활성 매핑을 soft delete 처리.
+
+        fetched_at 을 주면 그보다 먼저 만든 매핑만 정리한다. 목록을 받은 뒤 만든 프롬프트는
+        목록에 없어도 사라진 것이 아니다.
+        """
         # 빈 목록은 "전부 삭제됨"과 "업스트림 일시 장애"를 구분할 수 없다.
         if not active_surro_prompt_ids:
             return 0
         active_id_set = set(active_surro_prompt_ids)
-        targets = db.query(Prompt).filter(
+        query = db.query(Prompt).filter(
             and_(Prompt.deleted_at.is_(None), Prompt.is_active == True)
-        ).all()
+        )
+        if fetched_at is not None:
+            query = query.filter(Prompt.created_at < fetched_at)
+        targets = query.all()
 
         now = datetime.utcnow()
         deleted_count = 0

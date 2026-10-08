@@ -120,7 +120,8 @@ class TestPromptSyncRoutes:
 
         real_create = prompt_crud.create_mapping_from_external
 
-        def flaky_create(db, surro_prompt_id, member_id, name, description, content, prompt_variable=None):
+        def flaky_create(db, surro_prompt_id, member_id, name, description, content, prompt_variable=None,
+                         **kwargs):
             if surro_prompt_id == 42:
                 # 실제 장애(varchar 초과)와 동일하게 flush 실패로 세션을 오염시킨다.
                 db.add(Prompt(
@@ -138,6 +139,7 @@ class TestPromptSyncRoutes:
                 description=description,
                 content=content,
                 prompt_variable=prompt_variable,
+                **kwargs,
             )
 
         monkeypatch.setattr("app.routes.prompt.prompt_service.get_prompts", fake_get_prompts)
@@ -379,3 +381,178 @@ def test_soft_delete_missing_mappings_keeps_all_on_empty_list(db, sample_member)
     kept = prompt_crud.get_prompt_by_surro_id(db, 301)
     assert kept is not None
     assert kept.created_by == sample_member.member_id
+
+
+# ============================================================
+# 조회마다 쓰기 없음 / 스냅샷 이후 변경 보호 / 동시 매핑 생성
+# ============================================================
+
+def _mapping(db, prompt_id, owner, name, content="content", variables=None):
+    return prompt_crud.create_mapping_from_external(
+        db=db, surro_prompt_id=prompt_id, member_id=owner, name=name,
+        description=None, content=content, prompt_variable=variables,
+    )
+
+
+def test_sync_does_not_touch_unchanged_mapping(db, sample_member):
+    """값이 같으면 updated_at 을 바꾸지 않는다 (변수 포함)."""
+    variables = [PromptVariableReadSchema(id=1, name="v", prompt_id=401)]
+    mapping = _mapping(db, 401, sample_member.member_id, "same", variables=variables)
+    before = mapping.updated_at
+
+    _mapping(db, 401, sample_member.member_id, "same", variables=variables)
+
+    db.refresh(mapping)
+    assert mapping.updated_at == before
+
+
+def test_admin_cleanup_keeps_prompt_created_after_list_fetch(real_db, monkeypatch):
+    """목록을 받은 뒤 만들어진 프롬프트는 목록에 없어도 지우지 않는다."""
+    db, user, admin = real_db
+    _mapping(db, 501, admin.member_id, "listed")
+
+    async def fake_get_prompts(page=None, page_size=None, user_info=None):
+        listed = [_external_prompt(501, "listed", "content")]
+        # 목록 스냅샷 이후 다른 사용자가 프롬프트를 만들어 매핑까지 커밋했다
+        _mapping(db, 502, user.member_id, "created-meanwhile")
+        return listed
+
+    monkeypatch.setattr("app.routes.prompt.prompt_service.get_prompts", fake_get_prompts)
+
+    with _client_with_overrides(db, admin) as client:
+        response = client.get("/api/v1/prompts")
+
+    assert response.status_code == 200
+    kept = prompt_crud.get_prompt_by_surro_id(db, 502)
+    assert kept is not None
+    assert kept.created_by == user.member_id
+
+
+def test_rename_during_list_fetch_keeps_owner(real_db, monkeypatch):
+    """목록 조회와 이름 변경이 겹쳐도 재사용으로 판단하지 않고, 다음 조회에서도 소유자를 유지한다."""
+    db, user, admin = real_db
+    _mapping(db, 601, user.member_id, "before")
+    responses = iter([
+        "rename-during-fetch",   # 첫 조회: 스냅샷은 옛 이름, 그 사이 PUT 으로 이름 변경
+        "fresh",                 # 다음 조회: 새 이름
+    ])
+
+    async def fake_get_prompts(page=None, page_size=None, user_info=None):
+        if next(responses) == "rename-during-fetch":
+            prompt_crud.backfill_cache_if_changed(db=db, surro_prompt_id=601, name="after")
+            return [_external_prompt(601, "before", "content")]
+        return [_external_prompt(601, "after", "content")]
+
+    monkeypatch.setattr("app.routes.prompt.prompt_service.get_prompts", fake_get_prompts)
+
+    with _client_with_overrides(db, admin) as client:
+        assert client.get("/api/v1/prompts").status_code == 200
+        assert client.get("/api/v1/prompts").status_code == 200
+
+    current = prompt_crud.get_prompt_by_surro_id(db, 601)
+    assert current.created_by == user.member_id
+    assert current.name == "after"
+    reused = db.query(Prompt).filter(
+        Prompt.surro_prompt_id == 601, Prompt.deleted_by == "system:upstream-id-reused"
+    ).all()
+    assert reused == []
+
+
+def test_detail_mapping_returns_row_created_by_concurrent_request(real_db, monkeypatch):
+    """조회와 INSERT 사이에 다른 요청이 같은 매핑을 만들면 500 대신 그 행을 쓴다."""
+    db, user, admin = real_db
+    real_get = prompt_crud.get_prompt_by_surro_id
+    seen = {"first": True}
+
+    def racing_get(db, surro_prompt_id, include_deleted=False):
+        if seen["first"] and surro_prompt_id == 701 and not include_deleted:
+            seen["first"] = False
+            # "매핑 없음"을 읽은 직후 다른 요청이 먼저 커밋했다
+            db.add(Prompt(
+                name="p", content="c", created_by=admin.member_id,
+                surro_prompt_id=701, is_active=True,
+            ))
+            db.commit()
+            return None
+        return real_get(db, surro_prompt_id, include_deleted=include_deleted)
+
+    monkeypatch.setattr(prompt_crud, "get_prompt_by_surro_id", racing_get)
+
+    async def fake_get_prompt(surro_prompt_id, user_info=None):
+        return _external_prompt(701, "p", "c")
+
+    monkeypatch.setattr("app.routes.prompt.prompt_service.get_prompt", fake_get_prompt)
+
+    with _client_with_overrides(db, user) as client:
+        response = client.get("/api/v1/prompts/701")
+
+    assert response.status_code == 200
+    assert response.json()["created_by"] == admin.member_id
+    active = db.query(Prompt).filter(
+        Prompt.surro_prompt_id == 701, Prompt.deleted_at.is_(None)
+    ).all()
+    assert len(active) == 1
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    _engine.dialect.name != "postgresql",
+    reason="실제 트랜잭션 경합은 PostgreSQL 에서만 재현한다 — TEST_DATABASE_URL 필요",
+)
+def test_concurrent_detail_requests_create_one_mapping(real_db, monkeypatch):
+    """두 상세 조회가 같은 미매핑 프롬프트를 동시에 등록해도 둘 다 200 이고 매핑은 하나다."""
+    import threading
+
+    from tests.test_knowledge_base_lock_concurrency import SYNC_TIMEOUT, _run
+
+    db, user, admin = real_db
+
+    async def fake_get_prompt(surro_prompt_id, user_info=None):
+        return _external_prompt(801, "p", "c")
+
+    monkeypatch.setattr("app.routes.prompt.prompt_service.get_prompt", fake_get_prompt)
+
+    # 두 요청이 모두 "매핑 없음"을 읽은 뒤 INSERT 로 넘어가게 맞춘다
+    barrier = threading.Barrier(2, timeout=SYNC_TIMEOUT)
+    real_get = prompt_crud.get_prompt_by_surro_id
+
+    def synced_get(db, surro_prompt_id, include_deleted=False):
+        result = real_get(db, surro_prompt_id, include_deleted=include_deleted)
+        if result is None and surro_prompt_id == 801 and not include_deleted:
+            barrier.wait()
+        return result
+
+    monkeypatch.setattr(prompt_crud, "get_prompt_by_surro_id", synced_get)
+
+    def per_request_db():
+        session = Session(bind=_engine)
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app.dependency_overrides[get_db] = per_request_db
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        member_id=user.member_id, role="user", name=user.name,
+    )
+    results = {}
+
+    def call(name):
+        with TestClient(app, raise_server_exceptions=False) as client:
+            results[name] = client.get("/api/v1/prompts/801").status_code
+
+    try:
+        _run(lambda: call("A"), lambda: call("B"))
+    finally:
+        app.dependency_overrides.clear()
+
+    assert not barrier.broken, "두 요청이 동시에 INSERT 에 들어가지 못했다 — 경합이 재현되지 않았다"
+    assert results == {"A": 200, "B": 200}
+    check = Session(bind=_engine)
+    try:
+        active = check.query(Prompt).filter(
+            Prompt.surro_prompt_id == 801, Prompt.deleted_at.is_(None)
+        ).all()
+    finally:
+        check.close()
+    assert len(active) == 1
