@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from typing import Any, List, Optional, Tuple
 
@@ -24,6 +25,14 @@ def _variables_to_dicts(prompt_variables) -> Optional[List[dict]]:
         elif isinstance(var, dict):
             result.append(var)
     return result or None
+
+
+def _same_variables(current, new) -> bool:
+    """변수 목록을 순서와 무관하게 비교한다. 같은 변수를 다른 순서로 받아도 조회마다 쓰지 않게 한다."""
+    if not isinstance(current, list) or not isinstance(new, list):
+        return current == new
+    key = lambda var: json.dumps(var, sort_keys=True, default=str)
+    return sorted(current, key=key) == sorted(new, key=key)
 
 
 class PromptCRUD:
@@ -143,9 +152,9 @@ class PromptCRUD:
             오래된 것이므로 매핑을 건드리지 않는다.
         ignore_conflict: 동시 요청이 먼저 만든 활성 매핑이 있으면 INSERT 실패 대신 그 행을 돌려준다.
         """
-        existing = self.get_prompt_by_surro_id(db, surro_prompt_id)
+        existing, updated_since = self._get_mapping_for_sync(db, surro_prompt_id, fetched_at)
         if existing:
-            if fetched_at is not None and self._updated_since(db, existing, fetched_at):
+            if updated_since:
                 return existing
             if existing.name != name:
                 # 숫자 ID 재사용 가능성이 있으므로 기존 소유권을 새 리소스에 넘기지 않는다.
@@ -165,7 +174,7 @@ class PromptCRUD:
                 if existing.content != content:
                     existing.content = content
                     changed = True
-                if existing.prompt_variable != new_vars:
+                if not _same_variables(existing.prompt_variable, new_vars):
                     existing.prompt_variable = new_vars
                     changed = True
                 if changed:
@@ -203,12 +212,23 @@ class PromptCRUD:
         db.refresh(db_prompt)
         return db_prompt
 
-    def _updated_since(self, db: Session, prompt: Prompt, since: datetime) -> bool:
-        """매핑이 since 이후에 갱신됐는지. 저장값과 같은 기준으로 해석되도록 DB 에서 비교한다."""
-        return db.query(Prompt.id).filter(
-            Prompt.id == prompt.id,
-            Prompt.updated_at >= since,
-        ).first() is not None
+    def _get_mapping_for_sync(
+            self, db: Session, surro_prompt_id: int, since: Optional[datetime],
+    ) -> Tuple[Optional[Prompt], bool]:
+        """활성 매핑과, 그 매핑이 since 이후에 갱신됐는지를 SELECT 한 번으로 조회한다.
+
+        시각은 저장값과 같은 기준으로 해석되도록 DB 에서 비교한다.
+        """
+        if since is None:
+            return self.get_prompt_by_surro_id(db, surro_prompt_id), False
+        row = db.query(Prompt, Prompt.updated_at >= since).filter(
+            Prompt.surro_prompt_id == surro_prompt_id,
+            Prompt.deleted_at.is_(None),
+            Prompt.is_active == True,
+        ).order_by(Prompt.id.desc()).first()
+        if row is None:
+            return None, False
+        return row[0], bool(row[1])
 
     def backfill_cache_if_changed(
             self,
@@ -225,10 +245,8 @@ class PromptCRUD:
         fetched_at 이후에 바뀐 매핑은 건드리지 않는다. 오래된 응답의 이름을 되돌려 쓰면 다음
         동기화가 이름 차이를 ID 재사용으로 판단한다.
         """
-        mapping = self.get_prompt_by_surro_id(db, surro_prompt_id)
-        if not mapping:
-            return False
-        if fetched_at is not None and self._updated_since(db, mapping, fetched_at):
+        mapping, updated_since = self._get_mapping_for_sync(db, surro_prompt_id, fetched_at)
+        if not mapping or updated_since:
             return False
 
         changed = False
@@ -243,7 +261,7 @@ class PromptCRUD:
             changed = True
         if prompt_variable is not _MISSING:
             new_vars = _variables_to_dicts(prompt_variable)
-            if mapping.prompt_variable != new_vars:
+            if not _same_variables(mapping.prompt_variable, new_vars):
                 mapping.prompt_variable = new_vars
                 changed = True
 

@@ -1,8 +1,10 @@
 from contextlib import contextmanager
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -387,6 +389,54 @@ def test_sync_does_not_touch_unchanged_mapping(db, sample_member):
     assert mapping.updated_at == before
 
 
+def test_sync_ignores_variable_order(db, sample_member):
+    """같은 변수를 다른 순서로 받으면 바뀐 것으로 보지 않고, 내용이 바뀌면 갱신한다."""
+    a = PromptVariableReadSchema(id=1, name="topic", prompt_id=402)
+    b = PromptVariableReadSchema(id=2, name="tone", prompt_id=402)
+    mapping = _mapping(db, 402, sample_member.member_id, "same", variables=[a, b])
+    before = mapping.updated_at
+
+    _mapping(db, 402, sample_member.member_id, "same", variables=[b, a])
+    assert prompt_crud.backfill_cache_if_changed(
+        db=db, surro_prompt_id=402, prompt_variable=[b, a],
+    ) is False
+    db.refresh(mapping)
+    assert mapping.updated_at == before
+
+    renamed = PromptVariableReadSchema(id=2, name="style", prompt_id=402)
+    assert prompt_crud.backfill_cache_if_changed(
+        db=db, surro_prompt_id=402, prompt_variable=[renamed, a],
+    ) is True
+    db.refresh(mapping)
+    assert {v["name"] for v in mapping.prompt_variable} == {"topic", "style"}
+
+
+def test_sync_checks_mapping_with_one_select(db, sample_member):
+    """시각 판정이 매핑 조회와 같은 SELECT 에 들어가 항목당 SELECT 는 한 번이다."""
+    member_id = sample_member.member_id
+    _mapping(db, 403, member_id, "same")
+    statements = []
+
+    def record(conn, cursor, statement, *args):
+        statements.append(statement)
+
+    bind = db.get_bind()
+    event.listen(bind, "before_cursor_execute", record)
+    try:
+        prompt_crud.create_mapping_from_external(
+            db=db, surro_prompt_id=403, member_id=member_id, name="same",
+            description=None, content="content", fetched_at=datetime.utcnow(),
+        )
+        prompt_crud.backfill_cache_if_changed(
+            db=db, surro_prompt_id=403, name="same", fetched_at=datetime.utcnow(),
+        )
+    finally:
+        event.remove(bind, "before_cursor_execute", record)
+
+    assert len(statements) == 2
+    assert all(s.lstrip().upper().startswith("SELECT") for s in statements)
+
+
 def test_admin_cleanup_keeps_prompt_created_after_list_fetch(real_db, monkeypatch):
     """목록을 받은 뒤 만들어진 프롬프트는 목록에 없어도 지우지 않는다."""
     db, user, admin = real_db
@@ -442,11 +492,11 @@ def test_rename_during_list_fetch_keeps_owner(real_db, monkeypatch):
 def test_detail_mapping_returns_row_created_by_concurrent_request(real_db, monkeypatch):
     """조회와 INSERT 사이에 다른 요청이 같은 매핑을 만들면 500 대신 그 행을 쓴다."""
     db, user, admin = real_db
-    real_get = prompt_crud.get_prompt_by_surro_id
+    real_get = prompt_crud._get_mapping_for_sync
     seen = {"first": True}
 
-    def racing_get(db, surro_prompt_id, include_deleted=False):
-        if seen["first"] and surro_prompt_id == 701 and not include_deleted:
+    def racing_get(db, surro_prompt_id, since):
+        if seen["first"] and surro_prompt_id == 701:
             seen["first"] = False
             # "매핑 없음"을 읽은 직후 다른 요청이 먼저 커밋했다
             db.add(Prompt(
@@ -454,10 +504,10 @@ def test_detail_mapping_returns_row_created_by_concurrent_request(real_db, monke
                 surro_prompt_id=701, is_active=True,
             ))
             db.commit()
-            return None
-        return real_get(db, surro_prompt_id, include_deleted=include_deleted)
+            return None, False
+        return real_get(db, surro_prompt_id, since)
 
-    monkeypatch.setattr(prompt_crud, "get_prompt_by_surro_id", racing_get)
+    monkeypatch.setattr(prompt_crud, "_get_mapping_for_sync", racing_get)
 
     async def fake_get_prompt(surro_prompt_id, user_info=None):
         return _external_prompt(701, "p", "c")
