@@ -97,7 +97,8 @@ async def get_my_service_cards(
 
     ## 캐싱 동작
     - 카드 수치(`workflow_count`/`model_count`)는 MLOps 호출이 필요해 **스냅샷 캐시**에서 제공.
-    - 캐시가 없거나 `DASHBOARD_CACHE_TTL_MINUTES` 초과면 **이번 요청에서 본인 서비스만 즉시 집계**(`source=live`) 후 응답.
+    - 캐시가 없거나 `DASHBOARD_CACHE_TTL_MINUTES` 초과인 **본인 서비스만 이번 요청에서 즉시 집계**(`source=live`) 후 응답.
+      캐시가 신선한 서비스는 다시 집계하지 않는다.
     - `source` ∈ `cache`(스냅샷) / `live`(즉시 집계) / `empty`(보유 서비스 없음).
 
     > 이름/설명은 항상 gateway DB 실시간 값. 캐시는 수치만 보관.
@@ -136,7 +137,7 @@ async def get_my_service_monitoring(
 
     ## 캐싱 동작
     메트릭은 MLOps 서비스 detail(서비스 수만큼 N+1)에서 오므로 **스냅샷 캐시** 우선.
-    캐시 미스/`DASHBOARD_CACHE_TTL_MINUTES` 초과 시 본인 서비스만 즉시 집계 후 응답.
+    캐시 미스/`DASHBOARD_CACHE_TTL_MINUTES` 초과인 본인 서비스만 즉시 집계 후 응답.
 
     ## 비고
     - 데이터 없는 서비스/기간은 0으로 채워져 순위 하단에 포함됩니다 (서비스 누락 방지).

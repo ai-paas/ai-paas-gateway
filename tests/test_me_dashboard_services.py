@@ -603,3 +603,47 @@ def test_upsert_snapshots_writes_rows_in_key_order(db, monkeypatch):
     assert written["ServiceCardSnapshot"] == [("s-a", None), ("s-b", None)]
     # 기간 순서는 두 경로 모두 고정된 _PERIODS 를 따르므로 서비스 순서만 맞으면 된다
     assert [sid for sid, _ in written["ServiceMetricSnapshot"]] == ["s-a"] * 3 + ["s-b"] * 3
+
+
+# ============================================================
+# live refresh 는 스냅샷이 없거나 오래된 서비스만
+# ============================================================
+
+def _count_get_service(monkeypatch):
+    calls = []
+
+    async def counting(surro_id, user_info):
+        calls.append(surro_id)
+        return None  # MLOps 404 (삭제되지 않았지만 업스트림에 없는 서비스)
+
+    monkeypatch.setattr(
+        "app.services.service_service.service_service.get_service", counting
+    )
+    return calls
+
+
+def test_cards_live_refresh_only_stale_services(db, sample_member, monkeypatch):
+    """하나가 404 로 스냅샷이 없어도 신선한 서비스까지 매 요청 다시 조회하지 않는다."""
+    monkeypatch.setattr("app.config.settings.DASHBOARD_CACHE_TTL_MINUTES", 10, raising=False)
+    _make_service(db, sample_member.member_id, "s-fresh", "fresh")
+    _seed_card(db, "s-fresh", workflow_count=2, age_minutes=1)
+    _make_service(db, sample_member.member_id, "s-404", "missing upstream")
+    db.flush()
+    calls = _count_get_service(monkeypatch)
+
+    _run(me_dashboard_service.get_my_cards(db, sample_member))
+
+    assert calls == ["s-404"]
+
+
+def test_monitoring_live_refresh_only_stale_services(db, sample_member, monkeypatch):
+    monkeypatch.setattr("app.config.settings.DASHBOARD_CACHE_TTL_MINUTES", 10, raising=False)
+    _make_service(db, sample_member.member_id, "s-fresh", "fresh")
+    _seed_all_periods(db, "s-fresh", age_minutes=1)
+    _make_service(db, sample_member.member_id, "s-404", "missing upstream")
+    db.flush()
+    calls = _count_get_service(monkeypatch)
+
+    _run(me_dashboard_service.get_my_monitoring(db, sample_member))
+
+    assert calls == ["s-404"]
