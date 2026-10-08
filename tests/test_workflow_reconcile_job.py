@@ -4,6 +4,7 @@
 목록을 받은 뒤 사용자가 만든 워크플로우는 목록에 없을 뿐 사라진 것이 아니다. 지우면 다음 목록
 조회에서 admin 소유로 자동 등록되어 만든 사람이 403 을 받는다.
 """
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 from app.cruds.workflow import workflow_crud
@@ -13,10 +14,13 @@ from app.scheduler import job_reconcile_workflow_mappings
 
 def test_reconcile_keeps_workflow_created_during_fetch(db, sample_member, monkeypatch):
     for sid in ("wf-keep", "wf-gone"):
-        workflow_crud.create_workflow(
+        wf = workflow_crud.create_workflow(
             db=db, name=sid, description=None,
             created_by=sample_member.member_id, surro_workflow_id=sid,
         )
+        # Windows 의 utcnow 해상도에서는 잡의 fetched_at 과 같은 값이 찍혀 정리 대상에서 빠질 수 있다
+        wf.created_at = datetime.utcnow() - timedelta(minutes=1)
+    db.commit()
 
     class FakeWorkflowService:
         async def get_workflows(self, page=None, page_size=None):

@@ -174,7 +174,8 @@ class TestWorkflowCRUD:
         n = workflow_crud.soft_delete_missing_mappings(
             db=db,
             active_surro_workflow_ids=["wf-keep"],
-            fetched_at=datetime.utcnow(),
+            # 생성 직후 utcnow 는 Windows 해상도에서 created_at 과 같을 수 있다
+            fetched_at=datetime.utcnow() + timedelta(seconds=1),
             deleted_by="system:workflow-reconcile",
         )
 
