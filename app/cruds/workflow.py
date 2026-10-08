@@ -3,7 +3,10 @@ from typing import List, Optional, Set, Tuple
 
 from sqlalchemy.orm import Session
 
+from app.database import commit_or_rollback
 from app.models.workflow import Workflow
+
+REGISTERED_VIA_AUTO = "auto"
 
 
 class WorkflowCRUD:
@@ -13,19 +16,48 @@ class WorkflowCRUD:
             name: str,
             description: Optional[str],
             created_by: str,
-            surro_workflow_id: str
+            surro_workflow_id: str,
+            registered_via: Optional[str] = None,
     ) -> Workflow:
         """워크플로우 생성 (외부 API 호출 후 우리 DB 저장)"""
         db_workflow = Workflow(
             name=name,
             description=description,
             created_by=created_by,
-            surro_workflow_id=surro_workflow_id
+            surro_workflow_id=surro_workflow_id,
+            registered_via=registered_via,
         )
         db.add(db_workflow)
-        db.commit()
+        commit_or_rollback(db)
         db.refresh(db_workflow)
         return db_workflow
+
+    def claim_auto_registered(
+            self, db: Session, surro_workflow_id: str, member_id: str,
+    ) -> Optional[Workflow]:
+        """자동 등록이 만든 활성 매핑의 소유권을 member_id 로 넘긴다. 그런 행이 없으면 None.
+
+        판정과 변경을 UPDATE 한 문장으로 해 사이에 다른 요청이 끼어들 틈을 두지 않는다.
+        """
+        claimed = db.query(Workflow).filter(
+            Workflow.surro_workflow_id == surro_workflow_id,
+            Workflow.deleted_at.is_(None),
+            Workflow.registered_via == REGISTERED_VIA_AUTO,
+        ).update(
+            {
+                Workflow.created_by: member_id,
+                Workflow.registered_via: None,
+                Workflow.updated_at: datetime.utcnow(),
+            },
+            synchronize_session=False,
+        )
+        commit_or_rollback(db)
+        if not claimed:
+            return None
+        return db.query(Workflow).filter(
+            Workflow.surro_workflow_id == surro_workflow_id,
+            Workflow.deleted_at.is_(None),
+        ).one()
 
     def get_workflow(self, db: Session, workflow_id: int) -> Optional[Workflow]:
         """내부 ID로 조회"""

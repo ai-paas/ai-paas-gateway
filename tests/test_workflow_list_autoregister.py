@@ -90,14 +90,14 @@ def test_list_survives_auto_register_conflict(real_db, monkeypatch):
 
     real_create = workflow_crud.create_workflow
 
-    def racing_create(db, name, description, created_by, surro_workflow_id):
+    def racing_create(db, name, description, created_by, surro_workflow_id, **kwargs):
         if surro_workflow_id == "wf-race":
             # 다른 요청이 같은 워크플로우를 먼저 등록하고 커밋한 상황
             db.add(Workflow(name=name, created_by=USER_ID, surro_workflow_id=surro_workflow_id))
             db.commit()
         return real_create(
             db=db, name=name, description=description,
-            created_by=created_by, surro_workflow_id=surro_workflow_id,
+            created_by=created_by, surro_workflow_id=surro_workflow_id, **kwargs,
         )
 
     monkeypatch.setattr(workflow_crud, "create_workflow", racing_create)
