@@ -1,4 +1,6 @@
 """WorkflowCRUD 단위 테스트"""
+from datetime import datetime, timedelta
+
 import pytest
 
 from app.cruds.workflow import workflow_crud
@@ -172,6 +174,7 @@ class TestWorkflowCRUD:
         n = workflow_crud.soft_delete_missing_mappings(
             db=db,
             active_surro_workflow_ids=["wf-keep"],
+            fetched_at=datetime.utcnow(),
             deleted_by="system:workflow-reconcile",
         )
 
@@ -183,13 +186,32 @@ class TestWorkflowCRUD:
         assert stale.deleted_at is not None
         assert stale.deleted_by == "system:workflow-reconcile"
 
+    def test_soft_delete_missing_mappings_keeps_mapping_created_after_fetch(self, db, sample_member):
+        """목록을 받은 뒤 만든 매핑은 목록에 없어도 지우지 않는다"""
+        fetched_at = datetime.utcnow()
+        old = self._create_wf(db, sample_member.member_id, surro_id="wf-old", name="old")
+        new = self._create_wf(db, sample_member.member_id, surro_id="wf-new", name="new")
+        old.created_at = fetched_at - timedelta(minutes=1)
+        new.created_at = fetched_at + timedelta(seconds=1)
+        db.commit()
+
+        n = workflow_crud.soft_delete_missing_mappings(
+            db=db, active_surro_workflow_ids=["wf-other"], fetched_at=fetched_at,
+        )
+
+        assert n == 1
+        db.refresh(old)
+        db.refresh(new)
+        assert old.deleted_at is not None
+        assert new.is_active is True and new.deleted_at is None
+
     def test_soft_delete_missing_mappings_skips_already_deleted(self, db, sample_member):
         """이미 soft-deleted 된 매핑은 다시 세지 않는다"""
         self._create_wf(db, sample_member.member_id, surro_id="wf-gone", name="gone")
         assert workflow_crud.delete_workflow_by_surro_id(db, "wf-gone")
 
         n = workflow_crud.soft_delete_missing_mappings(
-            db=db, active_surro_workflow_ids=["wf-other"],
+            db=db, active_surro_workflow_ids=["wf-other"], fetched_at=datetime.utcnow(),
         )
 
         assert n == 0
@@ -211,7 +233,7 @@ class TestWorkflowCRUD:
         keep = self._create_wf(db, sample_member.member_id, surro_id="wf-empty", name="keep")
 
         n = workflow_crud.soft_delete_missing_mappings(
-            db=db, active_surro_workflow_ids=[],
+            db=db, active_surro_workflow_ids=[], fetched_at=datetime.utcnow(),
         )
 
         assert n == 0

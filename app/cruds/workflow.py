@@ -194,6 +194,8 @@ class WorkflowCRUD:
             self,
             db: Session,
             active_surro_workflow_ids: List[str],
+            *,
+            fetched_at: datetime,
             deleted_by: str = "system",
     ) -> int:
         """외부 목록에 없는 활성 매핑을 soft-delete 한다.
@@ -201,6 +203,9 @@ class WorkflowCRUD:
         목록 조회 라우트는 원격 장애나 service/status 필터가 만든 빈 결과로
         멀쩡한 매핑을 지울 수 있어 이 작업을 하지 않는다. 호출자는 필터 없는
         전체 목록을 넘겨야 한다.
+
+        fetched_at 은 외부 목록을 요청하기 전 시각(naive UTC, created_at 저장값과 같은 기준)이다.
+        그 뒤에 만든 매핑은 목록에 없을 뿐 사라진 것이 아니므로 지우지 않는다.
         """
         # 빈 목록은 "전부 삭제됨"과 "업스트림 일시 장애"를 구분할 수 없다.
         if not active_surro_workflow_ids:
@@ -209,6 +214,7 @@ class WorkflowCRUD:
         targets = db.query(Workflow).filter(
             Workflow.deleted_at.is_(None),
             Workflow.is_active == True,
+            Workflow.created_at < fetched_at,
         ).all()
 
         now = datetime.now(timezone.utc)
