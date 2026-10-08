@@ -556,3 +556,39 @@ def test_concurrent_detail_requests_create_one_mapping(real_db, monkeypatch):
     finally:
         check.close()
     assert len(active) == 1
+
+
+@pytest.mark.parametrize("route", ["detail", "update", "delete"])
+def test_rename_during_single_fetch_keeps_owner(real_db, monkeypatch, route):
+    """상세·수정·삭제가 단건 조회 중 다른 요청의 이름 변경과 겹쳐도 재사용으로 판단하지 않는다."""
+    db, user, admin = real_db
+    _mapping(db, 901, user.member_id, "before")
+
+    async def fake_get_prompt(surro_prompt_id, user_info=None):
+        # 단건 스냅샷은 옛 이름, 그 사이 다른 요청이 PUT 으로 이름을 바꿨다
+        prompt_crud.backfill_cache_if_changed(db=db, surro_prompt_id=901, name="after")
+        return _external_prompt(901, "before", "content")
+
+    async def fake_update_prompt(prompt_id, name=None, description=None, content=None,
+                                 prompt_variable=None, user_info=None):
+        return _external_prompt(901, "after", content or "content")
+
+    async def fake_delete_prompt(prompt_id, user_info=None):
+        return True
+
+    monkeypatch.setattr("app.routes.prompt.prompt_service.get_prompt", fake_get_prompt)
+    monkeypatch.setattr("app.routes.prompt.prompt_service.update_prompt", fake_update_prompt)
+    monkeypatch.setattr("app.routes.prompt.prompt_service.delete_prompt", fake_delete_prompt)
+
+    with _client_with_overrides(db, user) as client:
+        if route == "detail":
+            response = client.get("/api/v1/prompts/901")
+        elif route == "update":
+            response = client.put("/api/v1/prompts/901", json={"content": "edited"})
+        else:
+            response = client.delete("/api/v1/prompts/901")
+
+    assert response.status_code in (200, 204)
+    rows = db.query(Prompt).filter(Prompt.surro_prompt_id == 901).all()
+    assert [r.deleted_by for r in rows if r.deleted_by == "system:upstream-id-reused"] == []
+    assert {r.created_by for r in rows} == {user.member_id}

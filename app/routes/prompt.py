@@ -172,8 +172,13 @@ def _ensure_prompt_mapping(
         db: Session,
         current_user: Member,
         external: ExternalPromptResponse,
+        fetched_at: datetime,
 ) -> Prompt:
-    """외부 prompt 기준 로컬 매핑을 보정하고 최신 캐시 row를 반환한다."""
+    """외부 prompt 기준 로컬 매핑을 보정하고 최신 캐시 row를 반환한다.
+
+    fetched_at 은 external 을 요청하기 전 시각이다. 그 뒤에 바뀐 매핑은 external 이 더 오래된
+    것이므로 보정하지 않는다.
+    """
     owner = _get_default_mapping_owner(db, current_user)
     prompt_crud.create_mapping_from_external(
         db=db,
@@ -183,6 +188,7 @@ def _ensure_prompt_mapping(
         description=external.description,
         content=external.content,
         prompt_variable=external.prompt_variable,
+        fetched_at=fetched_at,
         ignore_conflict=True,
     )
     prompt_crud.backfill_cache_if_changed(
@@ -192,6 +198,7 @@ def _ensure_prompt_mapping(
         description=external.description,
         content=external.content,
         prompt_variable=external.prompt_variable,
+        fetched_at=fetched_at,
     )
 
     db_prompt = prompt_crud.get_prompt_by_surro_id(db=db, surro_prompt_id=external.id)
@@ -455,11 +462,12 @@ async def get_prompt(
     - 404: 프롬프트를 찾을 수 없음
     - 500: 서버 내부 오류
     """
+    fetched_at = datetime.utcnow()
     external = await prompt_service.get_prompt(surro_prompt_id, user_info=_user_info(current_user))
     if external is None:
         raise HTTPException(status_code=404, detail="Prompt not found in external service")
 
-    db_prompt = _ensure_prompt_mapping(db, current_user, external)
+    db_prompt = _ensure_prompt_mapping(db, current_user, external, fetched_at)
     return PromptDetailResponse(**_to_prompt_response(db_prompt, external).model_dump())
 
 
@@ -512,11 +520,12 @@ async def update_prompt(
     - 404: 프롬프트를 찾을 수 없음
     - 500: 서버 내부 오류
     """
+    fetched_at = datetime.utcnow()
     current_prompt = await prompt_service.get_prompt(surro_prompt_id, user_info=_user_info(current_user))
     if current_prompt is None:
         raise HTTPException(status_code=404, detail="Prompt not found in external service")
 
-    _ensure_prompt_mapping(db, current_user, current_prompt)
+    _ensure_prompt_mapping(db, current_user, current_prompt, fetched_at)
 
     try:
         updated_external = await prompt_service.update_prompt(
@@ -593,11 +602,12 @@ async def delete_prompt(
     - 404: 프롬프트를 찾을 수 없음
     - 500: 서버 내부 오류
     """
+    fetched_at = datetime.utcnow()
     external = await prompt_service.get_prompt(surro_prompt_id, user_info=_user_info(current_user))
     if external is None:
         raise HTTPException(status_code=404, detail="Prompt not found in external service")
 
-    _ensure_prompt_mapping(db, current_user, external)
+    _ensure_prompt_mapping(db, current_user, external, fetched_at)
 
     try:
         deleted = await prompt_service.delete_prompt(
