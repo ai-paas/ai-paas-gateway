@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -67,13 +67,20 @@ class WorkflowCRUD:
             limit: Optional[int] = None,
             search: Optional[str] = None,
             creator_id: Optional[str] = None,
-            status: Optional[str] = None
+            status: Optional[str] = None,
+            surro_workflow_ids: Optional[List[str]] = None,
     ) -> Tuple[List[Workflow], int]:
-        """워크플로우 목록 조회"""
+        """워크플로우 목록 조회.
+
+        surro_workflow_ids 를 주면 그 외부 ID 로 한정하고 10000건 상한을 두지 않는다.
+        결과 크기가 넘긴 ID 수를 넘지 않기 때문이다.
+        """
         query = db.query(Workflow).filter(
             Workflow.deleted_at.is_(None),
             Workflow.is_active.is_(True),
         )
+        if surro_workflow_ids is not None:
+            query = query.filter(Workflow.surro_workflow_id.in_(surro_workflow_ids))
 
         # 검색 조건 추가 (이름, 설명)
         if search:
@@ -95,11 +102,27 @@ class WorkflowCRUD:
         # 페이지네이션 적용 (skip, limit이 있을 때만)
         if skip is not None and limit is not None:
             workflows = query.offset(skip).limit(limit).all()
+        elif surro_workflow_ids is not None:
+            workflows = query.all()
         else:
             # 전체 데이터 조회 (최대 10000개)
             workflows = query.limit(10000).all()
 
         return workflows, total
+
+    def get_mapped_surro_ids(self, db: Session, surro_workflow_ids: List[str]) -> Set[str]:
+        """주어진 외부 ID 중 매핑이 있는 것.
+
+        유니크 인덱스와 같이 deleted_at 만 본다. is_active=False 라도 deleted_at 이 없으면
+        자리를 차지하므로 새로 등록할 수 없다.
+        """
+        if not surro_workflow_ids:
+            return set()
+        rows = db.query(Workflow.surro_workflow_id).filter(
+            Workflow.surro_workflow_id.in_(surro_workflow_ids),
+            Workflow.deleted_at.is_(None),
+        ).all()
+        return {sid for (sid,) in rows}
 
     def update_workflow(
             self,

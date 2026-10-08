@@ -445,20 +445,17 @@ async def get_workflows(
     external_list = [w for w in external_list if not w.is_template]
     external_by_id = {w.id: w for w in external_list}
     # 2) DB ↔ MLOps 매핑 확인
-    db_all, _ = workflow_crud.get_workflows(
-        db=db, skip=None, limit=None,
-        search=None, creator_id=None, status=None
-    )
-    db_surro_ids = {w.surro_workflow_id for w in db_all}
+    db_surro_ids = workflow_crud.get_mapped_surro_ids(db, list(external_by_id))
 
     # 조회 API에서는 stale 매핑을 변경하지 않는다. 원격 장애나 service/status
     # 필터가 빈 결과를 만들 수 있으므로 soft-delete는 별도 reconciliation에서만 수행한다.
     # MLOps에만 있는 워크플로우는 admin 소유로 등록한다.
     missing = [w for w in external_list if w.id not in db_surro_ids]
     if missing:
+        # admin 이 여럿이어도 소유자가 매번 같도록 정렬한다
         admin = db.query(Member).filter(
             Member.role == "admin", Member.is_active == True
-        ).first()
+        ).order_by(Member.id.asc()).first()
         if not admin:
             logger.warning(
                 f"No active admin member found — skipping auto-registration "
@@ -484,13 +481,14 @@ async def get_workflows(
                         f"Failed to auto-register workflow {m.id}: {e}"
                     )
 
-    # 3) 게이트웨이 DB 기준 필터 (creator_id, search)
+    # 3) 게이트웨이 DB 기준 필터 (creator_id, search). MLOps 목록에 있는 것만 병합되므로 그 ID 로 한정한다.
     db_filtered, _ = workflow_crud.get_workflows(
         db=db,
         skip=None, limit=None,
         search=search,
         creator_id=creator_id,
         status=None,
+        surro_workflow_ids=list(external_by_id),
     )
 
     # 4) MLOps 상세 데이터와 병합 (MLOps 응답에 없는 것은 제외 — status/service_id 필터 반영)

@@ -194,6 +194,18 @@ class TestWorkflowCRUD:
 
         assert n == 0
 
+    def test_get_workflows_limits_to_given_surro_ids(self, db, sample_member):
+        """외부 ID 를 주면 그 매핑만, 빈 목록이면 아무것도 돌려주지 않는다"""
+        self._create_wf(db, sample_member.member_id, surro_id="wf-in", name="in")
+        self._create_wf(db, sample_member.member_id, surro_id="wf-out", name="out")
+
+        wfs, total = workflow_crud.get_workflows(db, surro_workflow_ids=["wf-in"])
+        assert [w.surro_workflow_id for w in wfs] == ["wf-in"]
+        assert total == 1
+
+        wfs, total = workflow_crud.get_workflows(db, surro_workflow_ids=[])
+        assert wfs == [] and total == 0
+
     def test_soft_delete_missing_mappings_keeps_all_on_empty_list(self, db, sample_member):
         """빈 외부 목록이면 아무것도 지우지 않는다"""
         keep = self._create_wf(db, sample_member.member_id, surro_id="wf-empty", name="keep")

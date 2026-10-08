@@ -1,6 +1,7 @@
 """워크플로우 목록의 자동 등록이 실패해도 목록 API 가 500 이 되지 않는다."""
 import threading
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,7 @@ from tests.test_knowledge_base_lock_concurrency import _run
 
 USER_ID = "wf-reg-user"
 ADMIN_ID = "wf-reg-admin"
+ADMIN2_ID = "wf-reg-admin2"
 
 # 스레드 조율용 대기 상한. 넘었다는 것은 조율이 깨졌다는 뜻이다.
 SYNC_TIMEOUT = 15.0
@@ -26,10 +28,10 @@ SYNC_TIMEOUT = 15.0
 
 def _purge(session):
     session.query(Workflow).filter(
-        Workflow.created_by.in_([USER_ID, ADMIN_ID])
+        Workflow.created_by.in_([USER_ID, ADMIN_ID, ADMIN2_ID])
     ).delete(synchronize_session=False)
     session.query(Member).filter(
-        Member.member_id.in_([USER_ID, ADMIN_ID])
+        Member.member_id.in_([USER_ID, ADMIN_ID, ADMIN2_ID])
     ).delete(synchronize_session=False)
     session.commit()
 
@@ -190,3 +192,96 @@ def test_concurrent_lists_register_missing_workflow_once(real_db, monkeypatch):
     active = _active_mappings("wf-concurrent")
     assert len(active) == 1
     assert active[0].created_by == ADMIN_ID
+
+
+def _spy_create(monkeypatch):
+    """자동 등록이 INSERT 를 시도한 surro id 를 기록한다."""
+    calls = []
+    real_create = workflow_crud.create_workflow
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs["surro_workflow_id"])
+        return real_create(*args, **kwargs)
+
+    monkeypatch.setattr(workflow_crud, "create_workflow", spy)
+    return calls
+
+
+def _fake_list(monkeypatch, *surro_ids):
+    async def fake_get_workflows(**kwargs):
+        return [_brief(sid) for sid in surro_ids]
+
+    monkeypatch.setattr(
+        "app.routes.workflow.workflow_service.get_workflows", fake_get_workflows
+    )
+
+
+def test_inactive_mapping_is_not_registered_again(real_db, monkeypatch):
+    """deleted_at 이 없는 매핑은 is_active 와 무관하게 유니크 인덱스를 차지하므로 등록 대상이 아니다."""
+    db, user, admin = real_db
+    db.add(Workflow(
+        name="inactive", created_by=USER_ID, surro_workflow_id="wf-inactive", is_active=False,
+    ))
+    db.commit()
+    _fake_list(monkeypatch, "wf-inactive")
+    calls = _spy_create(monkeypatch)
+
+    with _client(db, user) as client:
+        response = client.get("/api/v1/workflows")
+
+    assert response.status_code == 200
+    assert calls == []
+
+
+def test_mapping_beyond_ten_thousand_is_listed_and_not_registered_again(real_db, monkeypatch):
+    """매핑이 10000건을 넘어도 가장 오래된 매핑을 누락으로 보지 않고 목록에도 보여 준다."""
+    db, user, admin = real_db
+    base = datetime(2026, 1, 1)
+    rows = [
+        {
+            "name": f"bulk-{i}", "created_by": USER_ID, "surro_workflow_id": f"wf-bulk-{i}",
+            "is_active": True, "created_at": base + timedelta(seconds=i),
+            "updated_at": base + timedelta(seconds=i),
+        }
+        for i in range(10000)
+    ]
+    rows.append({
+        "name": "oldest", "created_by": USER_ID, "surro_workflow_id": "wf-oldest",
+        "is_active": True, "created_at": base - timedelta(days=1),
+        "updated_at": base - timedelta(days=1),
+    })
+    db.bulk_insert_mappings(Workflow, rows)
+    db.commit()
+    _fake_list(monkeypatch, "wf-oldest")
+    calls = _spy_create(monkeypatch)
+
+    with _client(db, user) as client:
+        response = client.get("/api/v1/workflows")
+
+    assert response.status_code == 200
+    assert calls == []
+    assert [w["surro_workflow_id"] for w in response.json()["data"]] == ["wf-oldest"]
+
+
+def test_auto_register_owner_is_lowest_id_admin(real_db, monkeypatch):
+    """활성 admin 이 여럿이면 id 가 가장 작은 admin 이 소유자다.
+
+    PostgreSQL 은 갱신된 행을 힙 뒤쪽에 새로 쓰므로, 정렬이 없으면 먼저 만든 admin 을
+    갱신하는 것만으로 조회 순서가 바뀐다.
+    """
+    db, user, admin = real_db
+    db.add(Member(
+        name="wf reg admin2", member_id=ADMIN2_ID, email=f"{ADMIN2_ID}@example.com",
+        password_hash="$2b$12$dummyhashvalue1234567890abcdefghijklmnopqrstuv",
+        role="admin", is_active=True,
+    ))
+    db.commit()
+    admin.name = "wf reg admin (updated)"
+    db.commit()
+    _fake_list(monkeypatch, "wf-owner")
+
+    with _client(db, user) as client:
+        response = client.get("/api/v1/workflows")
+
+    assert response.status_code == 200
+    assert [w.created_by for w in _active_mappings("wf-owner")] == [ADMIN_ID]
