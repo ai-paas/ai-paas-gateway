@@ -66,7 +66,7 @@ def get_my_dashboard_summary(
     - `deleted`  = `deleted_at IS NOT NULL`
     - `total` = `active + inactive + deleted`
 
-    > `service`, `workflow`는 soft-delete가 없어 항상 `inactive=0, deleted=0`.
+    > 8개 도메인 모두 soft-delete(`deleted_at`)가 있어 위 3분할로 집계된다.
     """
     return dashboard_service.build_summary_for_member(db, current_user.member_id)
 
@@ -85,7 +85,7 @@ async def get_my_service_cards(
     db: Session = Depends(get_db),
     current_user: Member = Depends(get_current_user),
 ):
-    """본인이 만든 서비스별 현황 카드.
+    """본인이 만든 서비스별 현황 카드. soft-delete 된 서비스는 제외한다.
 
     ## 응답 `services[]` 항목
     | 필드 | 출처 | 설명 |
@@ -97,7 +97,8 @@ async def get_my_service_cards(
 
     ## 캐싱 동작
     - 카드 수치(`workflow_count`/`model_count`)는 MLOps 호출이 필요해 **스냅샷 캐시**에서 제공.
-    - 캐시가 없거나 `DASHBOARD_CACHE_TTL_MINUTES` 초과면 **이번 요청에서 본인 서비스만 즉시 집계**(`source=live`) 후 응답.
+    - 캐시가 없거나 `DASHBOARD_CACHE_TTL_MINUTES` 초과인 **본인 서비스만 이번 요청에서 즉시 집계**(`source=live`) 후 응답.
+      캐시가 신선한 서비스는 다시 집계하지 않는다.
     - `source` ∈ `cache`(스냅샷) / `live`(즉시 집계) / `empty`(보유 서비스 없음).
 
     > 이름/설명은 항상 gateway DB 실시간 값. 캐시는 수치만 보관.
@@ -121,6 +122,7 @@ async def get_my_service_monitoring(
     current_user: Member = Depends(get_current_user),
 ):
     """본인 서비스의 기간별(1h/1d/1w) 모니터링 메트릭 + 메트릭별 Top N 순위.
+    soft-delete 된 서비스는 제외한다.
 
     ## 응답 구성
     - `services[]` — 서비스별 전체 기간 메트릭
@@ -135,7 +137,7 @@ async def get_my_service_monitoring(
 
     ## 캐싱 동작
     메트릭은 MLOps 서비스 detail(서비스 수만큼 N+1)에서 오므로 **스냅샷 캐시** 우선.
-    캐시 미스/`DASHBOARD_CACHE_TTL_MINUTES` 초과 시 본인 서비스만 즉시 집계 후 응답.
+    캐시 미스/`DASHBOARD_CACHE_TTL_MINUTES` 초과인 본인 서비스만 즉시 집계 후 응답.
 
     ## 비고
     - 데이터 없는 서비스/기간은 0으로 채워져 순위 하단에 포함됩니다 (서비스 누락 방지).

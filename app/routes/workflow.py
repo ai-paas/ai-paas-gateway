@@ -1,15 +1,17 @@
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, UploadFile, File, Form
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_admin_user, get_current_user
 from app.common.sort import parse_sort, sort_in_memory
 from app.cruds.service import service_crud
-from app.cruds.workflow import workflow_crud
+from app.cruds.workflow import REGISTERED_VIA_AUTO, workflow_crud
 from app.database import get_db
 from app.models.member import Member
+from app.models.workflow import Workflow
 from app.schemas.workflow import (
     WorkflowCreateRequest,
     WorkflowUpdateRequest,
@@ -71,6 +73,54 @@ def _is_deletion_done(finalize_response: Any) -> bool:
         _status_of(finalize_response) in _DELETION_DONE_STATUSES
         or bool(finalize_response.get("deleted_from_db"))
     )
+
+
+def _save_created_workflow(
+        db: Session,
+        *,
+        name: str,
+        description: Optional[str],
+        member_id: str,
+        surro_workflow_id: str,
+) -> Tuple[Workflow, bool]:
+    """MLOps 에 만든 워크플로우의 매핑을 저장한다. (매핑, 소유권을 넘겨받았는지) 를 돌려준다.
+
+    MLOps 생성과 이 저장 사이에 목록 조회의 자동 등록이 같은 ID 를 먼저 admin 소유로 등록할 수
+    있다. 그 행(registered_via='auto')이면 요청자가 넘겨받고, 다른 행이면 409 로 거절한다.
+    """
+    try:
+        return workflow_crud.create_workflow(
+            db=db,
+            name=name,
+            description=description,
+            created_by=member_id,
+            surro_workflow_id=surro_workflow_id,
+        ), False
+    except IntegrityError:
+        claimed = workflow_crud.claim_auto_registered(db, surro_workflow_id, member_id)
+        if claimed is not None:
+            logger.warning(
+                "Reclaimed auto-registered workflow %s for creator %s",
+                surro_workflow_id, member_id,
+            )
+            return claimed, True
+        logger.error(
+            "Workflow %s created in external API but already registered by another member",
+            surro_workflow_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Workflow created in external API but already registered by another member",
+        )
+    except Exception as mapping_error:
+        logger.error(
+            "Workflow %s created in external API but DB save failed: %s",
+            surro_workflow_id, mapping_error,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Workflow created in external API but failed to save: {str(mapping_error)}",
+        )
 
 
 # ===== Component Types =====
@@ -264,6 +314,9 @@ async def create_workflow(
     - **401**: 인증되지 않은 사용자
     - **403**: service_id가 다른 사용자 소유의 service일 때 (admin 제외)
     - **404**: service_id가 게이트웨이 DB에 존재하지 않을 때
+    - **409**: MLOps에는 생성됐으나 같은 ID가 다른 사용자 소유로 이미 등록돼 있을 때.
+      목록 조회의 자동 등록이 먼저 admin 소유로 등록한 경우는 409가 아니라 요청자가 넘겨받는다.
+    - **422**: name 이 255자를 넘을 때 (MLOps 호출 전에 거절)
     - **500**: 서버 내부 오류 (MLOps에는 생성됐으나 게이트웨이 DB 저장 실패 포함)
     """
     user_info = {
@@ -301,35 +354,28 @@ async def create_workflow(
     )
 
     # 우리 DB에 저장
-    try:
-        db_workflow = workflow_crud.create_workflow(
-            db=db,
-            name=workflow_create.name,
-            description=workflow_create.description,
-            created_by=current_user.member_id,
-            surro_workflow_id=external_workflow.id
-        )
-        logger.info(
-            f"Created workflow: surro_id={external_workflow.id}, "
-            f"member_id={current_user.member_id}"
-        )
-    except Exception as mapping_error:
-        logger.error(f"Failed to create workflow: {str(mapping_error)}")
-        logger.warning(
-            f"Workflow {external_workflow.id} created in external API but DB save failed"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Workflow created in external API but failed to save: {str(mapping_error)}"
-        )
+    db_workflow, reclaimed = _save_created_workflow(
+        db,
+        name=workflow_create.name,
+        description=workflow_create.description,
+        member_id=current_user.member_id,
+        surro_workflow_id=external_workflow.id,
+    )
+    logger.info(
+        f"Created workflow: surro_id={external_workflow.id}, "
+        f"member_id={current_user.member_id}"
+    )
 
+    metadata = {"name": db_workflow.name, "service_id": workflow_create.service_id}
+    if reclaimed:
+        metadata["ownership_reclaimed"] = True
     emit_from_request(
         db, request,
         action=Action.CREATE,
         resource_type=ResourceType.WORKFLOW,
         actor_member_id=current_user.member_id,
         resource_id=str(db_workflow.surro_workflow_id),
-        metadata={"name": db_workflow.name, "service_id": workflow_create.service_id},
+        metadata=metadata,
     )
     # 응답: DB 메타정보 + 외부 API 데이터
     return WorkflowResponse(
@@ -445,20 +491,17 @@ async def get_workflows(
     external_list = [w for w in external_list if not w.is_template]
     external_by_id = {w.id: w for w in external_list}
     # 2) DB ↔ MLOps 매핑 확인
-    db_all, _ = workflow_crud.get_workflows(
-        db=db, skip=None, limit=None,
-        search=None, creator_id=None, status=None
-    )
-    db_surro_ids = {w.surro_workflow_id for w in db_all}
+    db_surro_ids = workflow_crud.get_mapped_surro_ids(db, list(external_by_id))
 
     # 조회 API에서는 stale 매핑을 변경하지 않는다. 원격 장애나 service/status
     # 필터가 빈 결과를 만들 수 있으므로 soft-delete는 별도 reconciliation에서만 수행한다.
     # MLOps에만 있는 워크플로우는 admin 소유로 등록한다.
     missing = [w for w in external_list if w.id not in db_surro_ids]
     if missing:
+        # admin 이 여럿이어도 소유자가 매번 같도록 정렬한다
         admin = db.query(Member).filter(
             Member.role == "admin", Member.is_active == True
-        ).first()
+        ).order_by(Member.id.asc()).first()
         if not admin:
             logger.warning(
                 f"No active admin member found — skipping auto-registration "
@@ -473,6 +516,7 @@ async def get_workflows(
                         description=m.description,
                         created_by=admin.member_id,
                         surro_workflow_id=m.id,
+                        registered_via=REGISTERED_VIA_AUTO,
                     )
                     logger.info(
                         f"Registered missing workflow under admin "
@@ -484,13 +528,14 @@ async def get_workflows(
                         f"Failed to auto-register workflow {m.id}: {e}"
                     )
 
-    # 3) 게이트웨이 DB 기준 필터 (creator_id, search)
+    # 3) 게이트웨이 DB 기준 필터 (creator_id, search). MLOps 목록에 있는 것만 병합되므로 그 ID 로 한정한다.
     db_filtered, _ = workflow_crud.get_workflows(
         db=db,
         skip=None, limit=None,
         search=search,
         creator_id=creator_id,
         status=None,
+        surro_workflow_ids=list(external_by_id),
     )
 
     # 4) MLOps 상세 데이터와 병합 (MLOps 응답에 없는 것은 제외 — status/service_id 필터 반영)
@@ -959,7 +1004,7 @@ async def delete_template(
 @router.post("/templates/{template_id}/clone")
 async def clone_template(
         template_id: str,
-        workflow_name: str = Query(..., description="새로 생성할 워크플로우 이름"),
+        workflow_name: str = Query(..., max_length=255, description="새로 생성할 워크플로우 이름"),
         service_id: Optional[int] = Query(
             None,
             description="연결할 서비스 ID. 서비스 목록/상세 조회 응답의 id 값을 사용합니다.",
@@ -1012,7 +1057,9 @@ async def clone_template(
     - **401**: 인증되지 않은 사용자
     - **403**: service_id가 다른 사용자 소유의 service일 때 (admin 제외)
     - **404**: 템플릿 또는 service_id를 찾을 수 없음
-    - **500**: 서버 내부 오류
+    - **409**: MLOps에는 복제됐으나 같은 ID가 다른 사용자 소유로 이미 등록돼 있을 때 (생성 API와 동일)
+    - **422**: workflow_name 이 255자를 넘을 때 (MLOps 호출 전에 거절)
+    - **500**: 서버 내부 오류 (MLOps에는 복제됐으나 게이트웨이 DB 저장 실패 포함)
     """
     user_info = {
         'member_id': current_user.member_id,
@@ -1046,29 +1093,22 @@ async def clone_template(
     )
 
     # 우리 DB에 저장
-    try:
-        db_workflow = workflow_crud.create_workflow(
-            db=db,
-            name=workflow_name,
-            description=clone_response.get('description'),
-            created_by=current_user.member_id,
-            surro_workflow_id=clone_response['id']
-        )
-        logger.info(
-            f"Created workflow from template: surro_id={clone_response['id']}, "
-            f"template_id={template_id}, member_id={current_user.member_id}"
-        )
+    db_workflow, _ = _save_created_workflow(
+        db,
+        name=workflow_name,
+        description=clone_response.get('description'),
+        member_id=current_user.member_id,
+        surro_workflow_id=clone_response['id'],
+    )
+    logger.info(
+        f"Created workflow from template: surro_id={clone_response['id']}, "
+        f"template_id={template_id}, member_id={current_user.member_id}"
+    )
 
-        # 응답에 DB 메타정보 추가
-        clone_response['db_id'] = db_workflow.id
-        clone_response['db_created_at'] = db_workflow.created_at.isoformat()
-        clone_response['db_created_by'] = db_workflow.created_by
-
-    except Exception as mapping_error:
-        logger.error(f"Failed to save cloned workflow to DB: {str(mapping_error)}")
-        logger.warning(
-            f"Workflow {clone_response['id']} created from template but DB save failed"
-        )
+    # 응답에 DB 메타정보 추가
+    clone_response['db_id'] = db_workflow.id
+    clone_response['db_created_at'] = db_workflow.created_at.isoformat()
+    clone_response['db_created_by'] = db_workflow.created_by
 
     return clone_response
 
@@ -1291,6 +1331,7 @@ async def update_workflow(
     - **401**: 인증되지 않은 사용자
     - **403**: 권한 없음 (워크플로우가 본인 소유가 아니며 admin도 아님 / service_id가 다른 사용자 service일 때)
     - **404**: 워크플로우 또는 service_id를 찾을 수 없음
+    - **422**: name 이 255자를 넘을 때 (MLOps 호출 전에 거절)
     - **500**: 서버 내부 오류
     """
     # 우리 DB에서 기존 워크플로우 조회 (권한 확인용)

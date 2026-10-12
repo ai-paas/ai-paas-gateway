@@ -65,14 +65,18 @@ def _user_info(member_id: str, role: Optional[str] = None, name: Optional[str] =
     return ui
 
 
+def _active_services(db: Session):
+    """soft-delete 되지 않은 활성 서비스. 삭제된 서비스는 MLOps 에서 404 라 스냅샷이 생기지 않는다."""
+    return db.query(Service).filter(
+        Service.deleted_at.is_(None),
+        Service.is_active.is_(True),
+    )
+
+
 def _member_services(db: Session, member_id: str) -> List[Service]:
     return (
-        db.query(Service)
-        .filter(
-            Service.created_by == member_id,
-            Service.deleted_at.is_(None),
-            Service.is_active.is_(True),
-        )
+        _active_services(db)
+        .filter(Service.created_by == member_id)
         .order_by(Service.created_at.desc())
         .all()
     )
@@ -209,6 +213,8 @@ def _upsert_snapshots(db: Session, fetched: List[Dict[str, Any]]) -> int:
     """카드/메트릭 스냅샷 upsert. PG는 ON CONFLICT, 그 외는 delete+insert."""
     if not fetched:
         return 0
+    # 라우트 live refresh 와 스케줄러가 같은 행을 다른 순서로 잠가 교착되지 않도록 키 순서로 쓴다.
+    fetched = sorted(fetched, key=lambda f: f["surro_service_id"])
     now = datetime.utcnow()
     dialect = db.bind.dialect.name
 
@@ -284,10 +290,15 @@ def _upsert_snapshots(db: Session, fetched: List[Dict[str, Any]]) -> int:
 # ============================================================
 
 async def refresh_member_services_live(
-    db: Session, current_user: Any, *, include_model_count: Optional[bool] = None
+    db: Session,
+    current_user: Any,
+    *,
+    include_model_count: Optional[bool] = None,
+    surro_ids: Optional[List[str]] = None,
 ) -> int:
     """본인 서비스만 즉시 집계 + 캐시 upsert. route(async loop)에서 await — 싱글톤 client 사용.
 
+    surro_ids 를 주면 본인 서비스 중 그 서비스만 집계한다.
     반환: upsert된 서비스 수.
     """
     from app.services.service_service import service_service
@@ -297,6 +308,9 @@ async def refresh_member_services_live(
         include_model_count = settings.DASHBOARD_INCLUDE_MODEL_COUNT
 
     services = _member_services(db, current_user.member_id)
+    if surro_ids is not None:
+        wanted = set(surro_ids)
+        services = [s for s in services if s.surro_service_id in wanted]
     if not services:
         return 0
 
@@ -318,10 +332,7 @@ def refresh_all_services_sync(db: Session, *, include_model_count: Optional[bool
     if include_model_count is None:
         include_model_count = settings.DASHBOARD_INCLUDE_MODEL_COUNT
 
-    services = db.query(Service).filter(
-        Service.deleted_at.is_(None),
-        Service.is_active.is_(True),
-    ).all()
+    services = _active_services(db).all()
     if not services:
         return 0
     items = [(s.surro_service_id, _user_info(s.created_by)) for s in services]
@@ -346,26 +357,28 @@ def refresh_all_services_sync(db: Session, *, include_model_count: Optional[bool
 # Serve (sync) — cache 병합 읽기
 # ============================================================
 
-def cards_need_refresh(db: Session, surro_ids: List[str]) -> bool:
-    """카드 스냅샷이 하나라도 없거나 TTL stale이면 True."""
+def stale_card_ids(db: Session, surro_ids: List[str]) -> List[str]:
+    """카드 스냅샷이 없거나 TTL stale 인 서비스."""
     if not surro_ids:
-        return False
+        return []
     rows = (
         db.query(ServiceCardSnapshot.surro_service_id, ServiceCardSnapshot.refreshed_at)
         .filter(ServiceCardSnapshot.surro_service_id.in_(surro_ids))
         .all()
     )
     have = {r.surro_service_id: r.refreshed_at for r in rows}
-    for sid in surro_ids:
-        if sid not in have or _is_stale(have[sid]):
-            return True
-    return False
+    return [sid for sid in surro_ids if sid not in have or _is_stale(have[sid])]
 
 
-def metrics_need_refresh(db: Session, surro_ids: List[str]) -> bool:
-    """서비스마다 3개 기간 행이 다 있고 모두 fresh가 아니면 True."""
+def cards_need_refresh(db: Session, surro_ids: List[str]) -> bool:
+    """카드 스냅샷이 하나라도 없거나 TTL stale이면 True."""
+    return bool(stale_card_ids(db, surro_ids))
+
+
+def stale_metric_ids(db: Session, surro_ids: List[str]) -> List[str]:
+    """3개 기간 행 중 빠진 것이 있거나 하나라도 TTL stale 인 서비스."""
     if not surro_ids:
-        return False
+        return []
     rows = (
         db.query(
             ServiceMetricSnapshot.surro_service_id,
@@ -376,14 +389,20 @@ def metrics_need_refresh(db: Session, surro_ids: List[str]) -> bool:
         .all()
     )
     periods_by: Dict[str, set] = {}
+    stale = set()
     for r in rows:
         if _is_stale(r.refreshed_at):
-            return True
+            stale.add(r.surro_service_id)
         periods_by.setdefault(r.surro_service_id, set()).add(r.period)
-    for sid in surro_ids:
-        if periods_by.get(sid, set()) != set(_PERIODS):
-            return True
-    return False
+    return [
+        sid for sid in surro_ids
+        if sid in stale or periods_by.get(sid, set()) != set(_PERIODS)
+    ]
+
+
+def metrics_need_refresh(db: Session, surro_ids: List[str]) -> bool:
+    """서비스마다 3개 기간 행이 다 있고 모두 fresh가 아니면 True."""
+    return bool(stale_metric_ids(db, surro_ids))
 
 
 def build_cards_response(
@@ -496,18 +515,22 @@ def build_monitoring_response(
 # ============================================================
 
 async def get_my_cards(db: Session, current_user: Any) -> MyServiceCardsResponse:
-    """서비스 현황 카드. 캐시 우선, stale/미스 시 본인 서비스만 즉시 갱신(source=live)."""
+    """서비스 현황 카드. 캐시 우선, stale/미스인 본인 서비스만 즉시 갱신(source=live)."""
     member_id = current_user.member_id
     surro_ids = [s.surro_service_id for s in _member_services(db, member_id)]
     if not surro_ids:
         return build_cards_response(db, member_id, source="cache")  # -> source="empty"
 
     source = "cache"
-    if cards_need_refresh(db, surro_ids):
+    # 스냅샷이 없거나 오래된 서비스만 다시 집계한다. 업스트림 404 서비스 하나 때문에
+    # 신선한 서비스까지 매 요청 재조회하지 않게 한다.
+    stale = stale_card_ids(db, surro_ids)
+    if stale:
         try:
-            await refresh_member_services_live(db, current_user)
+            await refresh_member_services_live(db, current_user, surro_ids=stale)
             source = "live"
         except Exception:
+            db.rollback()
             logger.exception("get_my_cards: live refresh failed; serving cached/partial data")
     return build_cards_response(db, member_id, source=source)
 
@@ -515,18 +538,20 @@ async def get_my_cards(db: Session, current_user: Any) -> MyServiceCardsResponse
 async def get_my_monitoring(
     db: Session, current_user: Any, *, top_n: int = 5
 ) -> MyServiceMonitoringResponse:
-    """서비스 모니터링(1h/1d/1w + Top N). 캐시 우선, stale/미스 시 본인 서비스만 즉시 갱신."""
+    """서비스 모니터링(1h/1d/1w + Top N). 캐시 우선, stale/미스인 본인 서비스만 즉시 갱신."""
     member_id = current_user.member_id
     surro_ids = [s.surro_service_id for s in _member_services(db, member_id)]
     if not surro_ids:
         return build_monitoring_response(db, member_id, top_n=top_n, source="cache")  # -> "empty"
 
     source = "cache"
-    if metrics_need_refresh(db, surro_ids):
+    stale = stale_metric_ids(db, surro_ids)
+    if stale:
         try:
-            await refresh_member_services_live(db, current_user)
+            await refresh_member_services_live(db, current_user, surro_ids=stale)
             source = "live"
         except Exception:
+            db.rollback()
             logger.exception("get_my_monitoring: live refresh failed; serving cached/partial data")
     return build_monitoring_response(db, member_id, top_n=top_n, source=source)
 

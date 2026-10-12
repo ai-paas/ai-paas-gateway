@@ -143,6 +143,7 @@ def job_reconcile_workflow_mappings() -> None:
     (템플릿 포함)을 받아 그 목록에 없는 활성 매핑만 정리한다. MLOps 호출 필요.
     """
     import asyncio
+    from datetime import datetime
 
     from app.cruds.workflow import workflow_crud
     from app.services.workflow_service import WorkflowService
@@ -156,6 +157,8 @@ def job_reconcile_workflow_mappings() -> None:
             finally:
                 await svc.close()
 
+        # 목록 요청 전 시각. created_at 저장값(datetime.utcnow)과 같은 naive UTC 로 잡는다.
+        fetched_at = datetime.utcnow()
         external = asyncio.run(_fetch())
         if not external:
             # 빈 응답을 "전부 삭제됨"으로 해석하면 안 된다.
@@ -165,6 +168,7 @@ def job_reconcile_workflow_mappings() -> None:
         n = workflow_crud.soft_delete_missing_mappings(
             db=db,
             active_surro_workflow_ids=[w.id for w in external],
+            fetched_at=fetched_at,
             deleted_by="system:workflow-reconcile",
         )
         logger.info(

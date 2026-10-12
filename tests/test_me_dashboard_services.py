@@ -13,15 +13,18 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.auth import get_current_user
 from app.database import get_db
 from app.main import app
+from app.models import Member
 from app.models.audit_log import AuditLog
 from app.models.dashboard_cache import ServiceCardSnapshot, ServiceMetricSnapshot
 from app.models.service import Service
 from app.services import me_dashboard_service
+from tests.conftest import _engine, committed_session, make_member
 
 
 # ============================================================
@@ -455,7 +458,6 @@ def test_build_cards_response_excludes_deleted_service(db, sample_member):
 def test_route_uses_cache_when_member_has_deleted_service(db, sample_member, monkeypatch):
     """삭제된 서비스가 있어도 신선한 캐시가 있으면 업스트림을 부르지 않는다."""
     monkeypatch.setattr("app.config.settings.DASHBOARD_CACHE_TTL_MINUTES", 10, raising=False)
-    monkeypatch.setattr(db, "commit", lambda: None)
     _make_service(db, sample_member.member_id, "s-live", "live")
     _seed_card(db, "s-live", workflow_count=3, age_minutes=1)
     gone = _make_service(db, sample_member.member_id, "s-gone", "gone")
@@ -481,7 +483,6 @@ def test_route_uses_cache_when_member_has_deleted_service(db, sample_member, mon
 
 
 def test_refresh_all_services_sync_skips_deleted_service(db, sample_member, monkeypatch):
-    monkeypatch.setattr(db, "commit", lambda: None)
     _make_service(db, sample_member.member_id, "s-live", "live")
     gone = _make_service(db, sample_member.member_id, "s-gone", "gone")
     _soft_delete(gone)
@@ -498,3 +499,137 @@ def test_refresh_all_services_sync_skips_deleted_service(db, sample_member, monk
     me_dashboard_service.refresh_all_services_sync(db, include_model_count=False)
 
     assert requested == ["s-live"]
+
+
+# ============================================================
+# live refresh 실패 후 세션 복구
+# ============================================================
+
+RB_MEMBER = "dash-rb-user"
+RB_POISON = "dash-rb-poison"
+
+
+def _purge_rb(session):
+    service_ids = [
+        sid for (sid,) in session.query(Service.surro_service_id)
+        .filter(Service.created_by == RB_MEMBER).all()
+    ]
+    for model in (ServiceCardSnapshot, ServiceMetricSnapshot):
+        session.query(model).filter(
+            model.surro_service_id.in_(service_ids)
+        ).delete(synchronize_session=False)
+    session.query(Service).filter(Service.created_by == RB_MEMBER).delete(synchronize_session=False)
+    session.query(Member).filter(
+        Member.member_id.in_([RB_MEMBER, RB_POISON])
+    ).delete(synchronize_session=False)
+
+
+@pytest.fixture
+def rb_db():
+    """커밋된 회원과 서비스. 라우트처럼 rollback 해도 준비 데이터가 남아야 한다."""
+    with committed_session(_purge_rb, autoflush=False) as session:
+        member = make_member(RB_MEMBER, name="dash rb")
+        session.add(member)
+        session.add(Service(name="svc", created_by=RB_MEMBER, surro_service_id="rb-svc"))
+        session.commit()
+        session.refresh(member)
+        yield session, member
+
+
+def _failing_live_refresh(monkeypatch):
+    """live refresh 가 스냅샷 commit 중 flush 실패로 세션을 오염시킨 상황."""
+    async def failing(db, current_user, **kwargs):
+        db.add(Member(
+            name=None, member_id=RB_POISON, email=f"{RB_POISON}@example.com",
+            password_hash="x", role="user", is_active=True,
+        ))
+        db.commit()
+
+    monkeypatch.setattr(me_dashboard_service, "refresh_member_services_live", failing)
+
+
+def test_cards_served_after_live_refresh_failure(rb_db, monkeypatch):
+    db, member = rb_db
+    _failing_live_refresh(monkeypatch)
+
+    resp = _run(me_dashboard_service.get_my_cards(db, member))
+
+    assert resp.source == "cache"
+    assert [c.surro_service_id for c in resp.services] == ["rb-svc"]
+
+
+def test_monitoring_served_after_live_refresh_failure(rb_db, monkeypatch):
+    db, member = rb_db
+    _failing_live_refresh(monkeypatch)
+
+    resp = _run(me_dashboard_service.get_my_monitoring(db, member))
+
+    assert resp.source == "cache"
+    assert [s.surro_service_id for s in resp.services] == ["rb-svc"]
+
+
+@pytest.mark.skipif(
+    _engine.dialect.name == "postgresql",
+    reason="SQLite 분기의 bulk insert 로 행 순서를 캡처한다 — 정렬은 분기 전에 일어난다",
+)
+def test_upsert_snapshots_writes_rows_in_key_order(db, monkeypatch):
+    """라우트 live refresh 와 스케줄러가 같은 행을 같은 순서로 잠그도록 정렬해 쓴다."""
+    written = {}
+
+    def capture(mapper, rows):
+        written[mapper.__name__] = [
+            (r["surro_service_id"], r.get("period")) for r in rows
+        ]
+
+    monkeypatch.setattr(db, "bulk_insert_mappings", capture)
+    monkeypatch.setattr(db, "commit", lambda: None)
+
+    me_dashboard_service._upsert_snapshots(db, [_fetched("s-b"), _fetched("s-a")])
+
+    assert written["ServiceCardSnapshot"] == [("s-a", None), ("s-b", None)]
+    # 기간 순서는 두 경로 모두 고정된 _PERIODS 를 따르므로 서비스 순서만 맞으면 된다
+    assert [sid for sid, _ in written["ServiceMetricSnapshot"]] == ["s-a"] * 3 + ["s-b"] * 3
+
+
+# ============================================================
+# live refresh 는 스냅샷이 없거나 오래된 서비스만
+# ============================================================
+
+def _count_get_service(monkeypatch):
+    calls = []
+
+    async def counting(surro_id, user_info):
+        calls.append(surro_id)
+        return None  # MLOps 404 (삭제되지 않았지만 업스트림에 없는 서비스)
+
+    monkeypatch.setattr(
+        "app.services.service_service.service_service.get_service", counting
+    )
+    return calls
+
+
+def test_cards_live_refresh_only_stale_services(db, sample_member, monkeypatch):
+    """하나가 404 로 스냅샷이 없어도 신선한 서비스까지 매 요청 다시 조회하지 않는다."""
+    monkeypatch.setattr("app.config.settings.DASHBOARD_CACHE_TTL_MINUTES", 10, raising=False)
+    _make_service(db, sample_member.member_id, "s-fresh", "fresh")
+    _seed_card(db, "s-fresh", workflow_count=2, age_minutes=1)
+    _make_service(db, sample_member.member_id, "s-404", "missing upstream")
+    db.flush()
+    calls = _count_get_service(monkeypatch)
+
+    _run(me_dashboard_service.get_my_cards(db, sample_member))
+
+    assert calls == ["s-404"]
+
+
+def test_monitoring_live_refresh_only_stale_services(db, sample_member, monkeypatch):
+    monkeypatch.setattr("app.config.settings.DASHBOARD_CACHE_TTL_MINUTES", 10, raising=False)
+    _make_service(db, sample_member.member_id, "s-fresh", "fresh")
+    _seed_all_periods(db, "s-fresh", age_minutes=1)
+    _make_service(db, sample_member.member_id, "s-404", "missing upstream")
+    db.flush()
+    calls = _count_get_service(monkeypatch)
+
+    _run(me_dashboard_service.get_my_monitoring(db, sample_member))
+
+    assert calls == ["s-404"]

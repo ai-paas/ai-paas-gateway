@@ -5,6 +5,7 @@ from typing import Optional, List, Dict, Tuple
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
+from app.database import commit_or_rollback
 logger = logging.getLogger(__name__)
 
 from app.models.dataset import Dataset
@@ -158,7 +159,7 @@ class DatasetCRUD:
             changed = True
 
         if changed:
-            db.commit()
+            commit_or_rollback(db)
         return changed
 
     def get_dataset_by_surro_id(
@@ -202,7 +203,7 @@ class DatasetCRUD:
                     existing.description = dataset_description
                 existing.updated_by = member_id
                 existing.updated_at = datetime.utcnow()
-                db.commit()
+                commit_or_rollback(db)
                 db.refresh(existing)
             else:
                 logger.warning(
@@ -219,7 +220,7 @@ class DatasetCRUD:
             description=dataset_description
         )
         db.add(db_dataset)
-        db.commit()
+        commit_or_rollback(db)
         db.refresh(db_dataset)
         return db_dataset
 
@@ -259,6 +260,9 @@ class DatasetCRUD:
             deleted_by: Optional[str] = None
     ) -> int:
         """외부 목록에 없는 활성 매핑을 소프트 삭제한다."""
+        # 빈 목록은 "전부 삭제됨"과 "업스트림 일시 장애"를 구분할 수 없다.
+        if not active_surro_dataset_ids:
+            return 0
         active_id_set = set(active_surro_dataset_ids)
         targets = db.query(Dataset).filter(
             and_(
@@ -302,7 +306,7 @@ class DatasetCRUD:
         db_dataset.deleted_by = member_id
         db_dataset.is_active = False
 
-        db.commit()
+        commit_or_rollback(db)
         return True
 
     def check_dataset_ownership(

@@ -1,5 +1,6 @@
 import logging
-from typing import List, Optional
+from datetime import datetime
+from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
@@ -9,6 +10,7 @@ from app.common.sort import parse_sort, resolve_sort_columns
 from app.cruds.prompt import prompt_crud
 from app.database import get_db
 from app.models import Member
+from app.models.base import REGISTERED_VIA_AUTO
 from app.models.prompt import Prompt
 from app.schemas.prompt import (
     ExternalPromptResponse,
@@ -113,6 +115,7 @@ def _sync_external_prompts_to_db(
         db: Session,
         owner: Member,
         external_list: List[ExternalPromptResponse],
+        fetched_at: datetime,
 ) -> None:
     """보이는 external prompt 중 미매핑/soft-deleted 항목을 로컬 DB에 반영한다."""
     for ext in external_list:
@@ -125,6 +128,9 @@ def _sync_external_prompts_to_db(
                 description=ext.description,
                 content=ext.content,
                 prompt_variable=ext.prompt_variable,
+                fetched_at=fetched_at,
+                ignore_conflict=True,
+                registered_via=REGISTERED_VIA_AUTO,
             )
         except Exception as sync_error:
             # 실패한 flush 가 세션을 오염시키면 이후 항목과 본 조회까지 전부 실패한다.
@@ -132,15 +138,21 @@ def _sync_external_prompts_to_db(
             logger.warning("Failed to sync external prompt %s: %s", ext.id, sync_error)
 
 
-async def _sync_prompt_cache(db: Session, current_user: Member) -> List[ExternalPromptResponse]:
+async def _sync_prompt_cache(
+        db: Session, current_user: Member,
+) -> Tuple[List[ExternalPromptResponse], datetime]:
     """prompt 캐시 sync.
 
     - 일반 사용자: 본인이 볼 수 있는 external prompt만 DB에 보정
     - admin 사용자: admin이 볼 수 있는 전체 external prompt 기준으로 보정 + stale soft-delete
+      (external 목록이 비어 있으면 stale 정리를 건너뜀)
     """
+    # 목록 요청 전 시각. 그 뒤에 만들어지거나 바뀐 매핑은 이 목록으로 판단하지 않는다.
+    # 저장값(datetime.utcnow)과 같은 naive UTC 로 잡는다.
+    fetched_at = datetime.utcnow()
     visible_external_list = await _fetch_external_prompts(current_user)
     owner = _get_default_mapping_owner(db, current_user)
-    _sync_external_prompts_to_db(db, owner, visible_external_list)
+    _sync_external_prompts_to_db(db, owner, visible_external_list, fetched_at)
 
     if current_user.role == "admin":
         if not visible_external_list:
@@ -152,17 +164,23 @@ async def _sync_prompt_cache(db: Session, current_user: Member) -> List[External
                 db=db,
                 active_surro_prompt_ids=[ext.id for ext in visible_external_list if ext.id is not None],
                 deleted_by=current_user.member_id,
+                fetched_at=fetched_at,
             )
 
-    return visible_external_list
+    return visible_external_list, fetched_at
 
 
 def _ensure_prompt_mapping(
         db: Session,
         current_user: Member,
         external: ExternalPromptResponse,
+        fetched_at: datetime,
 ) -> Prompt:
-    """외부 prompt 기준 로컬 매핑을 보정하고 최신 캐시 row를 반환한다."""
+    """외부 prompt 기준 로컬 매핑을 보정하고 최신 캐시 row를 반환한다.
+
+    fetched_at 은 external 을 요청하기 전 시각이다. 그 뒤에 바뀐 매핑은 external 이 더 오래된
+    것이므로 보정하지 않는다.
+    """
     owner = _get_default_mapping_owner(db, current_user)
     prompt_crud.create_mapping_from_external(
         db=db,
@@ -172,6 +190,9 @@ def _ensure_prompt_mapping(
         description=external.description,
         content=external.content,
         prompt_variable=external.prompt_variable,
+        fetched_at=fetched_at,
+        ignore_conflict=True,
+        registered_via=REGISTERED_VIA_AUTO,
     )
     prompt_crud.backfill_cache_if_changed(
         db=db,
@@ -180,6 +201,7 @@ def _ensure_prompt_mapping(
         description=external.description,
         content=external.content,
         prompt_variable=external.prompt_variable,
+        fetched_at=fetched_at,
     )
 
     db_prompt = prompt_crud.get_prompt_by_surro_id(db=db, surro_prompt_id=external.id)
@@ -252,6 +274,8 @@ async def create_prompt(
     - 401: 인증되지 않은 사용자
     - 500: 서버 내부 오류
     """
+    # MLOps 생성 요청 전 시각. 이 뒤에 생긴 자동 등록 행만 이 요청과 겹친 것으로 보고 넘겨받는다.
+    requested_at = datetime.utcnow()
     external_prompt = await prompt_service.create_prompt(
         name=prompt.prompt.name,
         content=prompt.prompt.content,
@@ -261,11 +285,12 @@ async def create_prompt(
     )
 
     try:
-        db_prompt = prompt_crud.create_prompt(
+        db_prompt, reclaimed = prompt_crud.create_prompt(
             db=db,
             prompt=prompt,
             created_by=current_user.member_id,
             surro_prompt_id=external_prompt.id,
+            requested_at=requested_at,
             external_prompt_variables=external_prompt.prompt_variable,
         )
     except Exception as mapping_error:
@@ -275,13 +300,16 @@ async def create_prompt(
             detail=f"Prompt created in external API but failed to save: {mapping_error}",
         )
 
+    metadata = {"name": db_prompt.name}
+    if reclaimed:
+        metadata["ownership_reclaimed"] = True
     emit_from_request(
         db, request,
         action=Action.CREATE,
         resource_type=ResourceType.PROMPT,
         actor_member_id=current_user.member_id,
         resource_id=str(db_prompt.surro_prompt_id),
-        metadata={"name": db_prompt.name},
+        metadata=metadata,
     )
     return _to_prompt_response(db_prompt, external_prompt)
 
@@ -335,6 +363,7 @@ async def get_prompts(
     ## Notes
     - page와 size를 모두 생략하면 전체 데이터를 조회합니다.
     - admin 호출 시 external 전체 목록 기준으로 stale 로컬 매핑을 soft-delete 처리합니다.
+      MLOps 목록이 비어 있으면 일시적 장애와 구분할 수 없어 stale 정리를 건너뜁니다.
     - 로컬에 없는 external prompt는 기본적으로 active admin 소유로 매핑됩니다.
 
     ## Errors
@@ -349,7 +378,7 @@ async def get_prompts(
             skip = (page - 1) * size
             limit = size
 
-        visible_external_list = await _sync_prompt_cache(db, current_user)
+        visible_external_list, fetched_at = await _sync_prompt_cache(db, current_user)
         detail_by_external_id = {
             ext.id: ext for ext in visible_external_list if ext.id is not None
         }
@@ -385,6 +414,7 @@ async def get_prompts(
                 description=ext.description,
                 content=ext.content,
                 prompt_variable=ext.prompt_variable,
+                fetched_at=fetched_at,
             )
             response_data.append(_to_prompt_response(db_prompt, ext))
 
@@ -441,11 +471,12 @@ async def get_prompt(
     - 404: 프롬프트를 찾을 수 없음
     - 500: 서버 내부 오류
     """
+    fetched_at = datetime.utcnow()
     external = await prompt_service.get_prompt(surro_prompt_id, user_info=_user_info(current_user))
     if external is None:
         raise HTTPException(status_code=404, detail="Prompt not found in external service")
 
-    db_prompt = _ensure_prompt_mapping(db, current_user, external)
+    db_prompt = _ensure_prompt_mapping(db, current_user, external, fetched_at)
     return PromptDetailResponse(**_to_prompt_response(db_prompt, external).model_dump())
 
 
@@ -498,11 +529,12 @@ async def update_prompt(
     - 404: 프롬프트를 찾을 수 없음
     - 500: 서버 내부 오류
     """
+    fetched_at = datetime.utcnow()
     current_prompt = await prompt_service.get_prompt(surro_prompt_id, user_info=_user_info(current_user))
     if current_prompt is None:
         raise HTTPException(status_code=404, detail="Prompt not found in external service")
 
-    _ensure_prompt_mapping(db, current_user, current_prompt)
+    _ensure_prompt_mapping(db, current_user, current_prompt, fetched_at)
 
     try:
         updated_external = await prompt_service.update_prompt(
@@ -579,11 +611,12 @@ async def delete_prompt(
     - 404: 프롬프트를 찾을 수 없음
     - 500: 서버 내부 오류
     """
+    fetched_at = datetime.utcnow()
     external = await prompt_service.get_prompt(surro_prompt_id, user_info=_user_info(current_user))
     if external is None:
         raise HTTPException(status_code=404, detail="Prompt not found in external service")
 
-    _ensure_prompt_mapping(db, current_user, external)
+    _ensure_prompt_mapping(db, current_user, external, fetched_at)
 
     try:
         deleted = await prompt_service.delete_prompt(

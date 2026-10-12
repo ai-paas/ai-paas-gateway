@@ -2,16 +2,15 @@
 
 전역 `db` fixture 는 외부 트랜잭션에 rollback_only 로 참여해, 라우트가 호출하는
 `db.rollback()` 이 테스트 준비 데이터까지 되돌린다(tests/conftest.py 의 `db` 주석 참고).
-그래서 이 파일만 엔진에 직접 바인딩한 세션을 쓴다 — tests/test_prompt_sync.py 와 같은 이유다.
+그래서 준비 데이터를 실제로 commit 하는 `committed_session`(tests/conftest.py)을 쓴다.
 """
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy.orm import Session
 
 from app.models import AttemptState, AuditLog, KnowledgeBase, KnowledgeBaseCreateAttempt, Member
 from app.cruds.knowledge_base import knowledge_base_crud as crud
-from tests.conftest import _engine
+from tests.conftest import committed_session, make_member
 from tests.test_knowledge_base_recovery import (
     FILENAME,
     NAME,
@@ -26,41 +25,28 @@ NOW = datetime.now(timezone.utc)
 T0 = NOW - timedelta(hours=2)
 
 
+def _purge(session):
+    # 복구가 남기는 감사로그까지 지우지 않으면 다음 테스트의 AuditLog 조회에 섞인다.
+    session.query(AuditLog).delete()
+    session.query(KnowledgeBaseCreateAttempt).delete()
+    session.query(KnowledgeBase).delete()
+    session.query(Member).filter(Member.member_id == "rec-user").delete()
+
+
 @pytest.fixture
 def real_db(monkeypatch):
-    """엔진에 직접 바인딩한 세션 + commit 된 member 1명.
+    """커밋된 회원 1명.
 
     시도 레코드 CRUD 는 SessionLocal() 을 쓰므로 같은 세션을 보도록 함께 바꾼다.
     """
     import app.cruds.knowledge_base as crud_module
 
-    connection = _engine.connect()
-    session = Session(bind=connection)
-    member = Member(
-        name="복구 테스터",
-        member_id="rec-user",
-        email="rec-user@example.com",
-        password_hash="$2b$12$dummyhashvalue1234567890abcdefghijklmnopqrstuv",
-        role="user",
-        is_active=True,
-    )
-    session.add(member)
-    session.commit()
-
-    monkeypatch.setattr(crud_module, "SessionLocal", lambda: _NoCloseSession(session))
-    try:
-        yield session, member
-    finally:
-        session.rollback()
-        # 이 세션은 실제로 commit 하므로 남긴 행을 직접 지워야 한다. 복구가 남기는
-        # 감사로그까지 지우지 않으면 다음 테스트의 AuditLog 조회에 섞인다.
-        session.query(AuditLog).delete()
-        session.query(KnowledgeBaseCreateAttempt).delete()
-        session.query(KnowledgeBase).delete()
-        session.query(Member).filter(Member.member_id == member.member_id).delete()
+    with committed_session(_purge) as session:
+        member = make_member("rec-user", name="복구 테스터")
+        session.add(member)
         session.commit()
-        session.close()
-        connection.close()
+        monkeypatch.setattr(crud_module, "SessionLocal", lambda: _NoCloseSession(session))
+        yield session, member
 
 
 def _attempt(session, member_id, started_at, request_id):

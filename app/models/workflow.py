@@ -43,6 +43,11 @@ class Workflow(Base):
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     deleted_by = Column(String(100), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
+    # 생성 요청은 'auto' 행만 넘겨받는다.
+    registered_via = Column(
+        String(20), nullable=True,
+        comment="'auto' = 목록 조회의 자동 등록이 만든 행. NULL = 생성 API 또는 알 수 없음",
+    )
 
     creator = relationship("Member", backref="created_workflows")
 
