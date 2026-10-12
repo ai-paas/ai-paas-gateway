@@ -10,6 +10,7 @@ from app.common.sort import parse_sort, resolve_sort_columns
 from app.cruds.prompt import prompt_crud
 from app.database import get_db
 from app.models import Member
+from app.models.base import REGISTERED_VIA_AUTO
 from app.models.prompt import Prompt
 from app.schemas.prompt import (
     ExternalPromptResponse,
@@ -129,6 +130,7 @@ def _sync_external_prompts_to_db(
                 prompt_variable=ext.prompt_variable,
                 fetched_at=fetched_at,
                 ignore_conflict=True,
+                registered_via=REGISTERED_VIA_AUTO,
             )
         except Exception as sync_error:
             # 실패한 flush 가 세션을 오염시키면 이후 항목과 본 조회까지 전부 실패한다.
@@ -190,6 +192,7 @@ def _ensure_prompt_mapping(
         prompt_variable=external.prompt_variable,
         fetched_at=fetched_at,
         ignore_conflict=True,
+        registered_via=REGISTERED_VIA_AUTO,
     )
     prompt_crud.backfill_cache_if_changed(
         db=db,
@@ -271,6 +274,8 @@ async def create_prompt(
     - 401: 인증되지 않은 사용자
     - 500: 서버 내부 오류
     """
+    # MLOps 생성 요청 전 시각. 이 뒤에 생긴 자동 등록 행만 이 요청과 겹친 것으로 보고 넘겨받는다.
+    requested_at = datetime.utcnow()
     external_prompt = await prompt_service.create_prompt(
         name=prompt.prompt.name,
         content=prompt.prompt.content,
@@ -280,11 +285,12 @@ async def create_prompt(
     )
 
     try:
-        db_prompt = prompt_crud.create_prompt(
+        db_prompt, reclaimed = prompt_crud.create_prompt(
             db=db,
             prompt=prompt,
             created_by=current_user.member_id,
             surro_prompt_id=external_prompt.id,
+            requested_at=requested_at,
             external_prompt_variables=external_prompt.prompt_variable,
         )
     except Exception as mapping_error:
@@ -294,13 +300,16 @@ async def create_prompt(
             detail=f"Prompt created in external API but failed to save: {mapping_error}",
         )
 
+    metadata = {"name": db_prompt.name}
+    if reclaimed:
+        metadata["ownership_reclaimed"] = True
     emit_from_request(
         db, request,
         action=Action.CREATE,
         resource_type=ResourceType.PROMPT,
         actor_member_id=current_user.member_id,
         resource_id=str(db_prompt.surro_prompt_id),
-        metadata={"name": db_prompt.name},
+        metadata=metadata,
     )
     return _to_prompt_response(db_prompt, external_prompt)
 

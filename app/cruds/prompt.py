@@ -5,12 +5,18 @@ from typing import Any, List, Optional, Tuple
 from sqlalchemy import and_, or_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.database import commit_or_rollback
+from app.models.base import REGISTERED_VIA_AUTO
 from app.models.prompt import Prompt
 from app.schemas.prompt import PromptCreate
 
 _MISSING = object()
+
+# 생성 경로가 재사용된 ID 의 옛 매핑을 정리할 때 남긴다. 동기화 경로(이름 차이로 추론)와 구분한다.
+_DELETED_BY_REUSED_ON_CREATE = "system:upstream-id-reused:create"
 
 
 def _variables_to_dicts(prompt_variables) -> Optional[List[dict]]:
@@ -42,17 +48,69 @@ class PromptCRUD:
             prompt: PromptCreate,
             created_by: str,
             surro_prompt_id: int,
-            external_prompt_variables: Optional[List[dict]] = None
-    ) -> Prompt:
-        """프롬프트 생성 (external 생성 후 로컬 캐시/매핑 저장)."""
-        return self.create_mapping_from_external(
-            db=db,
-            surro_prompt_id=surro_prompt_id,
-            member_id=created_by,
+            requested_at: datetime,
+            external_prompt_variables: Optional[List[dict]] = None,
+    ) -> Tuple[Prompt, bool]:
+        """방금 MLOps 에 만든 프롬프트의 매핑을 저장한다. (매핑, 자동 등록 행을 넘겨받았는지) 를 돌려준다.
+
+        MLOps 가 이 ID 를 새로 발급했으므로 이미 있는 활성 매핑은 둘 중 하나다.
+        - 요청 뒤(requested_at 이후)에 생긴 자동 등록 행: 이 요청과 겹친 조회가 먼저 등록한 것이므로 넘겨받는다.
+        - 그 밖의 행: MLOps 재설치 등으로 사라진 옛 리소스의 매핑이므로 이력으로 남기고 새 행을 만든다.
+        requested_at 은 MLOps 생성 요청 전 시각(naive UTC)이다.
+        """
+        values = dict(
             name=prompt.prompt.name,
             description=prompt.prompt.description,
             content=prompt.prompt.content,
-            prompt_variable=external_prompt_variables,
+            prompt_variable=_variables_to_dicts(external_prompt_variables),
+        )
+        # 생성 경로의 조회와 INSERT 사이에 자동 등록이 끼어들면 INSERT 가 실패한다.
+        # 다시 시도하면 그 행은 넘겨받을 대상이므로 두 번이면 충분하다.
+        for attempt in range(2):
+            claimed = db.query(Prompt).filter(
+                Prompt.surro_prompt_id == surro_prompt_id,
+                Prompt.deleted_at.is_(None),
+                Prompt.registered_via == REGISTERED_VIA_AUTO,
+                Prompt.created_at >= requested_at,
+            ).update(
+                {**values, "created_by": created_by, "registered_via": None,
+                 "updated_at": datetime.utcnow()},
+                synchronize_session=False,
+            )
+            commit_or_rollback(db)
+            if claimed:
+                return self._active_mapping(db, surro_prompt_id), True
+
+            self._retire_active_mapping(db, surro_prompt_id)
+            db_prompt = Prompt(
+                **values, created_by=created_by, surro_prompt_id=surro_prompt_id, is_active=True,
+            )
+            db.add(db_prompt)
+            try:
+                commit_or_rollback(db)
+            except IntegrityError:
+                if attempt:
+                    raise
+                continue
+            db.refresh(db_prompt)
+            return db_prompt, False
+
+    def _active_mapping(self, db: Session, surro_prompt_id: int) -> Prompt:
+        return db.query(Prompt).filter(
+            Prompt.surro_prompt_id == surro_prompt_id,
+            Prompt.deleted_at.is_(None),
+        ).one()
+
+    def _retire_active_mapping(self, db: Session, surro_prompt_id: int) -> None:
+        """재사용된 ID 의 옛 활성 매핑을 이력으로 돌린다. 유니크 인덱스는 deleted_at 만 보므로 is_active 와 무관하게 찾는다."""
+        now = datetime.utcnow()
+        db.query(Prompt).filter(
+            Prompt.surro_prompt_id == surro_prompt_id,
+            Prompt.deleted_at.is_(None),
+        ).update(
+            {"is_active": False, "deleted_at": now, "deleted_by": _DELETED_BY_REUSED_ON_CREATE,
+             "updated_at": now},
+            synchronize_session=False,
         )
 
     def get_prompt(self, db: Session, prompt_id: int, include_deleted: bool = False) -> Optional[Prompt]:
@@ -145,6 +203,7 @@ class PromptCRUD:
             prompt_variable=None,
             fetched_at: Optional[datetime] = None,
             ignore_conflict: bool = False,
+            registered_via: Optional[str] = None,
     ) -> Prompt:
         """external prompt 기준 활성 매핑을 갱신하거나 새 이력 행을 생성한다.
 
@@ -191,6 +250,7 @@ class PromptCRUD:
             created_by=member_id,
             surro_prompt_id=surro_prompt_id,
             is_active=True,
+            registered_via=registered_via,
         )
         dialect = db.bind.dialect.name
         if ignore_conflict and dialect in ("postgresql", "sqlite"):

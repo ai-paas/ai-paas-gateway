@@ -4,9 +4,8 @@ from typing import List, Optional, Set, Tuple
 from sqlalchemy.orm import Session
 
 from app.database import commit_or_rollback
+from app.models.base import REGISTERED_VIA_AUTO
 from app.models.workflow import Workflow
-
-REGISTERED_VIA_AUTO = "auto"
 
 
 class WorkflowCRUD:
