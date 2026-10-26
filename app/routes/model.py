@@ -24,6 +24,7 @@ from app.schemas.model import (
     ModelTypeListWrapper,
     PredefinedModelKey,
 )
+from app.services import temp_kaggle_demo
 from app.services.audit_service import Action, ResourceType, emit_from_request
 from app.services.model_service import (
     apply_relation_visibility,
@@ -258,6 +259,34 @@ async def create_model(
 
         if file:
             logger.info(f"File uploaded: {file.filename}")
+
+        # [임시] Kaggle 공인시험 우회 — 시험 후 제거
+        demo_user_info = _create_inno_user_info(current_user).model_dump()
+        kaggle_provider = await temp_kaggle_demo.get_kaggle_provider(provider_id, demo_user_info)
+        if kaggle_provider:
+            demo_model = await temp_kaggle_demo.create_demo_model(
+                db,
+                provider_info=kaggle_provider,
+                name=name,
+                repo_id=repo_id,
+                description=description,
+                type_id=type_id,
+                format_id=format_id,
+                task=task,
+                parameter=parameter,
+                sample_code=sample_code,
+                member_id=current_user.member_id,
+                user_info=demo_user_info,
+            )
+            emit_from_request(
+                db, request,
+                action=Action.CREATE,
+                resource_type=ResourceType.MODEL,
+                actor_member_id=current_user.member_id,
+                resource_id=str(demo_model.id),
+                metadata={"name": demo_model.name, "is_catalog": False, "temp_kaggle_demo": True},
+            )
+            return demo_model
 
         # 모델 생성 요청 데이터 구성
         model_data = ModelCreateRequest(
@@ -582,6 +611,9 @@ async def get_user_models(
         # 2. 분류(MLOps visibility) + 노출 권한(gateway DB) 판정
         classify = _prepare_model_classifier(db, all_surro_models, current_user.member_id)
         filtered_models = [m for m in all_surro_models if classify(m) == 'custom']
+
+        # [임시] Kaggle 공인시험 우회 — 시험 후 제거
+        filtered_models = temp_kaggle_demo.list_demo_models(db, current_user.member_id) + filtered_models
 
         # 4. 로컬에서 검색어 필터링 적용
         if search:
@@ -1174,6 +1206,7 @@ async def update_model_base_deployment_status(
     },
 )
 async def get_model_file_download_url(
+        request: Request,
         model_id: int = Path(..., description="Gateway DB에 매핑된 MLOps 모델 ID"),
         name: str = Query(
             ...,
@@ -1193,12 +1226,26 @@ async def get_model_file_download_url(
     MLOps가 반환한 `404`와 `409`는 그대로 전달합니다. MLOps의 스토리지 장애를 포함한
     5xx는 Gateway 표준에 따라 `502`, 시간 초과는 `504`로 변환합니다.
     """
+    # [임시] Kaggle 공인시험 우회 — 시험 후 제거
+    if temp_kaggle_demo.is_demo_id(model_id):
+        return temp_kaggle_demo.issue_download_url(db, model_id, name, current_user.member_id, request)
     _ensure_model_file_access(db, model_id, current_user.member_id)
     return await model_service.get_model_file_download_url(
         model_id=model_id,
         name=name,
         user_info=_create_inno_user_info(current_user).model_dump(),
     )
+
+
+# [임시] Kaggle 공인시험 우회 — 시험 후 제거. 브라우저가 인증 헤더 없이 이동하는 경로라 서명만으로 보호한다.
+@router.get("/{model_id}/files/temp-kaggle-download", include_in_schema=False)
+async def download_temp_kaggle_file(
+        model_id: int = Path(...),
+        expires: int = Query(...),
+        sig: str = Query(...),
+        db: Session = Depends(get_db),
+):
+    return await temp_kaggle_demo.stream_download(db, model_id, expires, sig)
 
 
 @router.get(
@@ -1240,6 +1287,20 @@ async def get_model_files(
     현재 사용자의 활성 Gateway DB 매핑 또는 활성 카탈로그 매핑을 원격 호출 전에 확인합니다.
     MLOps의 스토리지 장애를 포함한 5xx는 `502`, 시간 초과는 `504`로 변환합니다.
     """
+    # [임시] Kaggle 공인시험 우회 — 시험 후 제거
+    if temp_kaggle_demo.is_demo_id(model_id):
+        demo_files = sort_in_memory(
+            temp_kaggle_demo.get_demo_model_files(db, model_id, current_user.member_id),
+            parsed=parse_sort(sort),
+            getters=_MODEL_FILE_SORT_GETTERS,
+            default=_MODEL_FILE_SORT_DEFAULT,
+            tie_breaker_getter=_MODEL_FILE_SORT_TIE_BREAKER,
+        )
+        start = (page - 1) * size
+        return _create_pagination_response(
+            data=demo_files[start:start + size], total=len(demo_files), page=page, size=size,
+        )
+
     _ensure_model_file_access(db, model_id, current_user.member_id)
     parsed_sort = parse_sort(sort)
     # 허용 필드 검증을 upstream 전체 cursor 조회보다 먼저 수행한다.
@@ -1352,6 +1413,10 @@ async def get_model(
     - **502 / 504**: upstream 오류 / upstream 타임아웃
     """
     try:
+        # [임시] Kaggle 공인시험 우회 — 시험 후 제거
+        if temp_kaggle_demo.is_demo_id(model_id):
+            return temp_kaggle_demo.get_demo_model(db, model_id, current_user.member_id)
+
         # 1. 외부 ID만으로 upstream을 호출하지 않도록 활성 gateway 매핑을 먼저 확인
         if not model_crud.get_active_mappings_brief(db, [model_id]):
             raise HTTPException(
@@ -1442,6 +1507,18 @@ async def delete_model(
     - **500**: 모델 삭제 중 서버 내부 오류
     """
     try:
+        # [임시] Kaggle 공인시험 우회 — 시험 후 제거
+        if temp_kaggle_demo.is_demo_id(model_id):
+            temp_kaggle_demo.delete_demo_model(db, model_id, current_user.member_id)
+            emit_from_request(
+                db, request,
+                action=Action.DELETE,
+                resource_type=ResourceType.MODEL,
+                actor_member_id=current_user.member_id,
+                resource_id=str(model_id),
+            )
+            return {"message": f"Model {model_id} deleted successfully"}
+
         # 1. 사용자가 해당 모델을 소유하고 있는지 확인
         if not model_crud.check_model_ownership(db, model_id, current_user.member_id):
             raise HTTPException(
