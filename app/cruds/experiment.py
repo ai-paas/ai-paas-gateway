@@ -4,6 +4,7 @@ from typing import Optional, List, Tuple
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
+from app.database import commit_or_rollback
 from app.models.experiment import Experiment
 
 
@@ -15,7 +16,8 @@ class ExperimentCRUD:
         experiments = db.query(Experiment).filter(
             and_(
                 Experiment.created_by == member_id,
-                Experiment.deleted_at.is_(None)
+                Experiment.deleted_at.is_(None),
+                Experiment.is_active == True,
             )
         ).all()
         return [e.surro_experiment_id for e in experiments if e.surro_experiment_id]
@@ -40,6 +42,7 @@ class ExperimentCRUD:
             and_(
                 Experiment.created_by == member_id,
                 Experiment.deleted_at.is_(None),
+                Experiment.is_active == True,
             )
         )
 
@@ -71,7 +74,8 @@ class ExperimentCRUD:
             and_(
                 Experiment.surro_experiment_id == surro_experiment_id,
                 Experiment.created_by == member_id,
-                Experiment.deleted_at.is_(None)
+                Experiment.deleted_at.is_(None),
+                Experiment.is_active == True,
             )
         ).first()
 
@@ -89,7 +93,7 @@ class ExperimentCRUD:
             dataset_id=dataset_id
         )
         db.add(db_experiment)
-        db.commit()
+        commit_or_rollback(db)
         db.refresh(db_experiment)
         return db_experiment
 

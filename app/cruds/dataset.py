@@ -5,6 +5,7 @@ from typing import Optional, List, Dict, Tuple
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
+from app.database import commit_or_rollback
 logger = logging.getLogger(__name__)
 
 from app.models.dataset import Dataset
@@ -18,7 +19,11 @@ class DatasetCRUD:
     def get_dataset(self, db: Session, dataset_id: int) -> Optional[Dataset]:
         """ID로 데이터셋 매핑 조회"""
         return db.query(Dataset).filter(
-            and_(Dataset.id == dataset_id, Dataset.deleted_at.is_(None))
+            and_(
+                Dataset.id == dataset_id,
+                Dataset.deleted_at.is_(None),
+                Dataset.is_active == True,
+            )
         ).first()
 
     def get_datasets_count_by_member(
@@ -154,7 +159,7 @@ class DatasetCRUD:
             changed = True
 
         if changed:
-            db.commit()
+            commit_or_rollback(db)
         return changed
 
     def get_dataset_by_surro_id(
@@ -168,7 +173,8 @@ class DatasetCRUD:
             and_(
                 Dataset.surro_dataset_id == surro_dataset_id,
                 Dataset.created_by == member_id,
-                Dataset.deleted_at.is_(None)
+                Dataset.deleted_at.is_(None),
+                Dataset.is_active == True,
             )
         ).first()
 
@@ -197,7 +203,7 @@ class DatasetCRUD:
                     existing.description = dataset_description
                 existing.updated_by = member_id
                 existing.updated_at = datetime.utcnow()
-                db.commit()
+                commit_or_rollback(db)
                 db.refresh(existing)
             else:
                 logger.warning(
@@ -214,7 +220,7 @@ class DatasetCRUD:
             description=dataset_description
         )
         db.add(db_dataset)
-        db.commit()
+        commit_or_rollback(db)
         db.refresh(db_dataset)
         return db_dataset
 
@@ -226,20 +232,12 @@ class DatasetCRUD:
             dataset_name: str = None,
             dataset_description: str = None
     ) -> Dataset:
-        """삭제 여부와 관계없이 매핑을 생성하거나 재활성화한다."""
-        existing = db.query(Dataset).filter(
-            and_(
-                Dataset.surro_dataset_id == surro_dataset_id,
-                Dataset.created_by == member_id
-            )
-        ).order_by(Dataset.id.desc()).first()
+        """활성 매핑을 갱신하거나 soft-delete 이력을 보존한 새 행을 만든다."""
+        existing = self.get_dataset_by_surro_id(db, surro_dataset_id, member_id)
 
         if existing:
             existing.name = dataset_name
             existing.description = dataset_description
-            existing.is_active = True
-            existing.deleted_at = None
-            existing.deleted_by = None
             existing.updated_by = member_id
             existing.updated_at = datetime.utcnow()
             db.commit()
@@ -262,6 +260,9 @@ class DatasetCRUD:
             deleted_by: Optional[str] = None
     ) -> int:
         """외부 목록에 없는 활성 매핑을 소프트 삭제한다."""
+        # 빈 목록은 "전부 삭제됨"과 "업스트림 일시 장애"를 구분할 수 없다.
+        if not active_surro_dataset_ids:
+            return 0
         active_id_set = set(active_surro_dataset_ids)
         targets = db.query(Dataset).filter(
             and_(
@@ -305,7 +306,7 @@ class DatasetCRUD:
         db_dataset.deleted_by = member_id
         db_dataset.is_active = False
 
-        db.commit()
+        commit_or_rollback(db)
         return True
 
     def check_dataset_ownership(
@@ -329,7 +330,8 @@ class DatasetCRUD:
             and_(
                 Dataset.name == name,
                 Dataset.created_by == member_id,
-                Dataset.deleted_at.is_(None)
+                Dataset.deleted_at.is_(None),
+                Dataset.is_active == True,
             )
         ).first()
 

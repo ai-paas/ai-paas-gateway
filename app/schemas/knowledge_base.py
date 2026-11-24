@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.common.kb_attempt_token import split_token
 
 
 class ChunkTypeSchema(BaseModel):
@@ -48,7 +50,21 @@ class KnowledgeBaseFileReadSchema(BaseModel):
     deleted_by: Optional[str] = Field(None, description="삭제자 member_id")
 
 
-class ExternalKnowledgeBaseDetailResponse(BaseModel):
+class _AttemptTokenMixin(BaseModel):
+    """업스트림 description 에서 게이트웨이가 붙인 토큰을 떼어 따로 둔다.
+    업스트림 응답은 모두 이 스키마로 파싱되므로 사용자에게 나가는 경로가 여기서 한 번에 정리된다."""
+
+    attempt_token: Optional[str] = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def _split_attempt_token(self):
+        description, token = split_token(self.description)
+        if token is not None:
+            self.description, self.attempt_token = description, token
+        return self
+
+
+class ExternalKnowledgeBaseDetailResponse(_AttemptTokenMixin):
     """외부 API에서 반환되는 지식베이스 상세 응답"""
 
     model_config = ConfigDict(extra="ignore")
@@ -77,7 +93,7 @@ class ExternalKnowledgeBaseDetailResponse(BaseModel):
     files: List[KnowledgeBaseFileReadSchema] = Field(default_factory=list)
 
 
-class ExternalKnowledgeBaseBriefResponse(BaseModel):
+class ExternalKnowledgeBaseBriefResponse(_AttemptTokenMixin):
     """외부 API에서 반환되는 지식베이스 목록 응답"""
 
     model_config = ConfigDict(extra="ignore")
@@ -124,8 +140,10 @@ class KnowledgeBaseUpdate(BaseModel):
 class KnowledgeBaseResponse(BaseModel):
     """지식베이스 응답"""
 
-    id: int = Field(..., description="Gateway Knowledge Base ID")
-    surro_knowledge_id: int = Field(..., description="외부 Knowledge Base ID")
+    id: int = Field(..., description="Gateway 내부 PK (경로 파라미터로 사용 금지)")
+    surro_knowledge_id: int = Field(
+        ..., description="Knowledge Base ID — 조회/수정/삭제/파일/검색 경로에 사용하는 값"
+    )
     created_at: datetime = Field(..., description="Gateway 생성 시간")
     updated_at: datetime = Field(..., description="Gateway 수정 시간")
     created_by: str = Field(..., description="생성자 member_id")
@@ -143,8 +161,10 @@ class KnowledgeBaseResponse(BaseModel):
 class KnowledgeBaseDetailResponse(BaseModel):
     """지식베이스 상세 응답"""
 
-    id: int = Field(..., description="Gateway Knowledge Base ID")
-    surro_knowledge_id: int = Field(..., description="외부 Knowledge Base ID")
+    id: int = Field(..., description="Gateway 내부 PK (경로 파라미터로 사용 금지)")
+    surro_knowledge_id: int = Field(
+        ..., description="Knowledge Base ID — 조회/수정/삭제/파일/검색 경로에 사용하는 값"
+    )
     created_at: datetime = Field(..., description="Gateway 생성 시간")
     updated_at: datetime = Field(..., description="Gateway 수정 시간")
     created_by: str = Field(..., description="생성자 member_id")
@@ -170,6 +190,37 @@ class KnowledgeBaseListResponse(BaseModel):
     total: int = Field(..., description="전체 항목 수")
     page: int = Field(..., description="현재 페이지 번호")
     size: int = Field(..., description="페이지당 항목 수")
+
+
+class OrphanKnowledgeBaseItem(BaseModel):
+    """게이트웨이 매핑이 없어 접근 불가능한 업스트림 Knowledge Base."""
+
+    surro_knowledge_id: int = Field(..., description="업스트림 Knowledge Base ID")
+    name: str = Field(..., description="Knowledge Base 이름")
+    collection_name: str = Field(..., description="Milvus Collection 이름")
+    created_at: Optional[datetime] = Field(None, description="업스트림 생성 시간")
+    is_protected: bool = Field(
+        ...,
+        description="복구 대기 — 이 KB 를 만든 생성 시도가 아직 살아 있어 곧 주인이 정해질 수 있다",
+    )
+    protected_by: Optional[str] = Field(
+        None, description="이 KB 를 지켜보는 시도의 요청자와 시각 (is_protected 인 경우)"
+    )
+
+
+class OrphanKnowledgeBaseListResponse(BaseModel):
+    """고아 Knowledge Base 목록 응답"""
+
+    data: List[OrphanKnowledgeBaseItem] = Field(..., description="고아 목록")
+    total: int = Field(..., description="전체 항목 수")
+
+
+class OrphanKnowledgeBaseDeleteResponse(BaseModel):
+    """고아 Knowledge Base 삭제 응답"""
+
+    surro_knowledge_id: int = Field(..., description="삭제한 Knowledge Base ID")
+    forced: bool = Field(..., description="보호 대상을 force 로 삭제했는지")
+    abandoned_attempts: int = Field(..., description="함께 abandoned 처리된 시도 레코드 수")
 
 
 class KnowledgeBaseSearchRequest(BaseModel):

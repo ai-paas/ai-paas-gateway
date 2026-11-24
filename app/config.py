@@ -78,6 +78,13 @@ class Settings:
     PROXY_TARGET_PATH_PREFIX: str = os.getenv("PROXY_TARGET_PATH_PREFIX", "/api/v1")
     PROXY_TIMEOUT: float = float(os.getenv("PROXY_TIMEOUT", "30.0"))
     PROXY_CONNECT_TIMEOUT: float = float(os.getenv("PROXY_CONNECT_TIMEOUT", "5.0"))
+    PROXY_STRUCTURE_PREDICTION_TIMEOUT: float = float(
+        os.getenv("PROXY_STRUCTURE_PREDICTION_TIMEOUT", "300.0")
+    )
+    # RAG/LLM 생성은 기본 PROXY_TIMEOUT(30s)보다 오래 걸릴 수 있음.
+    # 150s는 실측된 Ollama 연결 실패 확정 시간(~137s)에 여유를 둔 값 — 정상 상황을 늘려 받쳐주는
+    # 용도이며, 업스트림이 응답 자체를 안 주는 hang 상황의 근본 해결책은 아니다.
+    PROXY_RAG_TIMEOUT: float = float(os.getenv("PROXY_RAG_TIMEOUT", "150.0"))
     PROXY_MAX_CONNECTIONS: int = int(os.getenv("PROXY_MAX_CONNECTIONS", "100"))
     PROXY_MAX_KEEPALIVE_CONNECTIONS: int = int(os.getenv("PROXY_MAX_KEEPALIVE_CONNECTIONS", "20"))
     EXTERNAL_API_USERNAME: str = os.getenv("EXTERNAL_API_USERNAME", "")
@@ -85,6 +92,28 @@ class Settings:
 
     # 대용량 업로드 설정 (Dataset 등)
     PROXY_UPLOAD_TIMEOUT: float = float(os.getenv("PROXY_UPLOAD_TIMEOUT", "300.0"))
+
+    # KB 생성/파일추가는 MLOps 스펙상 동일한 동기 경로(청킹+임베딩 후 응답)라
+    # embedding 모델이 콜드 상태(오랜만에 호출)면 업스트림 응답까지 수 분 걸릴 수
+    # 있음 (실측: 콜드 30초 초과 확인, 신고자 케이스 ~5분 / 웜 상태는 5~10초로
+    # 빠름). 600s는 그 실측 최댓값(~5분)에 여유를 둔 값 — 콜드스타트 상한이
+    # 정확히 얼마인지는 미확인(MLOps 확인 필요), 단발성 관측치 기반이라 재조정
+    # 필요할 수 있음.
+    PROXY_KB_INGEST_TIMEOUT: float = float(os.getenv("PROXY_KB_INGEST_TIMEOUT", "600.0"))
+
+    # 고아 KB 대응 — 타임아웃 등으로 매핑이 저장되지 못한 KB 의 복구·회수 파라미터
+    # ATTEMPT_TTL: orphan_suspect 시도를 지켜보는 기간 — 사용자가 목록을 다시 열 때까지의 여유.
+    # ORPHAN_TTL : 복구되지 않은 고아를 업스트림에서 회수하기까지의 유예.
+    # MAX_INGEST : 생성 요청이 아직 진행 중일 수 있는 최대 시간. 이 시간이 지난 pending 시도는
+    #              프로세스 강제 종료로 남은 것으로 보고 복구 대상에 넣는다.
+    #              PROXY_KB_INGEST_TIMEOUT(600s)에 여유를 더한 값이며, 콜드스타트 실측치가 없어 잠정값이다.
+    KB_ATTEMPT_TTL_MINUTES: int = int(os.getenv("KB_ATTEMPT_TTL_MINUTES", "1440"))
+    PROXY_KB_ORPHAN_TTL_MINUTES: int = int(os.getenv("PROXY_KB_ORPHAN_TTL_MINUTES", "10080"))
+    KB_MAX_INGEST_SECONDS: int = int(os.getenv("KB_MAX_INGEST_SECONDS", "3600"))
+    # 고아 정리 잡 — 업스트림 삭제라 되돌릴 수 없다. 기본은 dry-run 으로 대상만 로그에 남긴다.
+    SCHEDULER_INCLUDE_KB_ORPHAN_CLEANUP: bool = _get_bool("SCHEDULER_INCLUDE_KB_ORPHAN_CLEANUP", False)
+    KB_ORPHAN_CLEANUP_DRY_RUN: bool = _get_bool("KB_ORPHAN_CLEANUP_DRY_RUN", True)
+    SCHEDULER_KB_ORPHAN_CLEANUP_HOURS: int = int(os.getenv("SCHEDULER_KB_ORPHAN_CLEANUP_HOURS", "6"))
     MAX_DATASET_FILE_SIZE: int = int(os.getenv("MAX_DATASET_FILE_SIZE", "1073741824"))  # 1GB
 
     HUB_CONNECT_ENABLED: bool = _get_bool("HUB_CONNECT_ENABLED", False)
@@ -108,8 +137,29 @@ class Settings:
     # 별도 worker 프로세스에서 띄울 때는 false로 두어야 한다 (API 프로세스에만 켤 것).
     SCHEDULER_INCLUDE_API_METRICS: bool = _get_bool("SCHEDULER_INCLUDE_API_METRICS", True)
 
+    # 개인 대시보드 서비스 카드/모니터링 캐시
+    # TTL(분): 캐시가 이보다 오래되면 다음 요청에서 본인 서비스만 즉시(live) 재집계. 0이면 무한 캐시(스케줄러만 갱신).
+    DASHBOARD_CACHE_TTL_MINUTES: int = int(os.getenv("DASHBOARD_CACHE_TTL_MINUTES", "10"))
+    # 사용 모델 distinct 수 집계 여부 — 워크플로우 detail fan-out이라 비용 큼. 부담되면 false.
+    DASHBOARD_INCLUDE_MODEL_COUNT: bool = _get_bool("DASHBOARD_INCLUDE_MODEL_COUNT", True)
+    # 스케줄러 전체 서비스 pre-warm 잡 — MLOps(PROXY) 비활성 환경에선 의미 없으므로 default도 PROXY_ENABLED 의존 권장.
+    SCHEDULER_INCLUDE_DASHBOARD: bool = _get_bool("SCHEDULER_INCLUDE_DASHBOARD", False)
+    SCHEDULER_DASHBOARD_REFRESH_MINUTES: int = int(os.getenv("SCHEDULER_DASHBOARD_REFRESH_MINUTES", "10"))
+
+    # 모델 visibility reconcile 잡 — MLOps visibility → gateway is_catalog 캐시 정정.
+    # 목록 조회가 read-through로도 동기화하므로 backstop 용도. MLOps(PROXY) 필요.
+    SCHEDULER_INCLUDE_MODEL_VISIBILITY: bool = _get_bool("SCHEDULER_INCLUDE_MODEL_VISIBILITY", False)
+    SCHEDULER_MODEL_VISIBILITY_MINUTES: int = int(os.getenv("SCHEDULER_MODEL_VISIBILITY_MINUTES", "30"))
+
+    # 워크플로우 매핑 reconcile 잡 — MLOps에서 사라진 워크플로우의 stale 매핑 soft-delete.
+    # 목록 조회는 원격 장애/필터로 멀쩡한 매핑을 지울 위험이 있어 이 잡에만 위임. MLOps(PROXY) 필요.
+    SCHEDULER_INCLUDE_WORKFLOW_RECONCILE: bool = _get_bool("SCHEDULER_INCLUDE_WORKFLOW_RECONCILE", False)
+    SCHEDULER_WORKFLOW_RECONCILE_MINUTES: int = int(os.getenv("SCHEDULER_WORKFLOW_RECONCILE_MINUTES", "30"))
+
     ANY_CLOUD_ENABLED: bool = _get_bool("ANY_CLOUD_ENABLED", False)
     ANY_CLOUD_TARGET_BASE_URL: str = os.getenv("ANY_CLOUD_TARGET_BASE_URL", "")
+    # 비워두면 TARGET_BASE_URL 의 scheme 만 ws/wss 로 바꿔 사용. WS 만 다른 호스트일 때 지정.
+    ANY_CLOUD_TARGET_WS_URL: str = os.getenv("ANY_CLOUD_TARGET_WS_URL", "")
     ANY_CLOUD_TIMEOUT: float = float(os.getenv("ANY_CLOUD_TIMEOUT", "30.0"))
     ANY_CLOUD_CONNECT_TIMEOUT: float = float(os.getenv("ANY_CLOUD_CONNECT_TIMEOUT", "5.0"))
     ANY_CLOUD_MAX_CONNECTIONS: int = int(os.getenv("ANY_CLOUD_MAX_CONNECTIONS", "100"))
@@ -138,6 +188,20 @@ class Settings:
                 raise ValueError("EXTERNAL_API_USERNAME is required when PROXY_ENABLED is true")
             if not self.EXTERNAL_API_PASSWORD:
                 raise ValueError("EXTERNAL_API_PASSWORD is required when PROXY_ENABLED is true")
+
+        # 시도가 abandoned 로 포기된 뒤에야 정리가 손대야 한다. 뒤집히면 복구 가능한 KB가
+        # 복구 기회를 얻기 전에 삭제된다.
+        if self.KB_ATTEMPT_TTL_MINUTES >= self.PROXY_KB_ORPHAN_TTL_MINUTES:
+            raise ValueError(
+                "KB_ATTEMPT_TTL_MINUTES must be less than PROXY_KB_ORPHAN_TTL_MINUTES"
+            )
+
+        # 창이 게이트웨이 타임아웃보다 짧으면, 아직 응답을 기다리는 생성 요청의 pending 시도가
+        # 복구 대상이 되어 생성 경로와 같은 KB 의 매핑을 두고 경합한다.
+        if self.KB_MAX_INGEST_SECONDS < self.PROXY_KB_INGEST_TIMEOUT:
+            raise ValueError(
+                "KB_MAX_INGEST_SECONDS must be >= PROXY_KB_INGEST_TIMEOUT"
+            )
 
         if self.HUB_CONNECT_ENABLED and not self.HUB_CONNECT_TARGET_BASE_URL:
             raise ValueError("HUB_CONNECT_TARGET_BASE_URL is required when HUB_CONNECT_ENABLED is true")

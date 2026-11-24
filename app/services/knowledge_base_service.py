@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List
+from typing import Any, Dict, Optional, List
 
 import httpx
 from fastapi import HTTPException, UploadFile
@@ -18,6 +18,46 @@ from app.schemas.knowledge_base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _upstream_error_detail(response: httpx.Response) -> Any:
+    """upstream 에러 body에서 detail만 꺼낸다.
+
+    body를 문자열 그대로 detail에 넣으면 `{"detail": "{\"detail\": \"...\"}"}`로
+    이중 래핑되어 클라이언트가 메시지를 읽지 못한다.
+    """
+    try:
+        error_body = response.json()
+    except ValueError:
+        error_body = None
+    detail = error_body.get("detail") if isinstance(error_body, dict) else None
+    return detail if isinstance(detail, (str, list, dict)) else "upstream request rejected"
+
+
+def _format_context(context: Optional[Dict]) -> str:
+    if not context:
+        return ""
+    return " (" + ", ".join(f"{k}={v}" for k, v in context.items() if v is not None) + ")"
+
+
+def _raise_kb_timeout(action: str, context: Optional[Dict] = None) -> None:
+    """콜드스타트 등으로 처리시간 초과 시 공통 504 변환."""
+    # 504 요청은 업스트림에서 뒤늦게 완료되어 고아 KB 가 될 수 있다. 어떤 요청이 끊겼는지
+    # 남기지 않으면 시도 레코드·access.log 와 연결되지 않아 추적이 끊긴다.
+    logger.error(f"Timeout: {action}{_format_context(context)}")
+    raise HTTPException(status_code=504, detail=f"{action} timed out")
+
+
+def _raise_kb_unavailable(action: str) -> None:
+    """업스트림 연결 자체 실패 시 공통 503 변환."""
+    logger.error(f"Connection failed: {action}")
+    raise HTTPException(status_code=503, detail=f"{action} unavailable")
+
+
+def _raise_kb_upstream_error(action: str, exc: Exception, context: Optional[Dict] = None) -> None:
+    """업스트림 통신 중 오류(요청 도중 연결 끊김, 프로토콜 오류 등) 시 공통 502 변환."""
+    logger.error(f"Upstream error: {action}{_format_context(context)}: {exc!r}")
+    raise HTTPException(status_code=502, detail=f"{action} error")
 
 
 class KnowledgeBaseService:
@@ -63,6 +103,12 @@ class KnowledgeBaseService:
                     self.token_expires_at = datetime.now() + timedelta(seconds=expires_in - 300)
                     return access_token
             raise HTTPException(status_code=response.status_code, detail="Authentication failed")
+        except httpx.ConnectError:
+            _raise_kb_unavailable("Authentication service")
+        except httpx.TimeoutException:
+            _raise_kb_timeout("Authentication service")
+        except httpx.RequestError as e:
+            _raise_kb_upstream_error("Authentication service", e)
         except Exception as e:
             logger.error(f"Authentication error: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Authentication failed: {str(e)}")
@@ -86,6 +132,8 @@ class KnowledgeBaseService:
         return headers
 
     async def _make_authenticated_request(self, method: str, url: str, user_info: Optional[Dict] = None,
+                                          *, timeout_action: str = "Knowledge base request",
+                                          timeout_context: Optional[Dict] = None,
                                           **kwargs) -> httpx.Response:
         token = await self._get_valid_token()
         headers = self._get_headers(user_info)
@@ -96,13 +144,26 @@ class KnowledgeBaseService:
         else:
             kwargs['headers'] = headers
 
-        response = await getattr(self.client, method.lower())(url, **kwargs)
+        request_context = {
+            "method": method,
+            "url": url,
+            "member_id": (user_info or {}).get("member_id"),
+        }
 
-        if response.status_code == 401:
-            self.access_token = None
-            token = await self._get_valid_token()
-            kwargs['headers']['Authorization'] = f"Bearer {token}"
+        try:
             response = await getattr(self.client, method.lower())(url, **kwargs)
+
+            if response.status_code == 401:
+                self.access_token = None
+                token = await self._get_valid_token()
+                kwargs['headers']['Authorization'] = f"Bearer {token}"
+                response = await getattr(self.client, method.lower())(url, **kwargs)
+        except httpx.ConnectError:
+            _raise_kb_unavailable("Knowledge base service")
+        except httpx.TimeoutException:
+            _raise_kb_timeout(timeout_action, timeout_context or request_context)
+        except httpx.RequestError as e:
+            _raise_kb_upstream_error("Knowledge base service", e, timeout_context or request_context)
 
         return response
 
@@ -117,7 +178,7 @@ class KnowledgeBaseService:
             if response.status_code == 200:
                 data = response.json()
                 return [ChunkTypeSchema(**item) for item in data]
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -133,7 +194,7 @@ class KnowledgeBaseService:
             if response.status_code == 200:
                 data = response.json()
                 return [LanguageSchema(**item) for item in data]
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -149,7 +210,7 @@ class KnowledgeBaseService:
             if response.status_code == 200:
                 data = response.json()
                 return [SearchMethodSchema(**item) for item in data]
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -186,16 +247,30 @@ class KnowledgeBaseService:
 
             logger.info(f"Creating knowledge base: {name}")
 
-            response = await self._make_authenticated_request("POST", url, user_info=user_info, files=files, data=data)
+            response = await self._make_authenticated_request(
+                "POST", url, user_info=user_info, files=files, data=data,
+                timeout=httpx.Timeout(
+                    read=settings.PROXY_KB_INGEST_TIMEOUT,
+                    write=settings.PROXY_KB_INGEST_TIMEOUT,
+                    connect=settings.PROXY_CONNECT_TIMEOUT,
+                    pool=settings.PROXY_TIMEOUT,
+                ),
+                timeout_action="Knowledge base creation",
+                timeout_context={
+                    "name": name,
+                    "filename": getattr(file, "filename", None),
+                    "member_id": (user_info or {}).get("member_id"),
+                },
+            )
 
             if response.status_code in [200, 201]:
                 kb_data = response.json()
                 return ExternalKnowledgeBaseDetailResponse(**kb_data)
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Error creating knowledge base: {str(e)}")
+            logger.exception("Error creating knowledge base")
             raise HTTPException(status_code=500, detail=str(e))
 
     async def get_knowledge_bases(
@@ -215,7 +290,7 @@ class KnowledgeBaseService:
                 if isinstance(data, list):
                     return [ExternalKnowledgeBaseBriefResponse(**item) for item in data]
                 return [ExternalKnowledgeBaseBriefResponse(**data)]
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -234,7 +309,7 @@ class KnowledgeBaseService:
                 return ExternalKnowledgeBaseDetailResponse(**response.json())
             elif response.status_code == 404:
                 return None
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -260,7 +335,7 @@ class KnowledgeBaseService:
                 return ExternalKnowledgeBaseDetailResponse(**response.json())
             elif response.status_code == 404:
                 return None
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -279,7 +354,7 @@ class KnowledgeBaseService:
                 return True
             elif response.status_code == 404:
                 return False
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -291,20 +366,34 @@ class KnowledgeBaseService:
     async def add_file(
             self, knowledge_base_id: int, file: UploadFile, user_info: Optional[Dict] = None
     ) -> ExternalKnowledgeBaseDetailResponse:
-        """지식베이스에 파일 추가"""
+        """지식베이스에 파일 추가."""
         try:
             url = f"{self.base_url}/knowledge-bases/{knowledge_base_id}/files"
             files = {'file': (file.filename, await file.read(), file.content_type)}
 
-            response = await self._make_authenticated_request("POST", url, user_info=user_info, files=files)
+            response = await self._make_authenticated_request(
+                "POST", url, user_info=user_info, files=files,
+                timeout=httpx.Timeout(
+                    read=settings.PROXY_KB_INGEST_TIMEOUT,
+                    write=settings.PROXY_KB_INGEST_TIMEOUT,
+                    connect=settings.PROXY_CONNECT_TIMEOUT,
+                    pool=settings.PROXY_TIMEOUT,
+                ),
+                timeout_action="Adding file to knowledge base",
+                timeout_context={
+                    "knowledge_base_id": knowledge_base_id,
+                    "filename": getattr(file, "filename", None),
+                    "member_id": (user_info or {}).get("member_id"),
+                },
+            )
 
             if response.status_code in [200, 201]:
                 return ExternalKnowledgeBaseDetailResponse(**response.json())
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Error adding file: {str(e)}")
+            logger.exception("Error adding file")
             raise HTTPException(status_code=500, detail=str(e))
 
     async def delete_file(
@@ -317,7 +406,7 @@ class KnowledgeBaseService:
 
             if response.status_code == 200:
                 return ExternalKnowledgeBaseDetailResponse(**response.json())
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -336,7 +425,7 @@ class KnowledgeBaseService:
 
             if response.status_code == 200:
                 return KnowledgeBaseSearchResponse(**response.json())
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:
@@ -354,7 +443,7 @@ class KnowledgeBaseService:
             if response.status_code == 200:
                 data = response.json()
                 return [KnowledgeBaseSearchRecord(**item) for item in data]
-            raise HTTPException(status_code=response.status_code, detail=response.text)
+            raise HTTPException(status_code=response.status_code, detail=_upstream_error_detail(response))
         except HTTPException:
             raise
         except Exception as e:

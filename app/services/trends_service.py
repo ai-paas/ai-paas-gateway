@@ -224,7 +224,9 @@ def get_trends(
 
     소스 우선순위: daily_stats 테이블 → raw 집계 폴백.
     """
-    end = end_date or datetime.utcnow().date()
+    # `DailyStat.date` is a business-calendar date. Using UTC here drops the
+    # current local day between local midnight and UTC midnight.
+    end = end_date or date.today()
     start = end - timedelta(days=days - 1)
 
     if domain is not None and domain not in ALLOWED_DOMAINS:

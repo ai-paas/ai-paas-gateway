@@ -128,7 +128,7 @@ class ServiceService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout during authentication: {str(e)}")
+            logger.error(f"Timeout during authentication: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="Authentication service timeout"
@@ -238,7 +238,7 @@ class ServiceService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout creating service: {str(e)}")
+            logger.error(f"Timeout creating service: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -288,7 +288,7 @@ class ServiceService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout getting services: {str(e)}")
+            logger.error(f"Timeout getting services: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -340,7 +340,7 @@ class ServiceService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout getting service {service_id}: {str(e)}")
+            logger.error(f"Timeout getting service {service_id}: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -393,7 +393,7 @@ class ServiceService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout updating service {service_id}: {str(e)}")
+            logger.error(f"Timeout updating service {service_id}: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -436,7 +436,7 @@ class ServiceService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout getting resource usages for {service_id}: {str(e)}")
+            logger.error(f"Timeout getting resource usages for {service_id}: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"
@@ -476,7 +476,7 @@ class ServiceService:
                 )
 
         except httpx.TimeoutException as e:
-            logger.error(f"Timeout deleting service {service_id}: {str(e)}")
+            logger.error(f"Timeout deleting service {service_id}: {e!r}")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="External service timeout"

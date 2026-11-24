@@ -13,7 +13,7 @@ from app.models.dataset import Dataset
 from app.schemas.dataset import (
     DatasetCreateRequest, DatasetUpdateRequest, DatasetReadSchema,
     DatasetListWrapper, DatasetWithMemberInfo, InnoUserInfo,
-    DatasetValidationResponse
+    DatasetKindEnum, DatasetKindReadSchema, DatasetValidationResponse,
 )
 from app.services.audit_service import Action, ResourceType, emit_from_request
 from app.services.dataset_service import dataset_service
@@ -176,6 +176,41 @@ async def get_datasets(
         )
 
 
+@router.get("/kinds", response_model=List[DatasetKindReadSchema])
+async def get_dataset_kinds(
+        current_user: Member = Depends(get_current_user)
+):
+    """
+    데이터셋 분류 카탈로그 조회
+
+    데이터셋 검증·등록 화면의 유형 선택에 사용할 카탈로그를 조회합니다.
+
+    ## Response (List[DatasetKindReadSchema])
+    - **name**: `dataset_kind`에 전달할 분류 식별자
+      - `object-detection`: YOLOX 계열 객체 감지 데이터셋
+      - `protein-classification`: ESM2 단백질 서열 분류 데이터셋
+    - **description**: 분류 설명
+    - **accepted_formats**: 허용 데이터셋 형식
+    - **supported_models**: 학습 가능한 모델 키 목록
+
+    ## Notes
+    - 현재 로그인한 사용자 정보를 MLOps API에 전달합니다.
+    - 반환값은 MLOps 카탈로그를 그대로 반영하며 gateway DB 매핑을 만들지 않습니다.
+
+    ## Errors
+    - 401: 인증되지 않은 사용자
+    - 502: 외부 MLOps API 연결 실패
+    - 504: 외부 MLOps API 응답 시간 초과
+    """
+    return await dataset_service.get_dataset_kinds(
+        user_info={
+            'member_id': current_user.member_id,
+            'role': current_user.role,
+            'name': current_user.name,
+        }
+    )
+
+
 @router.get("/{dataset_id}", response_model=DatasetReadSchema)
 async def get_dataset(
         dataset_id: int = Path(..., description="조회할 데이터셋 ID"),
@@ -195,6 +230,7 @@ async def get_dataset(
     - **id** (int): 데이터셋 고유 ID
     - **name** (str): 데이터셋 이름
     - **description** (str, optional): 데이터셋 설명 (없을 수 있음)
+    - **kind** (str, optional): 데이터셋 학습 태스크 분류
     - **dataset_registry** (DatasetRegistryReadSchema): 데이터셋 레지스트리 정보
       - id (int): 레지스트리 ID
       - artifact_path (str): MLflow에 저장된 데이터셋의 아티팩트 경로
@@ -281,12 +317,14 @@ async def update_dataset(
     **Request Body (DatasetUpdateSchema)**
     - **name** (str, 선택): 새로운 데이터셋 이름 (수정하지 않으려면 전달하지 않음)
     - **description** (str, 선택): 새로운 데이터셋 설명 (수정하지 않으려면 전달하지 않음)
+    - **kind** (str, 선택): 호환성 입력 필드. 현재 MLOps API에서는 변경되지 않음
 
     **Response (DatasetReadSchema)**
     - **id** (int): 데이터셋 고유 ID
     - **name** (str): 수정된 데이터셋 이름
     - **description** (str, optional): 수정된 데이터셋 설명
       - 데이터셋에 대한 상세 설명 (없을 수 있음)
+    - **kind** (str, optional): 데이터셋 학습 태스크 분류. PUT 요청으로는 변경되지 않음
     - **dataset_registry** (DatasetRegistryReadSchema): 데이터셋 레지스트리 정보
       - id (int): 레지스트리 ID
       - artifact_path (str): MLflow에 저장된 데이터셋의 아티팩트 경로
@@ -300,6 +338,7 @@ async def update_dataset(
     **Notes**
     - name과 description 중 하나만 수정하거나 둘 다 수정할 수 있습니다
     - 수정하지 않을 필드는 요청에서 생략하면 됩니다
+    - 데이터셋 분류(kind)는 등록 후 변경할 수 없습니다
 
     **Errors**
     - 400: 유효하지 않은 요청
@@ -453,23 +492,22 @@ async def delete_dataset(
 
 @router.post("/validate", response_model=DatasetValidationResponse)
 async def validate_dataset(
-        file: UploadFile = File(..., description="검증할 데이터셋 ZIP 파일. COCO128 형식 구조여야 합니다"),
+        file: UploadFile = File(..., description="검증할 데이터셋 ZIP 파일"),
+        dataset_kind: DatasetKindEnum = Form(..., description="검증할 데이터셋 학습 태스크 분류"),
         current_user: Member = Depends(get_current_user)
 ):
     """
     데이터셋 파일 유효성 검증
 
-    업로드된 데이터셋 파일의 형식과 구조를 검증합니다.
-    COCO128 형식의 데이터셋 구조를 기준으로 검증을 수행합니다.
+    업로드된 데이터셋 ZIP 파일이 `dataset_kind`의 형식 요구사항을 충족하는지 검증합니다.
 
     **Request Body**
     - **file** (UploadFile, 필수): 검증할 데이터셋 ZIP 파일
-      - COCO128 형식의 데이터셋이 ZIP으로 압축된 파일
-      - 필수 구조:
-        - `annotations/instances_train2017.json`
-        - `annotations/instances_val2017.json`
-        - `train2017/` (이미지 폴더)
-        - `val2017/` (이미지 폴더)
+    - **dataset_kind** (str enum, 필수): 검증할 데이터셋 분류
+      - `object-detection`: COCO128 구조
+        (`annotations/instances_{train,val}2017.json`, `train2017/`, `val2017/`)
+      - `protein-classification`: TCR-Epitope CSV
+        (필수 컬럼 `epitope`, `cdr3b`, `label`; `label`은 0 또는 1; 16행 이상)
 
     **Response (DatasetValidationResponse)**
     - **is_valid** (bool): 검증 성공 여부
@@ -485,16 +523,18 @@ async def validate_dataset(
     **Notes**
     - 파일 검증은 실제 데이터셋 등록 전에 수행하는 것을 권장합니다
     - 검증 실패 시 details 필드에서 구체적인 오류 원인을 확인할 수 있습니다
-    - ZIP 파일 형식이 아니거나 COCO128 구조를 따르지 않으면 검증이 실패합니다
+    - 형식 불충족은 HTTP 200과 `is_valid=false`로 응답합니다
+    - 응답에는 입력값으로 이미 확정된 `dataset_kind`가 포함되지 않습니다
 
     **Errors**
-    - 400: 파일 형식 오류 또는 데이터셋 구조 검증 실패
     - 401: 인증되지 않은 사용자
+    - 422: 알 수 없는 `dataset_kind` 값
     - 500: 서버 내부 오류
     """
     try:
         validation_result = await dataset_service.validate_dataset(
             file=file,
+            dataset_kind=dataset_kind,
             user_info={
                 'member_id': current_user.member_id,
                 'role': current_user.role,
@@ -519,7 +559,8 @@ async def create_dataset(
         request: Request,
         name: str = Form(..., description="데이터셋을 식별하기 위한 이름"),
         description: Optional[str] = Form(None, description="데이터셋에 대한 상세 설명"),
-        file: UploadFile = File(..., description="데이터셋 ZIP 파일. COCO128 형식의 데이터셋이 ZIP으로 압축된 파일"),
+        dataset_kind: DatasetKindEnum = Form(..., description="데이터셋 학습 태스크 분류"),
+        file: UploadFile = File(..., description="선택한 dataset_kind 형식의 데이터셋 ZIP 파일"),
         db: Session = Depends(get_db),
         current_user: Member = Depends(get_current_user)
 ):
@@ -532,14 +573,18 @@ async def create_dataset(
     **Request Body (multipart/form-data)**
     - **name** (str, 필수): 데이터셋을 식별하기 위한 이름 (Form 필드로 전달)
     - **description** (str, 선택): 데이터셋에 대한 상세 설명 (Form 필드로 전달, 생략 가능, 기본값: None)
+    - **dataset_kind** (str enum, 필수): 데이터셋 학습 태스크 분류
+      - `object-detection`: YOLOX 계열 객체 감지 데이터셋
+      - `protein-classification`: ESM2 단백질 서열 분류 데이터셋
     - **file** (UploadFile, 필수): 데이터셋 ZIP 파일
-      - COCO128 형식의 데이터셋이 ZIP으로 압축된 파일 (최대 1GB)
+      - `dataset_kind`에 맞는 형식의 데이터셋이 ZIP으로 압축된 파일 (최대 1GB)
       - 파일 검증은 `/datasets/validate` API를 먼저 호출하여 수행하는 것을 권장합니다
 
     **Response (DatasetReadSchema)**
     - **id** (int): 데이터셋 고유 ID
     - **name** (str): 데이터셋 이름
     - **description** (str, optional): 데이터셋 설명 (없을 수 있음)
+    - **kind** (str, optional): 등록된 데이터셋 학습 태스크 분류
     - **dataset_registry** (DatasetRegistryReadSchema): 데이터셋 레지스트리 정보
       - id (int): 레지스트리 ID
       - artifact_path (str): MLflow에 저장된 데이터셋의 아티팩트 경로
@@ -564,7 +609,8 @@ async def create_dataset(
         # 데이터셋 생성 요청 데이터 구성
         dataset_data = DatasetCreateRequest(
             name=name,
-            description=description
+            description=description,
+            dataset_kind=dataset_kind,
         )
 
         # 1. 외부 API를 통해 데이터셋 생성

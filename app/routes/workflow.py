@@ -1,26 +1,37 @@
 import logging
-from typing import Optional
+from typing import Any, Optional, Tuple
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, UploadFile, File, Form
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.auth import get_current_user
+from app.auth import get_current_admin_user, get_current_user
 from app.common.sort import parse_sort, sort_in_memory
 from app.cruds.service import service_crud
-from app.cruds.workflow import workflow_crud
+from app.cruds.workflow import REGISTERED_VIA_AUTO, workflow_crud
 from app.database import get_db
 from app.models.member import Member
+from app.models.workflow import Workflow
 from app.schemas.workflow import (
     WorkflowCreateRequest,
     WorkflowUpdateRequest,
     WorkflowResponse,
     WorkflowDetailResponse,
     WorkflowListResponse,
-    WorkflowExecuteRequest,
     WorkflowExecuteResponse,
     WorkflowTestResponse,
     WorkflowValidateRequest,
     WorkflowValidateResponse,
+    WorkflowProteinClassificationTestRequest,
+    WorkflowProteinClassificationTestResponse,
+    WorkflowFillMaskTestRequest,
+    WorkflowFillMaskTestResponse,
+    WorkflowProteinStructurePredictionTestRequest,
+    WorkflowProteinStructurePredictionTestResponse,
+    WorkflowComponentDeploymentStatusRequest,
+    ComponentTypeListResponse,
+    TemplateCreateRequest,
+    TemplateUpdateRequest,
 )
 from app.services.audit_service import Action, ResourceType, emit_from_request
 from app.services.workflow_service import UNSET as _SERVICE_UNSET, workflow_service
@@ -42,9 +53,79 @@ _WORKFLOW_SORT_GETTERS = {
 _WORKFLOW_SORT_DEFAULT = [("created_at", True)]
 _WORKFLOW_SORT_TIE_BREAKER = lambda w: w.id
 
+# MLOps finalize-deletion의 삭제 완료 신호.
+# upstream OpenAPI가 이 200 응답 스키마를 비워 둬(`{}`) 키 이름이 계약으로
+# 보장되지 않는다. status 종결값과 deleted_from_db 중 하나만 와도 완료로 본다 —
+# 클라이언트에 "completed"를 주면서 게이트웨이 매핑만 남는 불일치가 더 위험하다.
+_DELETION_DONE_STATUSES = frozenset({"completed", "deleted", "already_deleted"})
+
+
+def _status_of(response_body: Any) -> str:
+    if not isinstance(response_body, dict):
+        return ""
+    return str(response_body.get("status") or "").strip().lower()
+
+
+def _is_deletion_done(finalize_response: Any) -> bool:
+    if not isinstance(finalize_response, dict):
+        return False
+    return (
+        _status_of(finalize_response) in _DELETION_DONE_STATUSES
+        or bool(finalize_response.get("deleted_from_db"))
+    )
+
+
+def _save_created_workflow(
+        db: Session,
+        *,
+        name: str,
+        description: Optional[str],
+        member_id: str,
+        surro_workflow_id: str,
+) -> Tuple[Workflow, bool]:
+    """MLOps 에 만든 워크플로우의 매핑을 저장한다. (매핑, 소유권을 넘겨받았는지) 를 돌려준다.
+
+    MLOps 생성과 이 저장 사이에 목록 조회의 자동 등록이 같은 ID 를 먼저 admin 소유로 등록할 수
+    있다. 그 행(registered_via='auto')이면 요청자가 넘겨받고, 다른 행이면 409 로 거절한다.
+    """
+    try:
+        return workflow_crud.create_workflow(
+            db=db,
+            name=name,
+            description=description,
+            created_by=member_id,
+            surro_workflow_id=surro_workflow_id,
+        ), False
+    except IntegrityError:
+        claimed = workflow_crud.claim_auto_registered(db, surro_workflow_id, member_id)
+        if claimed is not None:
+            logger.warning(
+                "Reclaimed auto-registered workflow %s for creator %s",
+                surro_workflow_id, member_id,
+            )
+            return claimed, True
+        logger.error(
+            "Workflow %s created in external API but already registered by another member",
+            surro_workflow_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Workflow created in external API but already registered by another member",
+        )
+    except Exception as mapping_error:
+        logger.error(
+            "Workflow %s created in external API but DB save failed: %s",
+            surro_workflow_id, mapping_error,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Workflow created in external API but failed to save: {str(mapping_error)}",
+        )
+
+
 # ===== Component Types =====
 
-@router.get("/component-types")
+@router.get("/component-types", response_model=ComponentTypeListResponse)
 async def get_component_types(
         current_user=Depends(get_current_user)
 ):
@@ -118,13 +199,24 @@ async def validate_workflow_definition(
     ## Response (WorkflowValidateResponse)
     - **valid** (bool): 모든 규칙 통과 여부
     - **checks** (List[ValidationCheckResponse]): 규칙별 결과
-        - rule (str): 규칙 식별자
+        - rule (str): 규칙 식별자 (아래 "주요 검증 규칙" 참고)
         - passed (bool): 통과 여부
         - message (str, optional): 실패 시 상세 메시지
+
+    ## 주요 검증 규칙 (rule 키 — MLOps가 최종 판정, 아래는 일부)
+    모델 타입은 **OD(object-detection) / LLM(text-generation·vqa) / BFM(생체분자 서열)** 로 분류됩니다.
+    BFM은 esm2/esmc/esmfold2/molformer/rnafm 등 생체분자 서열 모델군(구 `pLM`)입니다.
+    - **no_incompatible_model_type_mix**: 한 워크플로우에 OD/LLM/BFM 중 2종 이상 모델 공존 불가 (상호 배타)
+    - **no_bfm_with_kb**: BFM 워크플로우에는 KNOWLEDGE_BASE 컴포넌트 포함 불가
+    - **no_bfm_with_prompt**: BFM 모델 컴포넌트에 `prompt_id` 사용 불가
+    - **bfm_single_task**: 한 워크플로우의 BFM 모델은 모두 같은 `task` 여야 함 (fill-mask + protein-structure-prediction 등 혼합 불가)
+    - **structure_prediction_backbone_registered**: 구조예측(ESMFold2, `task=protein-structure-prediction`)
+      포함 시 백본 모델 `biohub/ESMC-6B`가 먼저 등록돼 있어야 함
 
     ## Notes
     - 저장하지 않음 — 순수 사전 검증용
     - 본 검사를 통과해도 실제 생성(`POST /workflows`) 시 추가 정합성 검사가 있을 수 있음
+    - 위 규칙은 생성/수정 요청에서도 동일하게 실행되며, 위반 시 생성/수정은 `400`으로 거부됨
 
     ## Errors
     - **401**: 인증되지 않은 사용자
@@ -213,12 +305,18 @@ async def create_workflow(
     - 생성 직후 상태는 DRAFT
     - is_template은 항상 false로 설정됨 (템플릿 생성은 `/workflows/templates` API 사용)
     - 상세 정보(components, connections, creator 등)는 `GET /workflows/{workflow_id}`로 조회 가능
+    - 워크플로우 정의는 `POST /workflows/validate`와 동일한 규칙으로 검증됨. 특히 모델 타입
+      **OD/LLM/BFM은 상호 배타**이고, BFM 워크플로우는 KNOWLEDGE_BASE·prompt_id 불가·단일 task만
+      허용됩니다 (규칙 상세는 `/workflows/validate` 참고). 위반 시 400.
 
     ## Errors
-    - **400**: 잘못된 요청 (정의 오류 등)
+    - **400**: 잘못된 요청 (정의 오류, 검증 규칙 위반 — 모델 타입 혼합/BFM 제약 등)
     - **401**: 인증되지 않은 사용자
     - **403**: service_id가 다른 사용자 소유의 service일 때 (admin 제외)
     - **404**: service_id가 게이트웨이 DB에 존재하지 않을 때
+    - **409**: MLOps에는 생성됐으나 같은 ID가 다른 사용자 소유로 이미 등록돼 있을 때.
+      목록 조회의 자동 등록이 먼저 admin 소유로 등록한 경우는 409가 아니라 요청자가 넘겨받는다.
+    - **422**: name 이 255자를 넘을 때 (MLOps 호출 전에 거절)
     - **500**: 서버 내부 오류 (MLOps에는 생성됐으나 게이트웨이 DB 저장 실패 포함)
     """
     user_info = {
@@ -256,35 +354,28 @@ async def create_workflow(
     )
 
     # 우리 DB에 저장
-    try:
-        db_workflow = workflow_crud.create_workflow(
-            db=db,
-            name=workflow_create.name,
-            description=workflow_create.description,
-            created_by=current_user.member_id,
-            surro_workflow_id=external_workflow.id
-        )
-        logger.info(
-            f"Created workflow: surro_id={external_workflow.id}, "
-            f"member_id={current_user.member_id}"
-        )
-    except Exception as mapping_error:
-        logger.error(f"Failed to create workflow: {str(mapping_error)}")
-        logger.warning(
-            f"Workflow {external_workflow.id} created in external API but DB save failed"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Workflow created in external API but failed to save: {str(mapping_error)}"
-        )
+    db_workflow, reclaimed = _save_created_workflow(
+        db,
+        name=workflow_create.name,
+        description=workflow_create.description,
+        member_id=current_user.member_id,
+        surro_workflow_id=external_workflow.id,
+    )
+    logger.info(
+        f"Created workflow: surro_id={external_workflow.id}, "
+        f"member_id={current_user.member_id}"
+    )
 
+    metadata = {"name": db_workflow.name, "service_id": workflow_create.service_id}
+    if reclaimed:
+        metadata["ownership_reclaimed"] = True
     emit_from_request(
         db, request,
         action=Action.CREATE,
         resource_type=ResourceType.WORKFLOW,
         actor_member_id=current_user.member_id,
         resource_id=str(db_workflow.surro_workflow_id),
-        metadata={"name": db_workflow.name, "service_id": workflow_create.service_id},
+        metadata=metadata,
     )
     # 응답: DB 메타정보 + 외부 API 데이터
     return WorkflowResponse(
@@ -399,37 +490,18 @@ async def get_workflows(
     # 템플릿 제외 (이 엔드포인트는 템플릿 반환 안 함)
     external_list = [w for w in external_list if not w.is_template]
     external_by_id = {w.id: w for w in external_list}
+    # 2) DB ↔ MLOps 매핑 확인
+    db_surro_ids = workflow_crud.get_mapped_surro_ids(db, list(external_by_id))
 
-    # 2) DB ↔ MLOps 동기화
-    db_all, _ = workflow_crud.get_workflows(
-        db=db, skip=None, limit=None,
-        search=None, creator_id=None, status=None
-    )
-    db_surro_ids = {w.surro_workflow_id for w in db_all}
-
-    # 2a) MLOps에서 사라진 워크플로우는 DB에서 제거
-    #     (Workflow 모델에 soft-delete 컬럼이 없어 현재는 hard-delete)
-    for dbw in db_all:
-        if dbw.surro_workflow_id not in external_by_id:
-            try:
-                workflow_crud.delete_workflow_by_surro_id(
-                    db=db, surro_workflow_id=dbw.surro_workflow_id
-                )
-                logger.info(
-                    f"Removed orphan workflow from DB (not in MLOps): "
-                    f"surro_id={dbw.surro_workflow_id}"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to remove orphan workflow {dbw.surro_workflow_id}: {e}"
-                )
-
-    # 2b) MLOps에만 있는 워크플로우는 admin 소유로 등록
+    # 조회 API에서는 stale 매핑을 변경하지 않는다. 원격 장애나 service/status
+    # 필터가 빈 결과를 만들 수 있으므로 soft-delete는 별도 reconciliation에서만 수행한다.
+    # MLOps에만 있는 워크플로우는 admin 소유로 등록한다.
     missing = [w for w in external_list if w.id not in db_surro_ids]
     if missing:
+        # admin 이 여럿이어도 소유자가 매번 같도록 정렬한다
         admin = db.query(Member).filter(
             Member.role == "admin", Member.is_active == True
-        ).first()
+        ).order_by(Member.id.asc()).first()
         if not admin:
             logger.warning(
                 f"No active admin member found — skipping auto-registration "
@@ -444,23 +516,26 @@ async def get_workflows(
                         description=m.description,
                         created_by=admin.member_id,
                         surro_workflow_id=m.id,
+                        registered_via=REGISTERED_VIA_AUTO,
                     )
                     logger.info(
                         f"Registered missing workflow under admin "
                         f"({admin.member_id}): surro_id={m.id}"
                     )
                 except Exception as e:
+                    db.rollback()
                     logger.warning(
                         f"Failed to auto-register workflow {m.id}: {e}"
                     )
 
-    # 3) 게이트웨이 DB 기준 필터 (creator_id, search)
+    # 3) 게이트웨이 DB 기준 필터 (creator_id, search). MLOps 목록에 있는 것만 병합되므로 그 ID 로 한정한다.
     db_filtered, _ = workflow_crud.get_workflows(
         db=db,
         skip=None, limit=None,
         search=search,
         creator_id=creator_id,
         status=None,
+        surro_workflow_ids=list(external_by_id),
     )
 
     # 4) MLOps 상세 데이터와 병합 (MLOps 응답에 없는 것은 제외 — status/service_id 필터 반영)
@@ -515,7 +590,7 @@ async def get_workflows(
 
 @router.post("/templates", status_code=status.HTTP_201_CREATED)
 async def create_template(
-        template_create: WorkflowCreateRequest,
+        template_create: TemplateCreateRequest,
         current_user=Depends(get_current_user)
 ):
     """
@@ -788,7 +863,7 @@ async def get_template(
 @router.put("/templates/{template_id}")
 async def update_template(
         template_id: str,
-        template_update: WorkflowUpdateRequest,
+        template_update: TemplateUpdateRequest,
         current_user=Depends(get_current_user)
 ):
     """
@@ -929,7 +1004,7 @@ async def delete_template(
 @router.post("/templates/{template_id}/clone")
 async def clone_template(
         template_id: str,
-        workflow_name: str = Query(..., description="새로 생성할 워크플로우 이름"),
+        workflow_name: str = Query(..., max_length=255, description="새로 생성할 워크플로우 이름"),
         service_id: Optional[int] = Query(
             None,
             description="연결할 서비스 ID. 서비스 목록/상세 조회 응답의 id 값을 사용합니다.",
@@ -982,7 +1057,9 @@ async def clone_template(
     - **401**: 인증되지 않은 사용자
     - **403**: service_id가 다른 사용자 소유의 service일 때 (admin 제외)
     - **404**: 템플릿 또는 service_id를 찾을 수 없음
-    - **500**: 서버 내부 오류
+    - **409**: MLOps에는 복제됐으나 같은 ID가 다른 사용자 소유로 이미 등록돼 있을 때 (생성 API와 동일)
+    - **422**: workflow_name 이 255자를 넘을 때 (MLOps 호출 전에 거절)
+    - **500**: 서버 내부 오류 (MLOps에는 복제됐으나 게이트웨이 DB 저장 실패 포함)
     """
     user_info = {
         'member_id': current_user.member_id,
@@ -1016,29 +1093,22 @@ async def clone_template(
     )
 
     # 우리 DB에 저장
-    try:
-        db_workflow = workflow_crud.create_workflow(
-            db=db,
-            name=workflow_name,
-            description=clone_response.get('description'),
-            created_by=current_user.member_id,
-            surro_workflow_id=clone_response['id']
-        )
-        logger.info(
-            f"Created workflow from template: surro_id={clone_response['id']}, "
-            f"template_id={template_id}, member_id={current_user.member_id}"
-        )
+    db_workflow, _ = _save_created_workflow(
+        db,
+        name=workflow_name,
+        description=clone_response.get('description'),
+        member_id=current_user.member_id,
+        surro_workflow_id=clone_response['id'],
+    )
+    logger.info(
+        f"Created workflow from template: surro_id={clone_response['id']}, "
+        f"template_id={template_id}, member_id={current_user.member_id}"
+    )
 
-        # 응답에 DB 메타정보 추가
-        clone_response['db_id'] = db_workflow.id
-        clone_response['db_created_at'] = db_workflow.created_at.isoformat()
-        clone_response['db_created_by'] = db_workflow.created_by
-
-    except Exception as mapping_error:
-        logger.error(f"Failed to save cloned workflow to DB: {str(mapping_error)}")
-        logger.warning(
-            f"Workflow {clone_response['id']} created from template but DB save failed"
-        )
+    # 응답에 DB 메타정보 추가
+    clone_response['db_id'] = db_workflow.id
+    clone_response['db_created_at'] = db_workflow.created_at.isoformat()
+    clone_response['db_created_by'] = db_workflow.created_by
 
     return clone_response
 
@@ -1137,6 +1207,8 @@ async def get_workflow(
     )
     if not db_workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    if current_user.role != "admin" and db_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
 
     # 외부 API에서 상세 정보 조회
     user_info = {
@@ -1251,11 +1323,15 @@ async def update_workflow(
     - 템플릿 수정은 `/workflows/templates/{template_id}` API 사용
     - 배포된 워크플로우의 구조 변경 시 재배포 필요
     - 게이트웨이 권한 검사: admin 이거나 해당 워크플로우의 `created_by` 사용자만 수정 가능
+    - workflow_definition 변경 시 `POST /workflows/validate`와 동일한 규칙으로 검증됨
+      (OD/LLM/BFM 상호 배타, BFM은 KNOWLEDGE_BASE·prompt_id 불가·단일 task). 위반 시 400.
 
     ## Errors
+    - **400**: 정의 검증 규칙 위반 (모델 타입 혼합 / BFM 제약 등)
     - **401**: 인증되지 않은 사용자
     - **403**: 권한 없음 (워크플로우가 본인 소유가 아니며 admin도 아님 / service_id가 다른 사용자 service일 때)
     - **404**: 워크플로우 또는 service_id를 찾을 수 없음
+    - **422**: name 이 255자를 넘을 때 (MLOps 호출 전에 거절)
     - **500**: 서버 내부 오류
     """
     # 우리 DB에서 기존 워크플로우 조회 (권한 확인용)
@@ -1392,7 +1468,9 @@ async def delete_workflow(
     ## Deletion Process
     1. 현재 API 호출: 정리 파이프라인 시작
     2. Kubeflow Pipeline: KServe InferenceService · Ollama Deployment/Service 등 클러스터 서빙 리소스 삭제
-    3. `finalize-deletion` API 호출: Kubernetes 리소스 직접 확인 및 DB 삭제
+    3. `finalize-deletion` API를 **`status`가 `completed`가 될 때까지 반복 호출**:
+       Kubernetes 리소스 직접 확인 및 DB 삭제. 1회 호출은 1회 상태 확인일 뿐이며,
+       이 API 응답만으로는 삭제가 끝나지 않는다. 폴링 주기는 클라이언트가 정한다(권장 5~10초).
 
     ## Notes
     - 비동기 프로세스로 진행됨 (202 Accepted)
@@ -1439,6 +1517,8 @@ async def delete_workflow(
             metadata={"stage": "initiated"},
         )
         return deletion_response
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -1448,10 +1528,7 @@ async def delete_workflow(
 @router.post("/{surro_workflow_id}/finalize-deletion")
 async def finalize_workflow_deletion(
         surro_workflow_id: str,
-        run_id: Optional[str] = Query(
-            None,
-            description="Deprecated — 현재 삭제 완료 처리에는 사용되지 않음",
-        ),
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -1461,13 +1538,12 @@ async def finalize_workflow_deletion(
     Kubernetes 클러스터를 직접 조회하여 리소스가 실제로 삭제되었는지 확인하고,
     확인된 경우 DB에서 워크플로우를 삭제합니다.
 
+    **1회 호출 = 1회 상태 확인**입니다. 클러스터 리소스 정리는 분 단위로 걸리므로
+    클라이언트가 `status`가 `completed`(또는 `failed`)가 될 때까지 이 API를 반복
+    호출해야 삭제가 끝납니다. 게이트웨이는 요청을 붙잡고 대기하지 않습니다.
+
     ## Path Parameters
     - **workflow_id** (str): 삭제할 워크플로우 UUID
-
-    ## Query Parameters
-    - **run_id** (str, optional, *deprecated*): 현재 삭제 완료 처리에는 사용되지 않음
-        - 호환성 차원에서 받기는 하나 처리에는 사용하지 않음
-        - 생략 가능
 
     ## Response
     - **workflow_id** (str): 워크플로우 UUID
@@ -1486,8 +1562,17 @@ async def finalize_workflow_deletion(
         - false: 아직 삭제되지 않음
     - **message** (str): 상태 메시지
 
-    게이트웨이는 `status == "completed"` 이면서 `deleted_from_db == true` 일 때
-    게이트웨이 DB의 매핑 레코드(workflows 테이블)도 함께 삭제합니다.
+    ## Polling
+    - 권장 주기: 5~10초. 전체 타임아웃과 최대 시도 횟수는 클라이언트가 설정할 것.
+    - `in_progress`면 대기 후 재호출. 재호출은 **멱등**하며, 삭제가 완료된 뒤 한 번 더
+      호출해도 404가 아니라 완료 응답을 반환합니다.
+    - MLOps에서 이미 사라진 워크플로우는 `status: "completed"`,
+      `deleted_from_db: true`, `message: "Workflow already deleted"`로 정규화되어
+      돌아옵니다(성공으로 처리할 것).
+    - 게이트웨이 DB 매핑에 아예 없는 ID만 404입니다.
+
+    게이트웨이는 `status`가 종결값(`completed` 등)이거나 `deleted_from_db == true`이면
+    게이트웨이 DB의 매핑 레코드(workflows 테이블)도 함께 soft-delete 합니다.
 
     ## Process
     1. 워크플로우 존재 여부 확인
@@ -1506,8 +1591,21 @@ async def finalize_workflow_deletion(
 
     ## Errors
     - **401**: 인증되지 않은 사용자
+    - **403**: 권한 없음 (본인 소유가 아니며 admin도 아님)
+    - **404**: 게이트웨이 DB에 해당 워크플로우 매핑이 존재하지 않음
     - **500**: 삭제 처리 중 오류 발생
     """
+    # soft-delete된 매핑도 포함해 조회한다. 완료까지 폴링하는 클라이언트는 삭제가
+    # 끝난 뒤에도 한 번 더 호출하게 되는데, 활성 행만 보면 그 호출이 upstream에
+    # 닿지도 못하고 404가 되어 정상 완료가 실패로 보인다.
+    existing_workflow = workflow_crud.get_workflow_by_surro_id(
+        db=db, surro_workflow_id=surro_workflow_id, include_deleted=True
+    )
+    if not existing_workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
     # 외부 API 삭제 완료 확인
     user_info = {
         'member_id': current_user.member_id,
@@ -1519,20 +1617,31 @@ async def finalize_workflow_deletion(
         # MLOps v2부터 run_id는 사용되지 않으므로 외부에 전달하지 않음
         finalize_response = await workflow_service.finalize_deletion(
             surro_workflow_id,
-            run_id=None,
             user_info=user_info,
         )
 
-        # 삭제 완료된 경우 우리 DB에서도 삭제
-        if finalize_response.get('status') == 'completed' and finalize_response.get('deleted_from_db'):
-            success = workflow_crud.delete_workflow_by_surro_id(
+        # 삭제 완료된 경우 우리 DB에서도 삭제.
+        # 이미 삭제된 매핑이면 delete_workflow_by_surro_id가 False를 돌려주는데,
+        # 폴링 중 정상적으로 발생하는 재호출이므로 조용히 넘긴다.
+        if _is_deletion_done(finalize_response):
+            deleted = workflow_crud.delete_workflow_by_surro_id(
                 db=db,
-                surro_workflow_id=surro_workflow_id
+                surro_workflow_id=surro_workflow_id,
+                deleted_by=current_user.member_id,
             )
-            if not success:
-                logger.warning(f"Workflow {surro_workflow_id} already deleted from DB")
+            if deleted:
+                emit_from_request(
+                    db, request,
+                    action=Action.DELETE,
+                    resource_type=ResourceType.WORKFLOW,
+                    actor_member_id=current_user.member_id,
+                    resource_id=surro_workflow_id,
+                    metadata={"stage": "completed"},
+                )
 
         return finalize_response
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -1543,7 +1652,6 @@ async def finalize_workflow_deletion(
 @router.post("/{surro_workflow_id}/execute", response_model=WorkflowExecuteResponse)
 async def execute_workflow(
         surro_workflow_id: str,
-        execute_request: Optional[WorkflowExecuteRequest] = Body(None),
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -1556,11 +1664,6 @@ async def execute_workflow(
 
     ## Path Parameters
     - **workflow_id** (str): 실행할 워크플로우 UUID
-
-    ## Request Body (Optional[WorkflowExecuteRequest])
-    - **parameters** (Dict[str, Any], optional): 호환성 유지용 실행 파라미터
-        - 현재 실행 처리에는 사용되지 않음
-        - body 자체를 생략해도 정상 호출됨
 
     ## Response (WorkflowExecuteResponse)
     - **workflow_id** (str): 실행된 워크플로우 UUID
@@ -1601,6 +1704,9 @@ async def execute_workflow(
     if not existing_workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
     # 외부 API 실행
     user_info = {
         'member_id': current_user.member_id,
@@ -1608,11 +1714,8 @@ async def execute_workflow(
         'name': current_user.name
     }
 
-    # MLOps v2는 body를 받지 않으므로 parameters는 외부에 전달하지 않음.
-    # 게이트웨이 호환성 차원에서 받기만 한다.
     execute_response = await workflow_service.execute_workflow(
         surro_workflow_id,
-        parameters=None,
         user_info=user_info,
     )
 
@@ -1687,6 +1790,9 @@ async def get_workflow_status(
     if not existing_workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
     # 외부 API 상태 조회
     user_info = {
         'member_id': current_user.member_id,
@@ -1707,13 +1813,8 @@ async def get_workflow_status(
 async def update_component_deployment_status(
         surro_workflow_id: str,
         component_id: str,
-        service_name: str = Form(...),
-        service_hostname: str = Form(...),
-        model_name: str = Form(...),
-        status: str = Form(...),
-        internal_url: Optional[str] = Form(None),
-        error_message: Optional[str] = Form(None),
-        current_user=Depends(get_current_user)
+        payload: WorkflowComponentDeploymentStatusRequest,
+        current_user=Depends(get_current_admin_user)
 ):
     """
     컴포넌트의 워크플로 서빙 배포 상태를 업데이트합니다.
@@ -1728,7 +1829,7 @@ async def update_component_deployment_status(
     - **workflow_id** (str): 워크플로우 ID
     - **component_id** (str): 컴포넌트 UUID
 
-    ## Request Body (Form Data)
+    ## Request Body (application/json)
     - **service_name** (str, required): 서빙 리소스 이름 (KServe InferenceService / Ollama Service 등)
     - **service_hostname** (str, required): 서빙 서비스 호스트명
     - **model_name** (str, required): 배포된 모델 이름
@@ -1763,12 +1864,12 @@ async def update_component_deployment_status(
     update_response = await workflow_service.update_component_deployment_status(
         workflow_id=surro_workflow_id,
         component_id=component_id,
-        service_name=service_name,
-        service_hostname=service_hostname,
-        model_name=model_name,
-        status=status,
-        internal_url=internal_url,
-        error_message=error_message,
+        service_name=payload.service_name,
+        service_hostname=payload.service_hostname,
+        model_name=payload.model_name,
+        status=payload.status,
+        internal_url=payload.internal_url,
+        error_message=payload.error_message,
         user_info=user_info
     )
 
@@ -1834,7 +1935,13 @@ async def test_rag_workflow(
         - MODEL 컴포넌트가 없고 KNOWLEDGE_BASE만 있으면: 검색 결과 문자열 (search_result)
         - 상세 정보는 results 배열의 각 컴포넌트 결과에서 확인 가능
 
+    - **주의**: HTTP 200 응답이어도 results[] 중 일부 컴포넌트에 error가 채워질 수 있음(부분 실패).
+      final_result가 존재한다고 해서 전체가 성공한 건 아니므로, 반드시 results[].error를 확인할 것.
+    - KNOWLEDGE_BASE 컴포넌트는 성공하고 MODEL(LLM) 컴포넌트만 실패한 경우, 위 우선순위 규칙에 따라
+      final_result에는 KB 검색 결과 원문이 남음 — 이를 LLM이 생성한 답변으로 오인하지 않도록 주의.
+
     ## Notes
+    - admin 또는 게이트웨이 DB의 `created_by` 사용자만 실행 가능
     - 워크플로우는 배포되어 있어야 함 (ACTIVE 상태)
     - 워크플로우에 최소 하나의 LLM MODEL 컴포넌트 또는 KNOWLEDGE_BASE 컴포넌트가 있어야 함
     - Knowledge Base 컴포넌트는 선택 사항 (있으면 검색 후 결과를 LLM에 전달)
@@ -1850,9 +1957,9 @@ async def test_rag_workflow(
     ## Errors
     - **400**: 잘못된 요청 (RAG 워크플로우가 아님, 필수 파라미터 누락 등)
     - **401**: 인증되지 않은 사용자
+    - **403**: 워크플로우 실행 권한 없음
     - **404**: 워크플로우를 찾을 수 없음
-    - **503**: 모델 서비스가 준비되지 않음
-    - **500**: 서버 내부 오류
+    - **500 / 502 / 504**: 서버 내부 오류 / upstream 오류(모델 서비스 미준비 포함) / upstream 타임아웃
     """
     # 권한 확인
     existing_workflow = workflow_crud.get_workflow_by_surro_id(
@@ -1861,6 +1968,8 @@ async def test_rag_workflow(
     )
     if not existing_workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
 
     # 외부 API 테스트
     user_info = {
@@ -1933,6 +2042,7 @@ async def test_ml_workflow(
         - 상세 정보 (predictions, image_info 등)는 results 배열의 각 컴포넌트 결과에서 확인 가능
 
     ## Notes
+    - admin 또는 게이트웨이 DB의 `created_by` 사용자만 실행 가능
     - 워크플로우는 배포되어 있어야 함 (ACTIVE 상태)
     - 워크플로우에 최소 하나의 ODM MODEL 컴포넌트가 있어야 함
     - KNOWLEDGE_BASE 컴포넌트는 포함될 수 없음 (ML 워크플로우는 ODM만 지원)
@@ -1945,9 +2055,9 @@ async def test_ml_workflow(
     ## Errors
     - **400**: 잘못된 요청 (ML 워크플로우가 아님, 필수 파라미터 누락 등)
     - **401**: 인증되지 않은 사용자
+    - **403**: 워크플로우 실행 권한 없음
     - **404**: 워크플로우를 찾을 수 없음
-    - **503**: 모델 서비스가 준비되지 않음
-    - **500**: 서버 내부 오류
+    - **500 / 502 / 504**: 서버 내부 오류 / upstream 오류(모델 서비스 미준비 포함) / upstream 타임아웃
     """
     # 권한 확인
     existing_workflow = workflow_crud.get_workflow_by_surro_id(
@@ -1956,6 +2066,8 @@ async def test_ml_workflow(
     )
     if not existing_workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
 
     # 외부 API 테스트
     user_info = {
@@ -1971,6 +2083,235 @@ async def test_ml_workflow(
     )
 
     return test_response
+
+
+# ===== BFM(task 기반) 추론 테스트 (api-spec 2026-07-01) =====
+# model_type=BFM(생체분자 서열 모델군) 전용. task ↔ 엔드포인트 1:1.
+# 프론트는 GET /workflows/{id}/models (또는 배포 응답)의 model_type=="BFM" 을 가드한 뒤,
+# task 로 아래 세 엔드포인트를 선택한다:
+#   protein-classification → /test/protein-classification
+#   fill-mask              → /test/fill-mask
+#   protein-structure-prediction → /test/protein-structure-prediction
+
+@router.post(
+    "/{surro_workflow_id}/test/protein-classification",
+    response_model=WorkflowProteinClassificationTestResponse,
+)
+async def test_protein_classification_workflow(
+        surro_workflow_id: str,
+        request_body: WorkflowProteinClassificationTestRequest,
+        db: Session = Depends(get_db),
+        current_user=Depends(get_current_user)
+):
+    """
+    단백질 분류(protein-classification) 워크플로우 테스트 — **BFM 전용**
+
+    파인튜닝된 ESM2 자식 모델(`model_type=BFM`, `task=protein-classification`)에
+    `{epitope, cdr3b}`를 보내 **TCR-Epitope 결합 이진 분류**를 추론합니다.
+    (구 `/test/plm`을 대체 — MLOps 리네임에 맞춘 신규 게이트웨이 엔드포인트)
+
+    ## Path Parameters
+    - **workflow_id** (str): 테스트할 워크플로우 UUID (ACTIVE 상태여야 함)
+
+    ## Request Body (application/json)
+    - **epitope** (str, required): 단백질 epitope 서열
+    - **cdr3b** (str, required): TCR β-chain CDR3 서열
+
+    ## Response (WorkflowProteinClassificationTestResponse)
+    - **workflow_id** (str): 워크플로우 UUID
+    - **execution_order** (List[str]): 실행된 컴포넌트 ID 순서
+    - **results** (List): 각 BFM 컴포넌트 실행 결과
+        - **component_id / component_name / component_type** (str)
+        - **model_type** (str): `BFM`
+        - **task** (str): `protein-classification`
+        - **result** (object): 추론 결과
+            - **predictions** (List[object]): 각 원소 `label`(0|1), `score`(float),
+              `probabilities`(객체 `{"0": p0, "1": p1}`)
+            - **input_info** (object, optional): `{epitope, cdr3b}`
+        - **error** (str, optional): 컴포넌트 오류 시 메시지
+
+    ## Notes
+    - admin 또는 게이트웨이 DB의 `created_by` 사용자만 실행 가능
+    - 게이트웨이는 워크플로우가 DB에 매핑돼 있는지 확인 후 MLOps로 전달 (프론트는 `model_type=="BFM"` 가드 필요)
+    - 워크플로우는 `ACTIVE` 상태여야 하며, `task=protein-classification` 모델만 포함해야 함
+    - base(파인튜닝 안 된) 모델(`parent_model_id IS NULL`)은 어댑터가 없어 서빙 불가 → 400
+
+    ## Errors
+    - **400**: ACTIVE 아님 / 해당 task 아닌 MODEL 포함 / 해당 task 모델 없음 / base 모델 지정
+    - **401**: 인증되지 않은 사용자
+    - **403**: 워크플로우 실행 권한 없음
+    - **404**: 워크플로우를 찾을 수 없음
+    - **422**: `epitope`/`cdr3b` 누락 또는 타입 오류
+    - **500 / 502 / 504**: 서버 내부 오류 / upstream 오류(KServe 미준비 포함) / upstream 타임아웃
+    """
+    existing_workflow = workflow_crud.get_workflow_by_surro_id(
+        db=db, surro_workflow_id=surro_workflow_id
+    )
+    if not existing_workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name
+    }
+
+    return await workflow_service.test_protein_classification_workflow(
+        surro_workflow_id,
+        request_body.epitope,
+        request_body.cdr3b,
+        user_info,
+    )
+
+
+@router.post(
+    "/{surro_workflow_id}/test/fill-mask",
+    response_model=WorkflowFillMaskTestResponse,
+)
+async def test_fill_mask_workflow(
+        surro_workflow_id: str,
+        request_body: WorkflowFillMaskTestRequest,
+        db: Session = Depends(get_db),
+        current_user=Depends(get_current_user)
+):
+    """
+    마스크 채우기(fill-mask) 워크플로우 테스트 — **BFM 전용**
+
+    `task=fill-mask` 모델(base ESM2/ESMC · MolFormer · RNA-FM)에 **마스크 토큰을 포함한
+    단일 서열**을 보내 마스크 위치별 top-k 토큰을 예측합니다.
+
+    ## Path Parameters
+    - **workflow_id** (str): 테스트할 워크플로우 UUID (ACTIVE 상태여야 함)
+
+    ## Request Body (application/json)
+    - **sequence** (str, required): 마스크 토큰(`<mask>`)을 1개 이상 포함한 서열.
+      modality별 알파벳(단백질 아미노산 / SMILES / RNA 염기). 서버가 모델별 mask 토큰으로 처리.
+    - **top_k** (int, optional): 마스크 위치별 반환 후보 수 (기본 `5`, 권장 1–50).
+      범위 검증은 upstream이 수행하며, 범위를 벗어나면 400.
+
+    ## Response (WorkflowFillMaskTestResponse)
+    - **workflow_id** (str): 워크플로우 UUID
+    - **execution_order** (List[str]): 실행된 컴포넌트 ID 순서
+    - **results** (List): 각 BFM 컴포넌트 실행 결과
+        - **model_type** (str): `BFM` / **task** (str): `fill-mask`
+        - **result** (object):
+            - **predictions** (List[object]): 마스크 위치별 결과
+                - **position** (int): 서열 내 마스크 위치(토큰 인덱스)
+                - **predictions** (List[object]): 후보 목록(top-k) — `token`(str), `score`(float)
+            - **input_info** (object, optional): `{sequence, top_k}`
+        - **error** (str, optional): 컴포넌트 오류 시 메시지
+
+    ## Notes
+    - admin 또는 게이트웨이 DB의 `created_by` 사용자만 실행 가능
+    - 워크플로우는 `ACTIVE` 상태여야 하며, `task=fill-mask` 모델만 포함해야 함
+    - `sequence`에 `<mask>` 토큰이 최소 1개 있어야 함 (없으면 400)
+
+    ## Errors
+    - **400**: ACTIVE 아님 / 해당 task 아닌 MODEL 포함 / 해당 task 모델 없음 / sequence 빈 값·마스크 없음·top_k 범위 밖
+    - **401**: 인증되지 않은 사용자
+    - **403**: 워크플로우 실행 권한 없음
+    - **404**: 워크플로우를 찾을 수 없음
+    - **422**: `sequence` 누락 또는 요청 필드 타입 오류
+    - **500 / 502 / 504**: 서버 내부 오류 / upstream 오류(KServe 미준비 포함) / upstream 타임아웃
+    """
+    existing_workflow = workflow_crud.get_workflow_by_surro_id(
+        db=db, surro_workflow_id=surro_workflow_id
+    )
+    if not existing_workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name
+    }
+
+    return await workflow_service.test_fill_mask_workflow(
+        surro_workflow_id,
+        request_body.sequence,
+        request_body.top_k,
+        user_info,
+    )
+
+
+@router.post(
+    "/{surro_workflow_id}/test/protein-structure-prediction",
+    response_model=WorkflowProteinStructurePredictionTestResponse,
+)
+async def test_protein_structure_prediction_workflow(
+        surro_workflow_id: str,
+        request_body: WorkflowProteinStructurePredictionTestRequest,
+        db: Session = Depends(get_db),
+        current_user=Depends(get_current_user)
+):
+    """
+    단백질 구조 예측(protein-structure-prediction) 워크플로우 테스트 — **BFM 전용**
+
+    `task=protein-structure-prediction` 모델(ESMFold2)에 서열을 보내
+    **3D 구조(전원자 좌표 + confidence)**를 예측합니다.
+
+    ## Path Parameters
+    - **workflow_id** (str): 테스트할 워크플로우 UUID (ACTIVE 상태여야 함)
+
+    ## Request Body (application/json)
+    - **sequence** (str, required): 단일 단백질 아미노산 서열
+    - **num_loops** (int, optional): ESMFold2 recycling loop 수 (기본 `3`)
+    - **num_sampling_steps** (int, optional): 확산 샘플링 스텝 수 (기본 `50`)
+
+    ## Response (WorkflowProteinStructurePredictionTestResponse)
+    - **workflow_id** (str): 워크플로우 UUID
+    - **execution_order** (List[str]): 실행된 컴포넌트 ID 순서
+    - **results** (List): 각 BFM 컴포넌트 실행 결과
+        - **model_type** (str): `BFM` / **task** (str): `protein-structure-prediction`
+        - **result** (object):
+            - **predictions** (List[object]): 예측 구조 목록(현재 서열 1건당 1개)
+                - **pdb** (str): 전원자 3D 구조(PDB 문자열, `ATOM` 레코드 포함)
+                - **plddt_mean** (float, nullable): 평균 pLDDT (0–1 스케일)
+                - **ptm** (float, nullable): pTM
+                - **iptm** (float, nullable): ipTM (단일 사슬은 `0`)
+            - **input_info** (object, optional): `{sequence, num_loops, num_sampling_steps}`
+        - **error** (str, optional): 컴포넌트 오류 시 메시지
+
+    ## Notes
+    - admin 또는 게이트웨이 DB의 `created_by` 사용자만 실행 가능
+    - 워크플로우는 `ACTIVE` 상태여야 하며, `task=protein-structure-prediction` 모델만 포함해야 함
+    - 구조예측(ESMFold2)은 백본 `biohub/ESMC-6B`가 먼저 등록돼 있어야 배포 가능 (배포/검증 단계 규칙)
+    - 추론이 오래 걸릴 수 있음 — 게이트웨이 타임아웃 초과 시 504 반환
+
+    ## Errors
+    - **400**: ACTIVE 아님 / 해당 task 아닌 MODEL 포함 / 해당 task 모델 없음 / sequence 빈 값
+    - **401**: 인증되지 않은 사용자
+    - **403**: 워크플로우 실행 권한 없음
+    - **404**: 워크플로우를 찾을 수 없음
+    - **422**: `sequence` 누락 또는 요청 필드 타입 오류
+    - **500 / 502 / 504**: 서버 내부 오류 / upstream 오류(KServe 미준비 포함) / upstream 타임아웃
+    """
+    existing_workflow = workflow_crud.get_workflow_by_surro_id(
+        db=db, surro_workflow_id=surro_workflow_id
+    )
+    if not existing_workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    user_info = {
+        'member_id': current_user.member_id,
+        'role': current_user.role,
+        'name': current_user.name
+    }
+
+    return await workflow_service.test_protein_structure_prediction_workflow(
+        surro_workflow_id,
+        request_body.sequence,
+        request_body.num_loops,
+        request_body.num_sampling_steps,
+        user_info,
+    )
+
 
 # ===== Workflow 모델 추론 (Removed in MLOps v2) =====
 
@@ -2070,6 +2411,9 @@ async def get_workflow_models(
     if not existing_workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
     # 외부 API 모델 목록 조회
     user_info = {
         'member_id': current_user.member_id,
@@ -2089,6 +2433,7 @@ async def get_workflow_models(
 @router.post("/{surro_workflow_id}/cleanup", status_code=202)
 async def cleanup_workflow(
         surro_workflow_id: str,
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -2117,7 +2462,8 @@ async def cleanup_workflow(
     ## Process
     1. 서빙 리소스(KServe / Ollama 등) 삭제 파이프라인 시작
     2. cleanup_run_id 반환
-    3. `finalize-cleanup` API로 완료 확인
+    3. `finalize-cleanup` API를 **`status`가 `completed`가 될 때까지 반복 호출**
+       (1회 호출은 1회 상태 확인, 권장 주기 5~10초)
     4. 워크플로우 상태를 DRAFT로 변경 (재실행 가능)
 
     ## Notes
@@ -2155,7 +2501,17 @@ async def cleanup_workflow(
             surro_workflow_id,
             user_info
         )
+        emit_from_request(
+            db, request,
+            action=Action.STATUS_CHANGE,
+            resource_type=ResourceType.WORKFLOW,
+            actor_member_id=current_user.member_id,
+            resource_id=surro_workflow_id,
+            metadata={"stage": "cleanup_initiated"},
+        )
         return cleanup_response
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -2166,7 +2522,7 @@ async def cleanup_workflow(
 @router.post("/{surro_workflow_id}/finalize-cleanup")
 async def finalize_workflow_cleanup(
         surro_workflow_id: str,
-        run_id: str = Query(..., description="Cleanup run ID"),
+        request: Request,
         db: Session = Depends(get_db),
         current_user=Depends(get_current_user)
 ):
@@ -2177,14 +2533,13 @@ async def finalize_workflow_cleanup(
     확인된 경우 워크플로우 상태를 업데이트합니다.
     워크플로우는 삭제되지 않고 리소스만 정리되며, 정리 후 재실행이 가능합니다.
 
+    **1회 호출 = 1회 상태 확인**입니다. 클라이언트가 `status`가 `completed`
+    (또는 `failed`)가 될 때까지 반복 호출해야 배포 중지가 끝납니다. 재호출은
+    멱등하며 게이트웨이는 요청을 붙잡고 대기하지 않습니다.
+
     ## Path Parameters
     - **workflow_id** (str): 정리할 워크플로우 UUID
         - 워크플로우 목록 조회 API(`/workflows`)에서 확인 가능
-
-    ## Query Parameters
-    - **run_id** (str, required): Kubeflow Pipeline cleanup run ID
-        - cleanup API에서 반환된 cleanup_run_id 사용
-        - 형식: Kubeflow Pipeline 실행 UUID
 
     ## Response
     - **workflow_id** (str): 워크플로우 UUID
@@ -2222,6 +2577,11 @@ async def finalize_workflow_cleanup(
     4. 리소스가 아직 존재하는 경우: 진행중 상태 반환 (재호출 필요)
     5. 확인 중 오류 발생: 실패 상태 반환
 
+    ## Polling
+    - 권장 주기: 5~10초. 전체 타임아웃과 최대 시도 횟수는 클라이언트가 설정할 것.
+    - `in_progress`면 대기 후 재호출. 재호출은 멱등.
+    - 게이트웨이는 `status == "completed"`일 때 audit 이벤트(`stage: cleanup_completed`)를 남김.
+
     ## Notes
     - 워크플로우는 삭제되지 않고 리소스만 정리됨
     - 정리 완료 후 워크플로우를 재실행할 수 있음
@@ -2233,6 +2593,7 @@ async def finalize_workflow_cleanup(
 
     ## Errors
     - **401**: 인증되지 않은 사용자
+    - **403**: 권한 없음 (본인 소유가 아니며 admin도 아님)
     - **404**: 워크플로우를 찾을 수 없음
         - workflow_id가 존재하지 않거나 삭제된 경우
     - **500**: 정리 처리 중 오류 발생
@@ -2246,6 +2607,9 @@ async def finalize_workflow_cleanup(
     if not existing_workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
+    if current_user.role != "admin" and existing_workflow.created_by != current_user.member_id:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
     # 외부 API 정리 완료 확인
     user_info = {
         'member_id': current_user.member_id,
@@ -2256,10 +2620,20 @@ async def finalize_workflow_cleanup(
     try:
         finalize_response = await workflow_service.finalize_cleanup(
             surro_workflow_id,
-            run_id,
             user_info
         )
+        if _status_of(finalize_response) == "completed":
+            emit_from_request(
+                db, request,
+                action=Action.STATUS_CHANGE,
+                resource_type=ResourceType.WORKFLOW,
+                actor_member_id=current_user.member_id,
+                resource_id=surro_workflow_id,
+                metadata={"stage": "cleanup_completed"},
+            )
         return finalize_response
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=500,

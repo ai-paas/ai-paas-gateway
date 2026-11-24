@@ -188,3 +188,35 @@ class TestModelCRUD:
         )
         assert total == 1
         assert models[0].name == "YOLO-Detection"
+
+
+def test_upsert_model_mapping_preserves_soft_deleted_history(db, sample_member):
+    old = model_crud.create_model_mapping(
+        db, 1200, sample_member.member_id, model_name="old-model"
+    )
+    assert model_crud.delete_model_mapping(db, 1200, sample_member.member_id)
+
+    current = model_crud.upsert_model_mapping(
+        db, 1200, sample_member.member_id, model_name="new-model"
+    )
+
+    assert current.id != old.id
+    db.refresh(old)
+    assert old.deleted_at is not None
+    assert old.is_active is False
+
+
+def test_soft_delete_missing_mappings_keeps_all_on_empty_list(db, sample_member):
+    """빈 외부 목록이면 아무것도 지우지 않는다"""
+    kept = model_crud.create_model_mapping(
+        db, 1300, sample_member.member_id, model_name="kept-model"
+    )
+
+    n = model_crud.soft_delete_missing_mappings(
+        db, member_id=sample_member.member_id, active_surro_model_ids=[],
+    )
+
+    assert n == 0
+    db.refresh(kept)
+    assert kept.is_active is True
+    assert kept.deleted_at is None

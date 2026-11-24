@@ -1,14 +1,16 @@
 import logging
+from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Query, Request, UploadFile, status
 from sqlalchemy.orm import Session
 
-from app.auth import get_current_user
+from app.auth import get_current_admin_user, get_current_user
+from app.common.kb_attempt_token import attach_token, attempt_token
 from app.common.sort import parse_sort, resolve_sort_columns
 from app.cruds.knowledge_base import knowledge_base_crud
 from app.database import get_db
-from app.models.knowledge_base import KnowledgeBase
+from app.models.knowledge_base import AttemptState, KnowledgeBase
 from app.schemas.knowledge_base import (
     ChunkTypeListResponse,
     KnowledgeBaseDetailResponse,
@@ -19,9 +21,12 @@ from app.schemas.knowledge_base import (
     KnowledgeBaseSearchResponse,
     KnowledgeBaseUpdate,
     LanguageListResponse,
+    OrphanKnowledgeBaseDeleteResponse,
+    OrphanKnowledgeBaseItem,
+    OrphanKnowledgeBaseListResponse,
     SearchMethodListResponse,
 )
-from app.services.audit_service import Action, ResourceType, emit_from_request
+from app.services.audit_service import Action, ResourceType, emit, emit_from_request
 from app.services.knowledge_base_service import knowledge_base_service
 
 logger = logging.getLogger(__name__)
@@ -37,6 +42,13 @@ _KB_SORT_FIELDS = {
 }
 _KB_SORT_DEFAULT = [(KnowledgeBase.created_at, True)]
 _KB_SORT_TIE_BREAKER = KnowledgeBase.id
+
+# 경로 파라미터는 MLOps ID(`surro_knowledge_id`)를 받는다. 응답의 `id`(게이트웨이 PK)와 다른 ID 공간이므로
+# 두 값이 우연히 겹칠 수 있다 — 둘 다 허용하면 오조회가 되어 자동 판별은 하지 않는다.
+_KB_ID_DESC = (
+    "Knowledge Base ID. 생성/목록/상세 응답의 `surro_knowledge_id` 값을 사용한다. "
+    "게이트웨이 내부 PK인 `id`가 아니다."
+)
 
 CHUNK_TYPES_DESCRIPTION = """
 청크 타입 목록 조회
@@ -55,6 +67,9 @@ CHUNK_TYPES_DESCRIPTION = """
 ## Errors
 - 401: 인증되지 않은 사용자
 - 500: 서버 내부 오류
+- 502: 지식베이스 서비스와 통신 중 오류 (요청 도중 연결 끊김 등)
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 LANGUAGES_DESCRIPTION = """
@@ -74,6 +89,9 @@ LANGUAGES_DESCRIPTION = """
 ## Errors
 - 401: 인증되지 않은 사용자
 - 500: 서버 내부 오류
+- 502: 지식베이스 서비스와 통신 중 오류 (요청 도중 연결 끊김 등)
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 SEARCH_METHODS_DESCRIPTION = """
@@ -93,6 +111,9 @@ SEARCH_METHODS_DESCRIPTION = """
 ## Errors
 - 401: 인증되지 않은 사용자
 - 500: 서버 내부 오류
+- 502: 지식베이스 서비스와 통신 중 오류 (요청 도중 연결 끊김 등)
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 CREATE_KNOWLEDGE_BASE_DESCRIPTION = """
@@ -101,6 +122,10 @@ Knowledge Base 생성
 문서 파일을 업로드하여 Knowledge Base를 생성합니다.
 파일은 청크로 분할되고 임베딩되어 Milvus에 저장됩니다.
 
+## 처리시간 주의
+파일 청킹+임베딩 처리가 끝나야 응답이 오는 동기 호출입니다. 임베딩 모델이
+콜드 상태(오랜만에 호출)면 응답까지 수 분 걸릴 수 있습니다.
+
 ## Request Body (multipart/form-data)
 - **name** (str, required): Knowledge Base 이름
 - **description** (str, optional): Knowledge Base 설명
@@ -108,14 +133,25 @@ Knowledge Base 생성
     - `GET /api/v1/knowledge-bases/languages` API로 조회 가능
 - **embedding_model_id** (int, required): 임베딩 모델 ID
     - `GET /api/v1/models?model_type_id={embedding_type_id}` API로 조회 가능
-- **chunk_size** (int, required): 청크 크기
-- **chunk_overlap** (int, required): 청크 오버랩 크기
+- **chunk_size** (int, required): 청크 크기 (문자 수) — 권장 500, 실용 범위 300~1000
+- **chunk_overlap** (int, required): 청크 오버랩 크기 — 권장 `chunk_size`의 10~20% (예: 50), **반드시 `chunk_size`보다 작게**
 - **chunk_type_id** (int, required): 청크 타입 ID
     - `GET /api/v1/knowledge-bases/chunk-types` API로 조회 가능
 - **search_method_id** (int, required): 검색 방법 ID
     - `GET /api/v1/knowledge-bases/search-methods` API로 조회 가능
-- **top_k** (int, required): 검색 시 반환할 상위 k개 결과 수
-- **threshold** (float, required): 검색 임계값 (0.0 ~ 1.0)
+- **top_k** (int, required): 검색 시 반환할 상위 k개 결과 수 — 권장 3~5, **0이면 검색 결과가 항상 0건**
+- **threshold** (float, required): 검색 임계값 (0.0 ~ 1.0) — 권장 0.3~0.5
+
+## 값 검증 주의
+게이트웨이·MLOps 모두 위 수치의 상하한을 강제하지 않는다.
+`chunk_size=1`, `top_k=0`, `chunk_overlap >= chunk_size` 같은 값도 그대로 생성되며
+KB가 만들어진 뒤에야 검색 불가·임베딩 과다 청킹으로 드러나므로 **클라이언트에서 검증**해야 한다.
+
+## embedding_model_id 주의
+서빙 배포(deployment)가 없는 임베딩 모델을 지정하면 업스트림이 400
+`Deployment not found`를 반환하고 KB는 생성되지 않는다.
+`GET /api/v1/models?model_type_id={embedding_type_id}` 결과에는 미배포 모델도 포함되므로
+운영에서 검증된 모델만 선택지에 노출할 것.
 - **file** (UploadFile, required): 업로드할 문서 파일
     - **지원 파일 타입**:
       - PDF: `.pdf`
@@ -126,17 +162,30 @@ Knowledge Base 생성
     - 지원되지 않는 파일 타입 업로드 시 400 오류 발생
 
 ## Response (KnowledgeBaseReadSchema)
-- **id** (int): Gateway Knowledge Base ID
-- **surro_knowledge_id** (int): 외부 Knowledge Base ID
+- **id** (int): Gateway 내부 PK — **경로 파라미터로 사용 금지**
+- **surro_knowledge_id** (int): Knowledge Base ID — **이후 조회/수정/삭제/파일/검색 경로에 사용하는 값**
 - **name** (str): Knowledge Base 이름
 - **description** (str, optional): Knowledge Base 설명
 - **collection_name** (str): Milvus Collection 이름
 - 기타 필드들...
 
+## ID 사용 규칙
+`id`와 `surro_knowledge_id`는 서로 다른 ID 공간이며 값이 우연히 겹칠 수 있다.
+생성 직후 상세 화면 이동 등 모든 후속 호출은 `surro_knowledge_id`를 써야 하며,
+`id`를 쓰면 404가 발생한다.
+
 ## Errors
 - 400: 유효하지 않은 요청 또는 필수 파라미터 누락
 - 401: 인증되지 않은 사용자
 - 500: Knowledge Base 생성 중 서버 내부 오류
+- 502: 지식베이스 서비스와 통신 중 오류 (요청 도중 연결 끊김 등). 504와 마찬가지로 업스트림에서
+  생성이 완료됐을 수 있으므로 바로 재시도하지 말고 잠시 뒤 목록을 새로고침할 것.
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등). 타임아웃 이후에도 업스트림에서 생성이 완료될 수
+  있으므로 **바로 재시도하지 말고 잠시 뒤 목록을 새로고침**할 것. 뒤늦게 완료된 KB 는
+  목록 조회 시 자동으로 복구되어 다시 나타난다.
+  자동 복구되지 않은 건은 관리자가 `GET /knowledge-bases/admin/orphans` 에서 확인·삭제할 수 있다.
+  단, `detail` 이 `Authentication service timed out` 또는 `Authentication service error` 이면 생성 요청이 전송되지 않은 것이므로 바로 재시도해도 된다.
 """
 
 LIST_KNOWLEDGE_BASES_DESCRIPTION = """
@@ -166,6 +215,9 @@ Knowledge Base 목록 조회
 ## Errors
 - 401: 인증되지 않은 사용자
 - 500: 서버 내부 오류
+- 502: 지식베이스 서비스와 통신 중 오류 (요청 도중 연결 끊김 등)
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 GET_KNOWLEDGE_BASE_DESCRIPTION = """
@@ -174,7 +226,7 @@ Knowledge Base 상세 조회
 특정 Knowledge Base의 상세 정보를 조회합니다.
 
 ## Path Parameters
-- **knowledge_base_id** (int): 조회할 Knowledge Base ID
+- **surro_knowledge_id** (int): 조회할 Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`, 게이트웨이 `id` 아님)
 
 ## Response (KnowledgeBaseReadSchema)
 - Knowledge Base 상세 정보 및 파일 목록
@@ -183,6 +235,9 @@ Knowledge Base 상세 조회
 - 401: 인증되지 않은 사용자
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 서버 내부 오류
+- 502: 지식베이스 서비스와 통신 중 오류 (요청 도중 연결 끊김 등)
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 UPDATE_KNOWLEDGE_BASE_DESCRIPTION = """
@@ -191,7 +246,7 @@ Knowledge Base 수정
 Knowledge Base의 이름과 설명만 수정할 수 있습니다.
 
 ## Path Parameters
-- **knowledge_base_id** (int): 수정할 Knowledge Base ID
+- **surro_knowledge_id** (int): 수정할 Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`)
 
 ## Request Body
 - **name** (str, optional): 수정할 이름
@@ -205,6 +260,9 @@ Knowledge Base의 이름과 설명만 수정할 수 있습니다.
 - 401: 인증되지 않은 사용자
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 수정 중 서버 내부 오류
+- 502: 지식베이스 서비스와 통신 중 오류 (요청 도중 연결 끊김 등)
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 DELETE_KNOWLEDGE_BASE_DESCRIPTION = """
@@ -214,12 +272,15 @@ Knowledge Base를 삭제합니다.
 DB에서 Knowledge Base 정보를 삭제하고, Milvus에서 Collection을 삭제합니다.
 
 ## Path Parameters
-- **knowledge_base_id** (int): 삭제할 Knowledge Base ID
+- **surro_knowledge_id** (int): 삭제할 Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`)
 
 ## Errors
 - 401: 인증되지 않은 사용자
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 삭제 중 서버 내부 오류
+- 502: 지식베이스 서비스와 통신 중 오류 (요청 도중 연결 끊김 등)
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 ADD_FILE_DESCRIPTION = """
@@ -229,7 +290,7 @@ Knowledge Base에 파일 추가
 파일은 청크로 분할되고 임베딩되어 Milvus의 동일한 Collection에 Partition으로 추가됩니다.
 
 ## Path Parameters
-- **knowledge_base_id** (int): Knowledge Base ID
+- **surro_knowledge_id** (int): Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`)
 
 ## Request Body (multipart/form-data)
 - **file** (UploadFile, required): 추가할 문서 파일
@@ -242,6 +303,9 @@ Knowledge Base에 파일 추가
 - 401: 인증되지 않은 사용자
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 파일 추가 중 서버 내부 오류
+- 502: 지식베이스 서비스와 통신 중 오류 (요청 도중 연결 끊김 등)
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 DELETE_FILE_DESCRIPTION = """
@@ -251,7 +315,7 @@ Knowledge Base에서 특정 파일을 삭제합니다.
 DB에서 파일 정보를 삭제하고, Milvus에서 해당 Partition을 삭제합니다.
 
 ## Path Parameters
-- **knowledge_base_id** (int): Knowledge Base ID
+- **surro_knowledge_id** (int): Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`)
 - **file_id** (int): 삭제할 파일 ID
 
 ## Response (KnowledgeBaseReadSchema)
@@ -262,6 +326,9 @@ DB에서 파일 정보를 삭제하고, Milvus에서 해당 Partition을 삭제�
 - 401: 인증되지 않은 사용자
 - 404: Knowledge Base 또는 파일을 찾을 수 없음
 - 500: 파일 삭제 중 서버 내부 오류
+- 502: 지식베이스 서비스와 통신 중 오류 (요청 도중 연결 끊김 등)
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 SEARCH_KNOWLEDGE_BASE_DESCRIPTION = """
@@ -271,7 +338,7 @@ Knowledge Base에 저장된 문서를 검색합니다.
 Knowledge Base의 설정된 검색 방법(search_method), top_k, threshold를 사용하여 검색을 수행합니다.
 
 ## Path Parameters
-- **knowledge_base_id** (int): 검색할 Knowledge Base ID
+- **surro_knowledge_id** (int): 검색할 Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`)
 
 ## Request Body
 - **text** (str, required): 검색할 쿼리 텍스트
@@ -289,6 +356,9 @@ Knowledge Base의 설정된 검색 방법(search_method), top_k, threshold를 �
 - 401: 인증되지 않은 사용자
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 검색 중 서버 내부 오류
+- 502: 지식베이스 서비스와 통신 중 오류 (요청 도중 연결 끊김 등)
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
 
 SEARCH_RECORDS_DESCRIPTION = """
@@ -297,11 +367,11 @@ Knowledge Base 검색 기록 조회
 특정 Knowledge Base에 대한 검색 기록을 조회합니다.
 
 ## Path Parameters
-- **knowledge_base_id** (int): 조회할 Knowledge Base ID
+- **surro_knowledge_id** (int): 조회할 Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`)
 
 ## Response (List[KnowledgeBaseSearchRecordReadSchema])
 - **id** (int): 검색 기록 ID
-- **knowledge_base_id** (int): Knowledge Base ID
+- **surro_knowledge_id** (int): Knowledge Base ID (목록/생성 응답의 `surro_knowledge_id`)
 - **source** (str): Collection 이름
 - **text** (str): 검색 쿼리 텍스트
 - **created_at** (datetime): 검색 기록 생성 시간
@@ -310,7 +380,155 @@ Knowledge Base 검색 기록 조회
 - 401: 인증되지 않은 사용자
 - 404: Knowledge Base를 찾을 수 없음
 - 500: 서버 내부 오류
+- 502: 지식베이스 서비스와 통신 중 오류 (요청 도중 연결 끊김 등)
+- 503: 지식베이스 서비스 또는 인증 서비스에 연결할 수 없음 (업스트림 다운/네트워크 장애)
+- 504: 처리시간 초과 (콜드스타트 등)
 """
+
+
+LIST_ORPHAN_KNOWLEDGE_BASES_DESCRIPTION = """
+고아 Knowledge Base 목록 조회 (관리자 전용)
+
+게이트웨이 매핑이 없어 일반 경로로는 조회도 삭제도 불가능한 업스트림 Knowledge Base 를
+나열한다. 타임아웃 등으로 매핑 저장이 누락되면 이 상태가 된다.
+
+`업스트림 목록 − 게이트웨이 active 매핑` 을 **요청 시점에 실시간 대조**한다. 별도 스케줄러나
+캐시를 쓰지 않는다.
+
+## Response (OrphanKnowledgeBaseListResponse)
+- **is_protected** (bool): `true` 면 **복구 대기** — 이 KB 를 만든 생성 시도가 아직 살아 있어
+  곧 주인이 정해질 수 있다. 고아로 오인해 삭제하면 안 된다. 게이트웨이를 거치지 않고 만든 KB 나
+  이 판정이 도입되기 전에 만든 KB 는 보호되지 않는다
+- **protected_by** (str, optional): 지켜보는 시도의 요청자와 시각
+
+## Errors
+- 401: 인증되지 않은 사용자
+- 403: 관리자 권한 없음
+- 502: 지식베이스 서비스와 통신 중 오류 (요청 도중 연결 끊김 등)
+- 503: 업스트림이 빈 목록을 반환 — 전부 고아로 해석하지 않고 거부한다
+- 504: 처리시간 초과 (콜드스타트 등)
+"""
+
+DELETE_ORPHAN_KNOWLEDGE_BASE_DESCRIPTION = """
+고아 Knowledge Base 삭제 (관리자 전용)
+
+업스트림에서 삭제해 Milvus 컬렉션·오브젝트 스토리지를 회수한다. 게이트웨이에는 애초에 매핑이
+없으므로 로컬에서 지울 것이 없다.
+
+## Query Parameters
+- **force** (bool, optional): `is_protected` 인 대상도 삭제한다. 기본값 `false`
+
+## 안전장치
+- active 매핑이 있으면 고아가 아니므로 409 — 일반 삭제 경로를 쓸 것
+- 업스트림이 빈 목록을 반환하면 503
+- **복구 대기 상태면 409.** 안 지워서 생기는 손해는 자원 점유 며칠이고, 지워서 생기는 손해는
+  사용자가 10분 넘게 기다려 만든 KB 의 소실이라 기본값을 거부로 둔다
+- `force=true` 삭제는 감사로그에 강제 삭제로 남고, 이 KB 를 만든 생성 시도는 즉시 `abandoned` 가 된다
+- `force=true` 로 끊은 시도의 업스트림 생성이 이미 성공해 응답이 돌아오는 중이었다면, 그 요청은
+  삭제된 KB 를 가리키는 매핑을 남긴다. 사용자에게는 열리지 않는 카드로 보이므로 일반 삭제로
+  정리해야 한다. 생성 경로는 이 판정에 참여하지 않는다
+- 다른 작업이 같은 KB 를 처리 중이면 기다리지 않고 409 — 잠시 후 다시 호출하면 된다
+
+## Errors
+- 401: 인증되지 않은 사용자
+- 403: 관리자 권한 없음
+- 404: 업스트림에 해당 Knowledge Base 가 없음
+- 409: 고아가 아니거나(active 매핑 존재), 복구 대기 상태인데 `force` 가 없거나, 다른 작업이
+  같은 KB 를 처리 중
+- 502: 지식베이스 서비스와 통신 중 오류 (요청 도중 연결 끊김 등)
+- 503: 업스트림이 빈 목록을 반환
+- 504: 처리시간 초과 (콜드스타트 등)
+"""
+
+
+def _classify_failure(status_code: int) -> str:
+    """ 생성 실패를 생성 시도 상태 값으로 변경한다. """
+    if status_code >= 500 and status_code != 503:
+        return AttemptState.ORPHAN_SUSPECT
+    return AttemptState.ABANDONED
+
+
+def _claim_candidate(db: Session, attempt, candidate) -> bool:
+    """락 안에서 판정을 다시 하고 매핑을 만든다 — 성공하면 True."""
+    if not knowledge_base_crud.try_lock_surro_knowledge_id(db, candidate.id):
+        return False     # 다른 요청이 이 KB 를 다루는 중 — 다음 목록 조회에서 다시 시도한다
+    db.refresh(attempt)
+    # pending 은 복구 창이 닫힌 것만 여기 도달한다(get_recoverable_attempts).
+    if attempt.state not in (AttemptState.ORPHAN_SUSPECT, AttemptState.PENDING):
+        return False
+    if knowledge_base_crud.get_active_knowledge_base_by_surro_id(db, candidate.id):
+        return False
+
+    knowledge_base_crud.create_knowledge_base(
+        db=db,
+        name=candidate.name,
+        description=candidate.description,
+        created_by=attempt.member_id,
+        surro_knowledge_id=candidate.id,
+        collection_name=candidate.collection_name,
+    )
+    return True
+
+
+def _try_recover_orphans(db: Session, current_user, external_kbs) -> int:
+    """호출자의 고아 KB 복구 시도. 복구한 건수 반환.
+    시도가 실어 보낸 토큰을 가진 KB 가 정확히 하나이고 이름이 같을 때만 복구한다. """
+    now = datetime.now(timezone.utc)
+    attempts = knowledge_base_crud.get_recoverable_attempts(db, current_user.member_id, now)
+    if not attempts:
+        return 0
+
+    known_ids = knowledge_base_crud.get_known_surro_ids(db)
+    recovered = 0
+
+    for attempt in attempts:
+        token = attempt_token(attempt)
+        # 토큰은 업스트림 화면에 그대로 보여 description 을 복사한 KB 가 섞일 수 있다.
+        # 알려진 KB 를 빼고 세면 원본이 매핑·삭제된 뒤 복사본이 유일 후보가 되므로 전체에서 센다.
+        # 게이트웨이는 이름을 바꾸지 않고 보내므로 이름이 다르면 이 시도의 KB 가 아니다.
+        holders = [kb for kb in external_kbs if kb.attempt_token == token]
+        if len(holders) != 1 or holders[0].id in known_ids or holders[0].name != attempt.name:
+            continue
+        candidate = holders[0]
+
+        # 같은 이름·파일로 재시도에 성공했으면 원본은 복구하지 않고 정리 잡에 맡긴다.
+        if knowledge_base_crud.find_duplicate_success(db, attempt) is not None:
+            continue
+
+        if not _claim_candidate(db, attempt, candidate):
+            # claim 실패 후 트랜잭션을 종료해 락을 다음 후보까지 유지하지 않는다.
+            db.commit()
+            continue
+
+        knowledge_base_crud.mark_recovered(attempt.id, candidate.id)
+
+        # 같은 요청의 다음 시도가 방금 복구한 KB 를 다시 후보로 보지 않게 한다.
+        known_ids.add(candidate.id)
+        recovered += 1
+
+        emit(
+            db,
+            action=Action.CREATE,
+            resource_type=ResourceType.KNOWLEDGE_BASE,
+            actor_member_id="system:kb-orphan-recovery",
+            resource_id=str(candidate.id),
+            target_member_id=attempt.member_id,
+            request_id=attempt.request_id,
+            metadata={"recovered": True, "attempt_id": attempt.id, "name": candidate.name},
+        )
+        logger.info(
+            "Recovered orphan knowledge base: surro_id=%s, member_id=%s, attempt_id=%s",
+            candidate.id, attempt.member_id, attempt.id,
+        )
+
+    return recovered
+
+
+def _describe_protectors(attempts) -> Optional[str]:
+    """어떤 시도가 이 KB 를 지켜보고 있는지 (관리자 화면 표시용)."""
+    if not attempts:
+        return None
+    return ", ".join(f"{t.member_id} ({t.started_at.isoformat()})" for t in attempts)
 
 
 def _user_info(current_user) -> dict:
@@ -399,13 +617,13 @@ async def create_knowledge_base(
     name: str = Form(..., description="Knowledge Base 이름"),
     description: Optional[str] = Form(None, description="Knowledge Base 설명"),
     language_id: int = Form(..., description="언어 ID"),
-    embedding_model_id: int = Form(..., description="임베딩 모델 ID"),
-    chunk_size: int = Form(..., description="청크 크기"),
-    chunk_overlap: int = Form(..., description="청크 오버랩 크기"),
-    chunk_type_id: int = Form(..., description="청크 타입 ID"),
-    search_method_id: int = Form(..., description="검색 방법 ID"),
-    top_k: int = Form(..., description="검색 시 반환할 상위 k개 결과 수"),
-    threshold: float = Form(..., ge=0.0, le=1.0, description="검색 임계값 (0.0 ~ 1.0)"),
+    embedding_model_id: int = Form(..., description="임베딩 모델 ID (배포된 임베딩 모델만 가능)", examples=[13]),
+    chunk_size: int = Form(..., description="청크 크기 (권장 500, 범위 300~1000)", examples=[500]),
+    chunk_overlap: int = Form(..., description="청크 오버랩 (권장 chunk_size의 10~20%, chunk_size 미만)", examples=[50]),
+    chunk_type_id: int = Form(..., description="청크 타입 ID", examples=[1]),
+    search_method_id: int = Form(..., description="검색 방법 ID", examples=[1]),
+    top_k: int = Form(..., description="검색 시 반환할 상위 k개 결과 수 (권장 3~5, 0이면 결과 없음)", examples=[3]),
+    threshold: float = Form(..., description="검색 임계값 0.0~1.0 (권장 0.3~0.5)", examples=[0.4]),
     file: UploadFile = File(..., description="업로드할 문서 파일"),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
@@ -413,20 +631,48 @@ async def create_knowledge_base(
     """지식베이스 생성 (파일 업로드)"""
     user_info = _user_info(current_user)
 
-    external_kb = await knowledge_base_service.create_knowledge_base(
+    # 시도 레코드를 MLOps 호출 전에 남긴다. 응답을 받지 못해도 소유자와 복구 후보가 남는다.
+    attempt_id, token = knowledge_base_crud.create_attempt(
+        member_id=current_user.member_id,
         name=name,
-        description=description,
-        file=file,
-        language_id=language_id,
-        embedding_model_id=embedding_model_id,
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        chunk_type_id=chunk_type_id,
-        search_method_id=search_method_id,
-        top_k=top_k,
-        threshold=threshold,
-        user_info=user_info,
+        filename=file.filename,
+        request_id=getattr(request.state, "request_id", None),
     )
+
+    try:
+        external_kb = await knowledge_base_service.create_knowledge_base(
+            name=name,
+            # 응답을 못 받아도 업스트림 목록에서 이 시도의 KB 를 찾을 수 있도록 토큰을 실어 보낸다.
+            description=attach_token(description, token),
+            file=file,
+            language_id=language_id,
+            embedding_model_id=embedding_model_id,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            chunk_type_id=chunk_type_id,
+            search_method_id=search_method_id,
+            top_k=top_k,
+            threshold=threshold,
+            user_info=user_info,
+        )
+    except HTTPException as e:
+        knowledge_base_crud.finish_attempt(
+            attempt_id,
+            state=_classify_failure(e.status_code),
+            failure_kind=str(e.status_code),
+        )
+        raise
+    except Exception:
+        knowledge_base_crud.finish_attempt(
+            attempt_id, state=AttemptState.ORPHAN_SUSPECT, failure_kind="unknown"
+        )
+        raise
+    except BaseException:
+        # 클라이언트가 연결을 끊어도 이미 업스트림이 KB를 생성하고 있을 수 있어 orphan_suspect 상태로 남긴다. 
+        knowledge_base_crud.finish_attempt(
+            attempt_id, state=AttemptState.ORPHAN_SUSPECT, failure_kind="cancelled"
+        )
+        raise
 
     try:
         db_kb = knowledge_base_crud.create_knowledge_base(
@@ -437,11 +683,21 @@ async def create_knowledge_base(
             surro_knowledge_id=external_kb.id,
             collection_name=external_kb.collection_name,
         )
+        knowledge_base_crud.finish_attempt(
+            attempt_id, state=AttemptState.SUCCEEDED, resolved_surro_id=external_kb.id
+        )
         logger.info(
             f"Created knowledge base: surro_id={external_kb.id}, "
             f"member_id={current_user.member_id}"
         )
     except Exception as mapping_error:
+        # 업스트림에는 만들어졌는데 카드만 없는 상태 — 고아다. surro_id 는 알고 있다.
+        knowledge_base_crud.finish_attempt(
+            attempt_id,
+            state=AttemptState.ORPHAN_SUSPECT,
+            resolved_surro_id=external_kb.id,
+            failure_kind="mapping_write_failed",
+        )
         logger.error(f"Failed to create knowledge base: {str(mapping_error)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -510,14 +766,17 @@ async def get_knowledge_bases(
         tie_breaker=_KB_SORT_TIE_BREAKER,
     )
 
-    knowledge_bases, total = knowledge_base_crud.get_knowledge_bases(
-        db=db,
-        skip=skip,
-        limit=limit,
-        search=search,
-        member_id=current_user.member_id,
-        order_by=order_by,
-    )
+    def _load_page():
+        return knowledge_base_crud.get_knowledge_bases(
+            db=db,
+            skip=skip,
+            limit=limit,
+            search=search,
+            member_id=current_user.member_id,
+            order_by=order_by,
+        )
+
+    knowledge_bases, total = _load_page()
 
     try:
         external_kbs = await knowledge_base_service.get_knowledge_bases(user_info=_user_info(current_user))
@@ -530,6 +789,17 @@ async def get_knowledge_bases(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to fetch knowledge base data from external API: {str(e)}",
         )
+
+    # 부가 기능이 주 기능을 깨면 사용자가 목록 자체를 못 본다.
+    try:
+        if _try_recover_orphans(db, current_user, external_kbs):
+            knowledge_bases, total = _load_page()
+    except Exception:
+        # 일부만 복구하고 실패했을 수 있다. 그 커밋이 위에서 읽어둔 객체를 만료시켰으므로,
+        # 롤백하고 다시 읽지 않으면 아래 응답 조립이 깨진 트랜잭션에서 지연 로드를 시도한다.
+        db.rollback()
+        knowledge_bases, total = _load_page()
+        logger.exception("Orphan recovery failed; knowledge base list is unaffected")
 
     response_data = []
     for kb in knowledge_bases:
@@ -554,19 +824,161 @@ async def get_knowledge_bases(
     return KnowledgeBaseListResponse(data=response_data, total=total, page=page, size=size)
 
 
+# 아래 두 라우트는 "/{surro_knowledge_id}" 보다 먼저 등록되어야 한다.
+# FastAPI 는 등록 순서대로 매칭하므로, 뒤에 두면 "admin" 이 경로 파라미터로 파싱되려다 422 가 난다.
 @router.get(
-    "/{knowledge_base_id}",
+    "/admin/orphans",
+    response_model=OrphanKnowledgeBaseListResponse,
+    summary="List Orphan Knowledge Bases",
+    description=LIST_ORPHAN_KNOWLEDGE_BASES_DESCRIPTION,
+)
+async def list_orphan_knowledge_bases(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_admin_user),
+):
+    """고아 Knowledge Base 목록 — 업스트림 목록 − 게이트웨이 active 매핑"""
+    external_kbs = await knowledge_base_service.get_knowledge_bases(user_info=_user_info(current_user))
+    if not external_kbs:
+        # 빈 응답을 "전부 고아"로 해석하면 안 된다 (scheduler.py 의 reconcile 선례).
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Upstream returned no knowledge bases; refusing to compute orphans",
+        )
+
+    active_ids = knowledge_base_crud.get_active_surro_ids(db)
+    live_attempts = knowledge_base_crud.get_live_attempts(db, datetime.now(timezone.utc))
+
+    items = []
+    for external_kb in external_kbs:
+        if external_kb.id in active_ids:
+            continue
+        protectors = knowledge_base_crud.find_protecting_attempts(external_kb, live_attempts)
+        items.append(
+            OrphanKnowledgeBaseItem(
+                surro_knowledge_id=external_kb.id,
+                name=external_kb.name,
+                collection_name=external_kb.collection_name,
+                created_at=external_kb.created_at,
+                is_protected=bool(protectors),
+                protected_by=_describe_protectors(protectors),
+            )
+        )
+
+    return OrphanKnowledgeBaseListResponse(data=items, total=len(items))
+
+
+@router.delete(
+    "/admin/orphans/{surro_knowledge_id}",
+    response_model=OrphanKnowledgeBaseDeleteResponse,
+    summary="Delete Orphan Knowledge Base",
+    description=DELETE_ORPHAN_KNOWLEDGE_BASE_DESCRIPTION,
+)
+async def delete_orphan_knowledge_base(
+    request: Request,
+    surro_knowledge_id: int = Path(..., description="삭제할 업스트림 Knowledge Base ID"),
+    force: bool = Query(False, description="복구 대기(is_protected) 상태도 삭제한다"),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_admin_user),
+):
+    """고아 Knowledge Base 를 업스트림에서 삭제해 자원을 회수한다."""
+    # active 매핑이 있으면 고아가 아니다 — 일반 삭제 경로를 써야 한다.
+    if knowledge_base_crud.get_active_knowledge_base_by_surro_id(db, surro_knowledge_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Not an orphan: active gateway mapping exists",
+        )
+
+    external_kbs = await knowledge_base_service.get_knowledge_bases(user_info=_user_info(current_user))
+    if not external_kbs:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Upstream returned no knowledge bases; refusing to delete",
+        )
+
+    target = next((kb for kb in external_kbs if kb.id == surro_knowledge_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Knowledge base not found in external service")
+
+    if not knowledge_base_crud.try_lock_surro_knowledge_id(db, surro_knowledge_id):
+        # 복구처럼 조용히 건너뛰면 관리자는 성공 응답을 받고 KB 는 남는다. 실패를 돌려준다.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Another operation is holding this knowledge base; retry shortly",
+        )
+    if knowledge_base_crud.get_active_knowledge_base_by_surro_id(db, surro_knowledge_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Not an orphan: active gateway mapping exists",
+        )
+
+    live_attempts = knowledge_base_crud.get_live_attempts(db, datetime.now(timezone.utc))
+    protectors = knowledge_base_crud.find_protecting_attempts(target, live_attempts)
+    if protectors and not force:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Recovery pending: a live create attempt may still claim this knowledge base. "
+                "Use ?force=true to delete anyway."
+            ),
+        )
+    # 보호 집합이 곧 이 KB 를 가져갈 수 있는 시도다(토큰의 주인) — 그대로 선점한다.
+    abandoned = knowledge_base_crud.abandon_attempts(db, protectors)
+    db.commit()
+
+    deleted = False
+    try:
+        deleted = await knowledge_base_service.delete_knowledge_base(
+            surro_knowledge_id, _user_info(current_user)
+        )
+    finally:
+        if not deleted and abandoned:
+            # 업스트림 삭제 실패 — 선점한 시도는 이미 abandoned 로 커밋되었고 되살리지 않는다(삭제가 실제로
+            # 닿았는지 알 수 없다). KB 는 고아 목록에 남아 재삭제나 정리 잡이 회수한다.
+            logger.error(
+                f"Orphan delete failed after abandoning attempts: surro_id={surro_knowledge_id}, "
+                f"abandoned_attempts={abandoned}, member_id={current_user.member_id}"
+            )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Knowledge base not found in external service")
+
+    emit_from_request(
+        db, request,
+        action=Action.DELETE,
+        resource_type=ResourceType.KNOWLEDGE_BASE,
+        actor_member_id=current_user.member_id,
+        resource_id=str(surro_knowledge_id),
+        metadata={
+            "orphan": True,
+            "forced": bool(protectors),
+            "abandoned_attempts": abandoned,
+            "name": target.name,
+        },
+    )
+    logger.info(
+        f"Deleted orphan knowledge base: surro_id={surro_knowledge_id}, "
+        f"forced={bool(protectors)}, abandoned_attempts={abandoned}, "
+        f"member_id={current_user.member_id}"
+    )
+
+    return OrphanKnowledgeBaseDeleteResponse(
+        surro_knowledge_id=surro_knowledge_id,
+        forced=bool(protectors),
+        abandoned_attempts=abandoned,
+    )
+
+
+@router.get(
+    "/{surro_knowledge_id}",
     response_model=KnowledgeBaseDetailResponse,
     summary="Get Knowledge Base",
     description=GET_KNOWLEDGE_BASE_DESCRIPTION,
 )
 async def get_knowledge_base(
-    knowledge_base_id: int,
+    surro_knowledge_id: int = Path(..., description=_KB_ID_DESC),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """지식베이스 상세 정보 조회"""
-    surro_knowledge_id = knowledge_base_id
     db_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id,
@@ -603,20 +1015,19 @@ async def get_knowledge_base(
 
 
 @router.put(
-    "/{knowledge_base_id}",
+    "/{surro_knowledge_id}",
     response_model=KnowledgeBaseResponse,
     summary="Update Knowledge Base",
     description=UPDATE_KNOWLEDGE_BASE_DESCRIPTION,
 )
 async def update_knowledge_base(
-    knowledge_base_id: int,
     knowledge_base_update: KnowledgeBaseUpdate,
     request: Request,
+    surro_knowledge_id: int = Path(..., description=_KB_ID_DESC),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """지식베이스 정보 수정"""
-    surro_knowledge_id = knowledge_base_id
     existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id,
@@ -660,7 +1071,7 @@ async def update_knowledge_base(
         action=Action.UPDATE,
         resource_type=ResourceType.KNOWLEDGE_BASE,
         actor_member_id=current_user.member_id,
-        resource_id=str(knowledge_base_id),
+        resource_id=str(surro_knowledge_id),
     )
     return KnowledgeBaseResponse(
         id=existing_kb.id,
@@ -679,19 +1090,18 @@ async def update_knowledge_base(
 
 
 @router.delete(
-    "/{knowledge_base_id}",
+    "/{surro_knowledge_id}",
     status_code=204,
     summary="Delete Knowledge Base",
     description=DELETE_KNOWLEDGE_BASE_DESCRIPTION,
 )
 async def delete_knowledge_base(
-    knowledge_base_id: int,
     request: Request,
+    surro_knowledge_id: int = Path(..., description=_KB_ID_DESC),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """지식베이스 삭제"""
-    surro_knowledge_id = knowledge_base_id
     existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id,
@@ -704,6 +1114,8 @@ async def delete_knowledge_base(
 
     try:
         await knowledge_base_service.delete_knowledge_base(surro_knowledge_id, _user_info(current_user))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete external knowledge base: {str(e)}")
 
@@ -725,25 +1137,24 @@ async def delete_knowledge_base(
         action=Action.DELETE,
         resource_type=ResourceType.KNOWLEDGE_BASE,
         actor_member_id=current_user.member_id,
-        resource_id=str(knowledge_base_id),
+        resource_id=str(surro_knowledge_id),
     )
     return None
 
 
 @router.post(
-    "/{knowledge_base_id}/files",
+    "/{surro_knowledge_id}/files",
     response_model=KnowledgeBaseDetailResponse,
     summary="Add File To Knowledge Base",
     description=ADD_FILE_DESCRIPTION,
 )
 async def add_file_to_knowledge_base(
-    knowledge_base_id: int,
+    surro_knowledge_id: int = Path(..., description=_KB_ID_DESC),
     file: UploadFile = File(..., description="추가할 문서 파일"),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """지식베이스에 파일 추가"""
-    surro_knowledge_id = knowledge_base_id
     existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id,
@@ -778,19 +1189,18 @@ async def add_file_to_knowledge_base(
 
 
 @router.delete(
-    "/{knowledge_base_id}/files/{file_id}",
+    "/{surro_knowledge_id}/files/{file_id}",
     response_model=KnowledgeBaseDetailResponse,
     summary="Delete File From Knowledge Base",
     description=DELETE_FILE_DESCRIPTION,
 )
 async def delete_file_from_knowledge_base(
-    knowledge_base_id: int,
-    file_id: int,
+    surro_knowledge_id: int = Path(..., description=_KB_ID_DESC),
+    file_id: int = Path(..., description="삭제할 파일 ID (상세 응답 `files[].id`)"),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """지식베이스에서 파일 삭제"""
-    surro_knowledge_id = knowledge_base_id
     existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id,
@@ -829,19 +1239,18 @@ async def delete_file_from_knowledge_base(
 
 
 @router.post(
-    "/{knowledge_base_id}/search",
+    "/{surro_knowledge_id}/search",
     response_model=KnowledgeBaseSearchResponse,
     summary="Search Knowledge Base",
     description=SEARCH_KNOWLEDGE_BASE_DESCRIPTION,
 )
 async def search_knowledge_base(
-    knowledge_base_id: int,
     search_request: KnowledgeBaseSearchRequest,
+    surro_knowledge_id: int = Path(..., description=_KB_ID_DESC),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """지식베이스 검색"""
-    surro_knowledge_id = knowledge_base_id
     existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id,
@@ -860,18 +1269,17 @@ async def search_knowledge_base(
 
 
 @router.get(
-    "/{knowledge_base_id}/search-records",
+    "/{surro_knowledge_id}/search-records",
     response_model=List[KnowledgeBaseSearchRecord],
     summary="Get Knowledge Base Search Records",
     description=SEARCH_RECORDS_DESCRIPTION,
 )
 async def get_search_records(
-    knowledge_base_id: int,
+    surro_knowledge_id: int = Path(..., description=_KB_ID_DESC),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
     """지식베이스 검색 기록 조회"""
-    surro_knowledge_id = knowledge_base_id
     existing_kb = knowledge_base_crud.get_active_knowledge_base_by_surro_id(
         db=db,
         surro_knowledge_id=surro_knowledge_id,

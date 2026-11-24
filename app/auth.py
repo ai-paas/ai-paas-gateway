@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import bcrypt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, WebSocket, WebSocketException, status
 from fastapi.security import HTTPBearer, OAuth2PasswordBearer
 from jose import JWTError, jwt
 from sqlalchemy.orm import Session
@@ -130,6 +130,72 @@ def get_current_admin_user(current_user=Depends(get_current_user)):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin access required",
+        )
+    return current_user
+
+
+WS_BEARER_SUBPROTOCOL = "bearer"
+
+
+def ws_bearer_subprotocol(websocket: WebSocket) -> Optional[str]:
+    """클라이언트가 bearer 서브프로토콜을 제안했으면 accept 시 echo 할 값을 돌려준다.
+
+    브라우저는 offer 한 서브프로토콜 중 하나를 서버가 돌려주지 않으면 연결을 끊는다.
+    """
+    offered = websocket.headers.get("sec-websocket-protocol", "")
+    parts = [p.strip() for p in offered.split(",") if p.strip()]
+    if parts and parts[0].lower() == WS_BEARER_SUBPROTOCOL:
+        return WS_BEARER_SUBPROTOCOL
+    return None
+
+
+def _ws_extract_token(websocket: WebSocket) -> str:
+    """WebSocket 핸드셰이크에서 access token 추출.
+
+    - 서버-서버 클라이언트: `Authorization: Bearer <token>` 헤더
+    - 브라우저: 헤더를 붙일 수 없으므로 `new WebSocket(url, ["bearer", "<token>"])`
+      (토큰을 query string 에 싣지 않는다 — 액세스 로그·리버스 프록시에 남는다)
+    """
+    header = websocket.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        token = header[7:].strip()
+        if token:
+            return token
+
+    parts = [p.strip() for p in websocket.headers.get("sec-websocket-protocol", "").split(",") if p.strip()]
+    if len(parts) >= 2 and parts[0].lower() == WS_BEARER_SUBPROTOCOL:
+        return parts[1]
+
+    raise WebSocketException(
+        code=status.WS_1008_POLICY_VIOLATION,
+        reason="Missing credentials",
+    )
+
+
+def get_ws_current_user(
+    websocket: WebSocket,
+    db: Session = Depends(get_db),
+):
+    """WebSocket 용 `get_current_user`. 실패 시 핸드셰이크 단계에서 거부한다."""
+    token = _ws_extract_token(websocket)
+    try:
+        token_data = AuthService.verify_token(token)
+        if token_data["type"] != "access":
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
+        member = member_crud.get_member(db, token_data["member_id"])
+        if member is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    except HTTPException as exc:
+        raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION, reason=exc.detail)
+    return member
+
+
+def get_ws_admin_user(current_user=Depends(get_ws_current_user)):
+    """WebSocket 용 `get_current_admin_user`."""
+    if current_user.role != "admin":
+        raise WebSocketException(
+            code=status.WS_1008_POLICY_VIOLATION,
+            reason="Admin access required",
         )
     return current_user
 

@@ -3,6 +3,8 @@ from typing import List, Optional, Dict, Any
 
 from pydantic import BaseModel, Field, ConfigDict
 
+from app.schemas.dataset import DatasetKindEnum
+
 
 class ExperimentUpdateRequest(BaseModel):
     """실험 수정 요청 스키마"""
@@ -22,12 +24,14 @@ class ExperimentReferenceModel(BaseModel):
     """실험 참조 모델 정보"""
     id: int = Field(..., description="모델 ID")
     name: Optional[str] = Field(None, description="모델 이름")
+    recommended_hparams: Dict[str, str] = Field(default_factory=dict)
 
 
 class ExperimentDataset(BaseModel):
     """실험 데이터셋 정보"""
     id: int = Field(..., description="데이터셋 ID")
     name: Optional[str] = Field(None, description="데이터셋 이름")
+    kind: Optional[DatasetKindEnum] = Field(None, description="데이터셋 학습 태스크 분류")
 
 
 class LossHistoryItem(BaseModel):
@@ -79,6 +83,7 @@ class ExperimentDetailResponse(BaseModel):
     hyperparameters: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="하이퍼파라미터 목록")
     created_at: Optional[datetime] = Field(None, description="실험 생성 시각")
     updated_at: Optional[datetime] = Field(None, description="실험 수정 시각")
+    mlflow_run_id: Optional[str] = Field(None, description="MLflow 실행 ID")
     registration_status: Optional[str] = Field(None, description="모델 등록 상태")
     registered_model_id: Optional[int] = Field(None, description="등록된 모델 ID")
     train_msg: Optional[str] = Field(None, description="학습 메시지")

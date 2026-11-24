@@ -31,6 +31,20 @@ _MEMBER_SORT_FIELDS = {
 }
 _MEMBER_SORT_DEFAULT = [(Member.created_at, True)]
 _MEMBER_SORT_TIE_BREAKER = Member.member_id
+_ADMIN_ONLY_MEMBER_UPDATE_FIELDS = {"member_id", "role", "is_active"}
+
+
+def _reject_admin_only_member_update_fields(member_update: MemberUpdate, current_user: Member) -> None:
+    if getattr(current_user, "role", None) == "admin":
+        return
+
+    requested_fields = set(getattr(member_update, "model_fields_set", set()))
+    forbidden_fields = sorted(_ADMIN_ONLY_MEMBER_UPDATE_FIELDS & requested_fields)
+    if forbidden_fields:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Admin-only member fields cannot be updated: {', '.join(forbidden_fields)}",
+        )
 
 
 @router.post("/", response_model=MemberResponse)
@@ -129,6 +143,7 @@ def update_member(
     """member_id로 멤버 정보 수정 (본인 또는 관리자만 가능)"""
     # 권한 검증
     check_member_access(current_user, member_id)
+    _reject_admin_only_member_update_fields(member_update, current_user)
 
     # 기존 멤버 존재 여부 확인
     existing_member = member_crud.get_member(db=db, member_id=member_id, include_inactive=True)
